@@ -1,4 +1,4 @@
-"""Django block/context interoperability with native variable rendering."""
+"""Django parser/node interoperability with native variable rendering."""
 
 from django.template import Context
 from django.template.context import make_context
@@ -22,7 +22,7 @@ class NativeVariableNode(VariableNode):
             raise
 
 
-class InheritanceParser(Parser):
+class NativeParser(Parser):
     def __init__(self, source, engine, origin):
         super().__init__(
             DebugLexer(source).tokenize(),
@@ -44,9 +44,9 @@ class InheritanceParser(Parser):
         super().extend_nodelist(nodelist, node, token)
 
 
-class InheritanceTemplate(Template):
+class InteropTemplate(Template):
     def compile_nodelist(self):
-        parser = InheritanceParser(self.source, self.engine, self.origin)
+        parser = NativeParser(self.source, self.engine, self.origin)
         try:
             nodes = parser.parse()
             self.extra_data = parser.extra_data
@@ -69,10 +69,10 @@ class InheritanceTemplate(Template):
         return super().render(context)
 
 
-def compile_inheritance(source, engine, filename=None, template_name=None):
+def compile_template(source, engine, filename=None, template_name=None):
     from django.template.base import Origin
 
-    return InheritanceTemplate(
+    return InteropTemplate(
         source,
         origin=Origin(filename or "<unknown source>", template_name=template_name),
         name=template_name,
@@ -102,7 +102,7 @@ def find_template(engine, name, skip=None):
                 except TemplateDoesNotExist:
                     tried.append((origin, "Source does not exist"))
                     continue
-                template = InheritanceTemplate(contents, origin, name, engine)
+                template = InteropTemplate(contents, origin, name, engine)
                 if key is not None:
                     loader._cache_template(key, template)
                 return template, origin

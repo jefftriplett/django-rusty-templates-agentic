@@ -889,7 +889,7 @@ pub mod django_rusty_templates {
             skip: Option<Bound<'py, PyAny>>,
         ) -> PyResult<Bound<'py, PyAny>> {
             let _ = dirs;
-            py.import("django_rusty_templates.inheritance")?
+            py.import("django_rusty_templates.interop")?
                 .getattr("find_template")?
                 .call1((
                     Self {
@@ -1223,13 +1223,13 @@ pub mod django_rusty_templates {
                 Ok(nodes) => nodes,
                 Err(crate::parse::PyParseError::PyErr(error))
                     if error.is_instance_of::<PyNotImplementedError>(py)
-                        && ["block", "extends"].iter().any(|tag| {
+                        && ["block", "extends", "Fully custom tag"].iter().any(|tag| {
                             error.value(py).to_string() == format!("not yet implemented: {tag}")
                         }) =>
                 {
                     python_renderer = Some(Arc::new(
-                        py.import("django_rusty_templates.inheritance")?
-                            .getattr("compile_inheritance")?
+                        py.import("django_rusty_templates.interop")?
+                            .getattr("compile_template")?
                             .call1((
                                 template,
                                 PyEngine {
@@ -1276,13 +1276,13 @@ pub mod django_rusty_templates {
                 Ok(nodes) => nodes,
                 Err(crate::parse::PyParseError::PyErr(error))
                     if error.is_instance_of::<PyNotImplementedError>(py)
-                        && ["block", "extends"].iter().any(|tag| {
+                        && ["block", "extends", "Fully custom tag"].iter().any(|tag| {
                             error.value(py).to_string() == format!("not yet implemented: {tag}")
                         }) =>
                 {
                     python_renderer = Some(Arc::new(
-                        py.import("django_rusty_templates.inheritance")?
-                            .getattr("compile_inheritance")?
+                        py.import("django_rusty_templates.interop")?
+                            .getattr("compile_template")?
                             .call1((
                                 &template,
                                 PyEngine {
@@ -1408,8 +1408,8 @@ pub mod django_rusty_templates {
                     .call_method1("bind_origin", (self.origin(),))?;
                 return Ok(renderer.bind(py).clone());
             }
-            py.import("django_rusty_templates.inheritance")?
-                .getattr("compile_inheritance")?
+            py.import("django_rusty_templates.interop")?
+                .getattr("compile_template")?
                 .call1((
                     self.template.as_str(),
                     PyEngine {
@@ -1438,6 +1438,14 @@ pub mod django_rusty_templates {
                     .extract()
             } else {
                 self.py_render(py, Some(context), None)
+            }
+        }
+
+        #[getter]
+        fn extra_data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+            match &self.python_renderer {
+                Some(renderer) => renderer.bind(py).getattr("extra_data"),
+                None => Ok(PyDict::new(py).into_any()),
             }
         }
 

@@ -2,7 +2,7 @@ import pytest
 from django.template import Context, TemplateSyntaxError
 
 from django_rusty_templates import Engine
-from django_rusty_templates.inheritance import NativeVariableNode
+from django_rusty_templates.interop import NativeVariableNode
 
 
 def engine_with_templates(templates):
