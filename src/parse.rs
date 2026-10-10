@@ -159,6 +159,49 @@ impl Filter {
         left: TagElement,
         right: Option<Argument>,
     ) -> Result<Self, ParseError> {
+        let django_filter = match parser.template.content(at) {
+            "pluralize" => Some(("pluralize", false, true)),
+            "join" => Some(("join", true, true)),
+            "ljust" => Some(("ljust", true, true)),
+            "rjust" => Some(("rjust", true, true)),
+            "slice" => Some(("slice", true, true)),
+            "stringformat" => Some(("stringformat", true, true)),
+            "truncatechars" => Some(("truncatechars", true, true)),
+            "truncatewords" => Some(("truncatewords", true, true)),
+            "time" => Some(("time", false, true)),
+            "urlencode" => Some(("urlencode", false, true)),
+            "json_script" => Some(("json_script", false, true)),
+            "floatformat" => Some(("floatformat", false, true)),
+            "unordered_list" => Some(("unordered_list", false, false)),
+            "make_list" => Some(("make_list", false, false)),
+            "escapeseq" => Some(("escapeseq", false, false)),
+            "iriencode" => Some(("iriencode", false, false)),
+            "random" => Some(("random", false, false)),
+            "phone2numeric" => Some(("phone2numeric", false, false)),
+            "striptags" => Some(("striptags", false, false)),
+            "linebreaks" => Some(("linebreaks", false, false)),
+            "linebreaksbr" => Some(("linebreaksbr", false, false)),
+            "linenumbers" => Some(("linenumbers", false, false)),
+            "first" => Some(("first", false, false)),
+            _ => None,
+        };
+        if let Some((name, required, accepts_argument)) = django_filter {
+            if required && right.is_none() {
+                return Err(ParseError::MissingArgument { at: at.into() });
+            }
+            if !accepts_argument && let Some(right) = right {
+                return Err(unexpected_argument(name, right));
+            }
+            return Ok(Self {
+                at,
+                all_at,
+                left,
+                filter: FilterType::Django(DjangoFilter {
+                    name,
+                    argument: right,
+                }),
+            });
+        }
         let filter = match parser.template.content(at) {
             "add" => match right {
                 Some(right) => FilterType::Add(AddFilter::new(right)),
@@ -226,10 +269,6 @@ impl Filter {
                 Some(right) => return Err(unexpected_argument("length", right)),
                 None => FilterType::Length(LengthFilter),
             },
-            "pluralize" => FilterType::Django(DjangoFilter {
-                name: "pluralize",
-                argument: right,
-            }),
             "safe" => match right {
                 Some(right) => return Err(unexpected_argument("safe", right)),
                 None => FilterType::Safe(SafeFilter),
