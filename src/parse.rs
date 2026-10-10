@@ -1694,6 +1694,17 @@ impl<'t, 'py> Parser<'t, 'py> {
     }
 
     fn parse_now(&mut self, parts: TagParts) -> Result<Now, PyParseError> {
+        let version = self.py.import("django")?.getattr("VERSION")?;
+        let series = (
+            version.get_item(0)?.extract::<u8>()?,
+            version.get_item(1)?.extract::<u8>()?,
+        );
+        if series >= (6, 2) {
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "not yet implemented: Django 6.2 now expressions",
+            )
+            .into());
+        }
         let mut lexer = NowLexer::new(self.template, parts);
 
         let format_at = lexer.lex_format().map_err(ParseError::from)?;

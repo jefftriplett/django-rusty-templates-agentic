@@ -83,7 +83,9 @@ def assert_parse_error(request):
                 exception = type(reference_error)
                 rusty_exception = None
                 django_message = str(reference_error)
-                if request.param == "django":
+                if request.param == "django" or (
+                    VERSION >= (6, 2) and "{% now" in template
+                ):
                     message = django_message
             else:
                 # Expressions such as positive exponents became valid in 6.0.
