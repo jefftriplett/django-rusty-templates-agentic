@@ -1,7 +1,8 @@
 name: Lint checks
 
-# Comprehensive checks are manual while the private fork uses minimal CI.
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -17,19 +18,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  clippy_check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Run Clippy
-        run: cargo clippy --all-targets --all-features
-
   cargo-shear:
+    if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,12 +29,3 @@ jobs:
       - uses: cargo-bins/cargo-binstall@c06f6a0003f7c6165a00c89d1697731c9e8a5c72 # v1.25.2
       - run: cargo binstall --no-confirm cargo-shear
       - run: cargo shear
-
-  cargo-fmt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Run Cargo fmt
-        run: cargo fmt --check

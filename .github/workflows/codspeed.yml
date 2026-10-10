@@ -2,8 +2,9 @@
 # See https://codspeed.io/docs/guides/how-to-benchmark-rust-code
 name: CodSpeed Benchmarks
 
-# Comprehensive checks are manual while the private fork uses minimal CI.
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions: # optional for public repositories
@@ -17,6 +18,8 @@ concurrency:
 
 jobs:
   benchmarks:
+    if: vars.ENABLE_CODSPEED == 'true' && (github.event_name == 'workflow_dispatch' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository))
+    timeout-minutes: 20
     name: Run benchmarks
     runs-on: ubuntu-latest
     steps:
@@ -31,9 +34,6 @@ jobs:
           cache-target: release
           bins: cargo-codspeed
 
-      - name: Build the benchmark target(s)
-        run: cargo codspeed build -p dtl_benchmark
-
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -43,12 +43,19 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: |
+          uv sync --python 3.14
+          uv run maturin develop
+          sudo apt-get install -y gettext
+          uv run -m django compilemessages
+
+      - name: Build the benchmark target(s)
+        run: uv run cargo codspeed build -p dtl_benchmark
 
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@f842b9a3ffe213dbb81768fd7f7eeb4dfcf1c369 # v5.4.2
         with:
           mode: simulation
           run: |
-            cargo codspeed run -p dtl_benchmark
+            uv run cargo codspeed run -p dtl_benchmark
             uv run pytest tests/ --codspeed

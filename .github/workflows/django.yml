@@ -1,0 +1,134 @@
+name: Django conformance
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
+    name: Django ${{ matrix.django }} / Python 3.13
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        django: ["5.2", "6.0", "6.1", "6.2"]
+    env:
+      DJANGO_SERIES: ${{ matrix.django }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: branch
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: base
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            branch -> target
+            base -> target
+          shared-key: django-py313
+      - name: Install gettext
+        run: sudo apt-get install -y gettext
+      - name: Build PR extension
+        working-directory: branch
+        run: |
+          uv sync --python 3.13
+          uv run maturin develop
+          uv run -m django compilemessages
+      - name: Run unchanged Django tests (PR)
+        id: branch
+        continue-on-error: true
+        working-directory: branch
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/results"
+          uv run scripts/run_django_test_suite.py --django-version "$DJANGO_SERIES"             --parsed-output "$GITHUB_WORKSPACE/results/branch-$DJANGO_SERIES.txt"             --json-output "$GITHUB_WORKSPACE/results/branch-$DJANGO_SERIES.json"             --raw-output "$GITHUB_WORKSPACE/results/branch-$DJANGO_SERIES.log"
+      - name: Build base extension
+        working-directory: base
+        run: |
+          uv sync --python 3.13
+          uv run maturin develop
+          uv run -m django compilemessages
+      - name: Run unchanged Django tests (base, identical reference)
+        id: base
+        continue-on-error: true
+        working-directory: base
+        run: |
+          uv run scripts/run_django_test_suite.py --django-version "$DJANGO_SERIES"             --django-checkout "$GITHUB_WORKSPACE/branch/scripts/.django-$DJANGO_SERIES"             --parsed-output "$GITHUB_WORKSPACE/results/base-$DJANGO_SERIES.txt"             --json-output "$GITHUB_WORKSPACE/results/base-$DJANGO_SERIES.json"             --raw-output "$GITHUB_WORKSPACE/results/base-$DJANGO_SERIES.log"
+      - name: Compare structured results
+        working-directory: branch
+        run: |
+          uv run scripts/compare_django_results.py             "$GITHUB_WORKSPACE/results/base-$DJANGO_SERIES.json"             "$GITHUB_WORKSPACE/results/branch-$DJANGO_SERIES.json"             --output "$GITHUB_WORKSPACE/results/comment-$DJANGO_SERIES.md"
+          cat "$GITHUB_WORKSPACE/results/comment-$DJANGO_SERIES.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Save audit results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: django-results-${{ matrix.django }}
+          path: results/
+          retention-days: 7
+      - name: Preserve conformance failure status
+        if: steps.branch.outcome == 'failure' || steps.base.outcome == 'failure'
+        run: exit 1
+
+  comment:
+    needs: compare
+    if: >-
+      always() && github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: django-results-*
+          path: results
+          merge-multiple: true
+      - name: Assemble conformance summary
+        run: |
+          echo '<!-- generated-comment ecosystem -->' > test-diff-result
+          echo '## Django template conformance' >> test-diff-result
+          for series in 5.2 6.0 6.1 6.2; do
+            if [[ -f "results/comment-$series.md" ]]; then
+              cat "results/comment-$series.md" >> test-diff-result
+            else
+              echo "Django $series: comparison did not complete; see workflow logs." >> test-diff-result
+            fi
+          done
+      - name: Find existing comment
+        uses: peter-evans/find-comment@b30e6a3c0ed37e7c023ccd3f1db5c6c0b0c23aad # v4.0.0
+        id: find-comment
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: github-actions[bot]
+          body-includes: '<!-- generated-comment ecosystem -->'
+      - name: Create or update comment
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
+        with:
+          comment-id: ${{ steps.find-comment.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: test-diff-result
+          edit-mode: replace
