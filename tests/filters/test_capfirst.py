@@ -61,3 +61,15 @@ def test_capfirt_unexpected_argument(assert_parse_error):
         django_message=snapshot("capfirst requires 1 arguments, 2 provided"),
         rusty_message=rusty_message,
     )
+
+
+@pytest.mark.parametrize("autoescape", [True, False])
+def test_capfirst_center_chain_preserves_padding_and_safety(assert_render, autoescape):
+    source = '{{ a|capfirst|center:"7" }}.{{ b|capfirst|center:"7" }}'
+    if not autoescape:
+        source = "{% autoescape off %}" + source + "{% endautoescape %}"
+    assert_render(
+        source,
+        {"a": "a < b", "b": mark_safe("a < b")},
+        " A &lt; b . A < b " if autoescape else " A < b . A < b ",
+    )

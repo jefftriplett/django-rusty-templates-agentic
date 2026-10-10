@@ -34,6 +34,7 @@ use crate::template::django_rusty_templates::{
 };
 use crate::utils::PyResultMethods;
 
+static RENDER_FIRSTOF_VALUE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static STRIP_SPACES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DEBUG_NODE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static MARK_BLOCK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -1726,7 +1727,10 @@ impl Render for FirstOf {
             )? && content.to_bool().unwrap_or(false)
             {
                 if let Some(asvar) = &self.asvar {
-                    context.insert(asvar.to_string(), content.to_py(py));
+                    let rendered = RENDER_FIRSTOF_VALUE
+                        .import(py, "django.template.base", "render_value_in_context")?
+                        .call1((content.to_py(py), context.django_context(py)?))?;
+                    context.insert(asvar.to_string(), rendered);
                     return Ok(Cow::Borrowed(""));
                 }
 

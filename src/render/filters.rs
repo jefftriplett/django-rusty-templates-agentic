@@ -178,14 +178,14 @@ impl ResolveFilter for CapfirstFilter {
     ) -> ResolveResult<'t, 'py> {
         let content = match variable {
             Some(content) => {
-                let content_string = content.render(context)?.into_owned();
-                let mut chars = content_string.chars();
+                let content_string = content.resolve_string(context)?;
+                let mut chars = content_string.as_raw().chars();
                 let first_char = match chars.next() {
                     Some(c) => c.to_uppercase(),
                     None => return Ok(Some("".as_content())),
                 };
                 let string: String = first_char.chain(chars).collect();
-                string.into_content()
+                content_string.map_content(|_| Cow::Owned(string))
             }
             None => "".as_content(),
         };
