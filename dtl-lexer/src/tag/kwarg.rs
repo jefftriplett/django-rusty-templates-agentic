@@ -193,7 +193,9 @@ impl Iterator for TagElementKwargLexer<'_> {
                 }));
             }
         };
-        let token = match next {
+        let start_byte = self.byte;
+        let start_rest = self.rest;
+        let mut token = match next {
             '_' => {
                 if let Some('(') = chars.next() {
                     self.lex_translated(&mut chars, kwarg)
@@ -206,6 +208,18 @@ impl Iterator for TagElementKwargLexer<'_> {
             '0'..='9' | '-' => Ok(self.lex_numeric(kwarg)),
             _ => self.lex_variable_or_filter(kwarg),
         };
+        if self.rest.starts_with('|')
+            && token.as_ref().is_ok_and(|token| {
+                matches!(
+                    token.token_type,
+                    TagElementTokenType::Numeric | TagElementTokenType::Text
+                )
+            })
+        {
+            self.byte = start_byte;
+            self.rest = start_rest;
+            token = self.lex_variable_or_filter(kwarg);
+        }
         Some(self.lex_remainder(token))
     }
 }

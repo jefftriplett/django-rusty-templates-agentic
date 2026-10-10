@@ -401,6 +401,30 @@ impl PyContext {
 #[pymethods]
 impl PyContext {
     #[getter]
+    fn autoescape(&self, py: Python<'_>) -> bool {
+        self.context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned")
+            .autoescape
+    }
+
+    #[getter]
+    fn use_l10n(&self, py: Python<'_>) -> Option<bool> {
+        self.context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned")
+            .use_l10n
+    }
+
+    #[getter]
+    fn use_tz(&self, py: Python<'_>) -> Option<bool> {
+        self.context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned")
+            .use_tz
+    }
+
+    #[getter]
     fn request<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
         let guard = self
             .context

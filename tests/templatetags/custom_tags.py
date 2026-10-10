@@ -86,3 +86,18 @@ def with_block(context, content, *, var):
 # @register.inclusion_tag("results.html")
 # def results(poll):
 #    return {"choices": poll.choices}
+
+
+@register.inclusion_tag("result.html")
+def show(value, suffix="!", *, extra=""):
+    return {"value": value, "suffix": suffix, "extra": extra}
+
+
+@register.inclusion_tag("result.html", takes_context=True)
+def from_context(context):
+    return {"value": context["outer"], "suffix": "!"}
+
+
+@register.simple_tag(takes_context=True)
+def inclusion_flags(context):
+    return f"{context.use_l10n}/{context.use_tz}/{context.autoescape}"

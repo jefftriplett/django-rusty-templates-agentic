@@ -134,7 +134,7 @@ pub struct FilterLexer<'t> {
 }
 
 impl<'t> FilterLexer<'t> {
-    fn new(variable: &'t str, start: usize) -> Result<Self, LexerError> {
+    pub fn new(variable: &'t str, start: usize) -> Result<Self, LexerError> {
         let pipe = variable.find('|');
         let remainder = &variable[..pipe.unwrap_or(variable.len())];
         if let Some(n) = remainder.find(|c: char| !c.is_whitespace()) {

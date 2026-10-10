@@ -60,7 +60,8 @@ use dtl_lexer::tag::templatetag::{TemplateTag, TemplateTagError, lex_templatetag
 use dtl_lexer::tag::{TagLexerError, TagParts, lex_tag};
 use dtl_lexer::types::{At, TemplateString};
 use dtl_lexer::variable::{
-    Argument as ArgumentToken, VariableLexerError, VariableToken, lex_variable_or_filter,
+    Argument as ArgumentToken, FilterLexer, VariableLexerError, VariableToken,
+    lex_variable_or_filter,
 };
 use dtl_lexer::{START_TAG_LEN, TemplateContent};
 
@@ -122,6 +123,21 @@ impl Parse<Argument> for ArgumentToken {
                 Argument { at, argument_type }
             }
         })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct InclusionTag {
+    pub call: SimpleTag,
+    pub filename: Arc<Py<PyAny>>,
+    pub engine: Arc<Engine>,
+}
+
+impl PartialEq for InclusionTag {
+    fn eq(&self, other: &Self) -> bool {
+        self.call == other.call
+            && Arc::ptr_eq(&self.filename, &other.filename)
+            && Arc::ptr_eq(&self.engine, &other.engine)
     }
 }
 
@@ -853,6 +869,7 @@ pub enum Tag {
     Verbatim(Vec<TokenTree>),
     Debug,
     QueryString(SimpleTag),
+    InclusionTag(InclusionTag),
     SimpleTag(SimpleTag),
     SimpleBlockTag(SimpleBlockTag),
     Url(Url),
@@ -1322,6 +1339,10 @@ struct SimpleTagContext<'py> {
 enum TagContext<'py> {
     Unloaded(Bound<'py, PyAny>),
     Simple(SimpleTagContext<'py>),
+    Inclusion {
+        context: SimpleTagContext<'py>,
+        filename: Bound<'py, PyAny>,
+    },
     SimpleBlock {
         end_tag_name: String,
         context: SimpleTagContext<'py>,
@@ -1511,14 +1532,28 @@ impl<'t, 'py> Parser<'t, 'py> {
         at: At,
         start: usize,
     ) -> Result<TagElement, ParseError> {
-        let Some((variable_token, at, filter_lexer)) = lex_variable_or_filter(variable, start)?
-        else {
-            return Err(ParseError::EmptyVariable { at: at.into() });
-        };
-        let mut var = match variable_token {
-            VariableToken::Variable => self.parse_for_variable(at).into(),
-            VariableToken::Int(n) => TagElement::Int(n),
-            VariableToken::Float(f) => TagElement::Float(f),
+        let trimmed = variable.trim_start();
+        let start = start + variable.len() - trimmed.len();
+        let (mut var, at, filter_lexer) = if let Some(quote @ ('"' | '\'')) = trimmed.chars().next()
+        {
+            let mut chars = trimmed.chars();
+            chars.next();
+            let (at, byte, rest) = dtl_lexer::common::lex_text(start, trimmed, &mut chars, quote)?;
+            (
+                TagElement::Text(Text::new(text_content_at(at))),
+                at,
+                FilterLexer::new(rest, byte)?,
+            )
+        } else {
+            let Some((token, at, filters)) = lex_variable_or_filter(trimmed, start)? else {
+                return Err(ParseError::EmptyVariable { at: at.into() });
+            };
+            let value = match token {
+                VariableToken::Variable => self.parse_for_variable(at).into(),
+                VariableToken::Int(n) => TagElement::Int(n),
+                VariableToken::Float(f) => TagElement::Float(f),
+            };
+            (value, at, filters)
         };
         for filter_token in filter_lexer {
             let filter_token = filter_token?;
@@ -2102,6 +2137,21 @@ impl<'t, 'py> Parser<'t, 'py> {
                     Some(TagContext::Simple(context)) => {
                         Either::Left(self.parse_simple_tag(context, at, tag.parts)?)
                     }
+                    Some(TagContext::Inclusion { context, filename }) => {
+                        let TokenTree::Tag(Tag::SimpleTag(call)) =
+                            self.parse_simple_tag(context, at, tag.parts)?
+                        else {
+                            unreachable!("helper parser returns a simple tag")
+                        };
+                        if call.target_var.is_some() {
+                            return Err(crate::template::django_rusty_templates::TemplateSyntaxError::new_err(format!("'{tag_name}' received too many positional arguments")).into());
+                        }
+                        Either::Left(TokenTree::Tag(Tag::InclusionTag(InclusionTag {
+                            call,
+                            filename: Arc::new(filename.clone().unbind()),
+                            engine: self.engine.clone(),
+                        })))
+                    }
                     Some(TagContext::SimpleBlock {
                         context,
                         end_tag_name,
@@ -2338,7 +2388,44 @@ impl<'t, 'py> Parser<'t, 'py> {
                 .collect::<Result<Vec<_>, _>>()?;
 
             if closure_names.contains(&"filename".to_string()) {
-                todo!("Inclusion tag")
+                let cell = |name: &str| -> PyResult<&Bound<'py, PyAny>> {
+                    let index = closure_names
+                        .iter()
+                        .position(|key| key == name)
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "Missing inclusion tag closure cell: {name}"
+                            ))
+                        })?;
+                    Ok(&closure_values[index])
+                };
+                let takes_context = cell("takes_context")?.is_truthy()?;
+                let function_name: String = cell("function_name")?.extract()?;
+                let mut params: Vec<String> = cell("params")?.extract()?;
+                if takes_context {
+                    if params.first().is_none_or(|name| name != "context") {
+                        return Err(ParseError::RequiresContext {
+                            name: function_name,
+                            at: at.into(),
+                        }
+                        .into());
+                    }
+                    params.remove(0);
+                }
+                TagContext::Inclusion {
+                    filename: cell("filename")?.clone(),
+                    context: SimpleTagContext {
+                        func: cell("func")?.clone(),
+                        function_name,
+                        takes_context,
+                        params,
+                        defaults_count: get_defaults_count(cell("defaults")?)?,
+                        varargs: !cell("varargs")?.is_none(),
+                        kwonly: cell("kwonly")?.extract()?,
+                        kwonly_defaults: get_kwonly_defaults(cell("kwonly_defaults")?)?,
+                        varkw: !cell("varkw")?.is_none(),
+                    },
+                }
             } else if closure_names.contains(&"end_name".to_string()) {
                 let defaults_count = get_defaults_count(&closure_values[0])?;
                 let end_tag_name: String = closure_values[1].extract()?;
