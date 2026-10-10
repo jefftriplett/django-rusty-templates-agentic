@@ -11,6 +11,7 @@ def test_library_registry_and_builtins(engine_cls):
         libraries={"alias": "tests.templatetags.more_filters"},
         builtins=["tests.templatetags.more_filters"],
     )
+    assert engine.libraries["alias"] == "tests.templatetags.more_filters"
     assert engine.template_libraries["alias"] is register
     assert engine.template_builtins[-1] is register
     assert engine.builtins[-1] == "tests.templatetags.more_filters"

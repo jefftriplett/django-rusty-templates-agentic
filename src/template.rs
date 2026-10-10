@@ -136,9 +136,15 @@ pub mod django_rusty_templates {
     #[pymethods]
     impl LoaderView {
         fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+            let other = other.getattr("_native").unwrap_or_else(|_| other.clone());
             other
                 .extract::<PyRef<'_, Self>>()
                 .is_ok_and(|other| self == &*other)
+        }
+
+        #[getter]
+        fn is_cached(&self, py: Python<'_>) -> bool {
+            self.with_loader(py, |loader| matches!(loader, Loader::Cached(_)))
         }
 
         #[getter]
@@ -159,25 +165,57 @@ pub mod django_rusty_templates {
                 .collect()
         }
 
-        fn get_dirs(&self, py: Python<'_>) -> PyResult<Vec<PathBuf>> {
+        fn get_dirs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+            let uses_engine_dirs = self.with_loader(
+                py,
+                |loader| matches!(loader, Loader::FileSystem(loader) if loader.uses_engine_dirs),
+            );
+            if uses_engine_dirs && let Some(configuration) = &self.engine.configuration {
+                return Ok(configuration
+                    .bind(py)
+                    .get_item("dirs")?
+                    .expect("configured dirs"));
+            }
             let own = self.with_loader(py, |loader| match loader {
-                Loader::FileSystem(loader) if !loader.uses_engine_dirs => {
-                    Some(Ok(loader.dirs.clone()))
-                }
-                Loader::FileSystem(_) => Some(self.engine.dirs(py)),
+                Loader::FileSystem(loader) => Some(loader.dirs.clone()),
                 _ => None,
             });
             if let Some(dirs) = own {
-                return dirs;
+                if let Some(configuration) = &self.engine.configuration {
+                    let mut configured = configuration
+                        .bind(py)
+                        .get_item("loaders")?
+                        .expect("configured loaders");
+                    for (position, index) in self.path.iter().enumerate() {
+                        configured = configured.get_item(*index)?;
+                        if position + 1 < self.path.len() {
+                            configured = configured.get_item(1)?;
+                        }
+                    }
+                    if !configured.is_instance_of::<PyString>() {
+                        return configured.get_item(1);
+                    }
+                }
+                return Ok(PyList::new(
+                    py,
+                    dirs.iter().map(|directory| directory.to_string_lossy()),
+                )?
+                .into_any());
             }
             if self.name(py) == "django.template.loaders.app_directories.Loader" {
-                return crate::loaders::get_app_template_dirs(py, "templates");
+                return Ok(PyList::new(
+                    py,
+                    crate::loaders::get_app_template_dirs(py, "templates")?,
+                )?
+                .into_any());
             }
-            let mut dirs = Vec::new();
+            let dirs = PyList::empty(py);
             for loader in self.loaders(py) {
-                dirs.extend(loader.get_dirs(py)?);
+                for directory in loader.get_dirs(py)?.try_iter()? {
+                    dirs.append(directory?)?;
+                }
             }
-            Ok(dirs)
+            Ok(dirs.into_any())
         }
 
         fn reset(&self, py: Python<'_>) {
@@ -295,7 +333,8 @@ pub mod django_rusty_templates {
             }
             let join = py.import("django.utils._os")?.getattr("safe_join")?;
             let mut origins = Vec::new();
-            for directory in self.get_dirs(py)? {
+            for directory in self.get_dirs(py)?.try_iter()? {
+                let directory = directory?;
                 match join.call1((directory, &name)) {
                     Ok(path) => origins.push(Origin {
                         name: path.extract()?,
@@ -943,18 +982,24 @@ pub mod django_rusty_templates {
         }
 
         #[getter]
-        fn template_loaders(&self, py: Python<'_>) -> Vec<LoaderView> {
-            let loaders = self
+        fn template_loaders<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+            let count = self
                 .engine
                 .template_loaders
                 .lock_py_attached(py)
-                .expect("Mutex should not be poisoned");
-            (0..loaders.len())
-                .map(|index| LoaderView {
+                .expect("Mutex should not be poisoned")
+                .len();
+            let wrap = py
+                .import("django_rusty_templates.loaders")?
+                .getattr("wrap_loader")?;
+            let loaders = PyList::empty(py);
+            for index in 0..count {
+                loaders.append(wrap.call1((LoaderView {
                     engine: self.engine.clone(),
                     path: vec![index],
-                })
-                .collect()
+                },))?)?;
+            }
+            Ok(loaders)
         }
 
         #[getter]
@@ -999,7 +1044,11 @@ pub mod django_rusty_templates {
 
         #[getter]
         pub fn template_libraries<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-            self.libraries(py)
+            let dict = PyDict::new(py);
+            for (key, value) in &self.engine.libraries {
+                dict.set_item(key, value.bind(py))?;
+            }
+            Ok(dict)
         }
 
         #[getter]
@@ -1009,6 +1058,13 @@ pub mod django_rusty_templates {
 
         #[getter]
         pub fn libraries<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+            if let Some(configuration) = &self.engine.configuration {
+                return Ok(configuration
+                    .bind(py)
+                    .get_item("libraries")?
+                    .expect("configured libraries")
+                    .cast_into::<PyDict>()?);
+            }
             let dict = PyDict::new(py);
             for (key, value) in &self.engine.libraries {
                 dict.set_item(key, value.bind(py))?;
