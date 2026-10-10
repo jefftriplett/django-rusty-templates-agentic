@@ -10,7 +10,8 @@ pub mod django_rusty_templates {
 
     use encoding_rs::Encoding;
     use pyo3::exceptions::{
-        PyAttributeError, PyImportError, PyOverflowError, PyTypeError, PyValueError,
+        PyAttributeError, PyImportError, PyNotImplementedError, PyOverflowError, PyTypeError,
+        PyValueError,
     };
     use pyo3::import_exception;
     use pyo3::intern;
@@ -222,6 +223,9 @@ pub mod django_rusty_templates {
             self.with_loader(py, |loader| {
                 if let Loader::Cached(loader) = loader {
                     loader.cache.clear();
+                    if let Some(view) = loader.cache_view.as_ref() {
+                        view.bind(py).clear();
+                    }
                 }
             });
             for loader in self.loaders(py) {
@@ -231,7 +235,15 @@ pub mod django_rusty_templates {
 
         #[getter(get_template_cache)]
         fn get_template_cache<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-            let dict = PyDict::new(py);
+            let dict = self.with_loader(py, |loader| match loader {
+                Loader::Cached(loader) => loader
+                    .cache_view
+                    .get_or_insert_with(|| PyDict::new(py).unbind())
+                    .bind(py)
+                    .clone(),
+                _ => PyDict::new(py),
+            });
+            dict.clear();
             self.with_loader(py, |loader| -> PyResult<()> {
                 if let Loader::Cached(loader) = loader {
                     for (name, entry) in &loader.cache {
@@ -288,6 +300,35 @@ pub mod django_rusty_templates {
                 .call_method0("hexdigest")?
                 .extract()?;
             Ok(format!("{name}-{hash}"))
+        }
+
+        fn _cache_template(
+            &self,
+            py: Python<'_>,
+            key: String,
+            renderer: Bound<'_, PyAny>,
+        ) -> PyResult<()> {
+            let origin = renderer.getattr("origin")?;
+            let loader = origin
+                .getattr("loader")?
+                .extract::<PyRef<'_, LoaderView>>()?;
+            let template = Template {
+                filename: Some(PathBuf::from(origin.getattr("name")?.extract::<String>()?)),
+                template: renderer.getattr("source")?.extract()?,
+                nodes: Vec::new(),
+                engine: self.engine.clone(),
+                template_name: Some(renderer.getattr("name")?.extract()?),
+                loader_path: loader.path[self.path.len()..].to_vec(),
+                inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
+                python_renderer: Some(Arc::new(renderer.unbind())),
+            };
+            self.with_loader(py, |loader| {
+                if let Loader::Cached(loader) = loader {
+                    loader.cache.insert(key, Ok(template));
+                }
+            });
+            self.get_template_cache(py)?;
+            Ok(())
         }
 
         fn get_template(&self, py: Python<'_>, template_name: String) -> PyResult<Template> {
@@ -627,9 +668,15 @@ pub mod django_rusty_templates {
         for (index, loader) in loaders.iter_mut().enumerate() {
             match loader.get_template(py, &template_name, engine.clone()) {
                 Ok(template) => {
-                    return template.map(|mut template| {
+                    return template.and_then(|mut template| {
                         template.loader_path.insert(0, index);
-                        template
+                        if let Loader::Cached(cached) = loader
+                            && let Some(view) = &cached.cache_view
+                        {
+                            view.bind(py)
+                                .set_item(template_name.as_ref(), template.clone())?;
+                        }
+                        Ok(template)
                     });
                 }
                 Err(mut e) if !e.tried.is_empty() => tried.append(&mut e.tried),
@@ -831,6 +878,26 @@ pub mod django_rusty_templates {
         /// See <https://docs.djangoproject.com/en/stable/ref/templates/api/#django.template.Engine.get_template>
         pub fn get_template(&self, py: Python<'_>, template_name: String) -> PyResult<Template> {
             get_template(self.engine.clone(), py, Cow::Owned(template_name))
+        }
+
+        #[pyo3(signature = (name, dirs=None, skip=None))]
+        fn find_template<'py>(
+            &self,
+            py: Python<'py>,
+            name: Bound<'py, PyAny>,
+            dirs: Option<Bound<'py, PyAny>>,
+            skip: Option<Bound<'py, PyAny>>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let _ = dirs;
+            py.import("django_rusty_templates.inheritance")?
+                .getattr("find_template")?
+                .call1((
+                    Self {
+                        engine: self.engine.clone(),
+                    },
+                    name,
+                    skip,
+                ))
         }
 
         /// Given a list of template names, return the first that can be loaded.
@@ -1091,6 +1158,7 @@ pub mod django_rusty_templates {
         pub template_name: Option<String>,
         pub loader_path: Vec<usize>,
         inspection_nodes: Arc<InspectionNodes>,
+        python_renderer: Option<Arc<Py<PyAny>>>,
     }
 
     fn canonical_parse_error(
@@ -1150,8 +1218,30 @@ pub mod django_rusty_templates {
                 engine.clone(),
                 Some(template_name),
             );
+            let mut python_renderer = None;
             let nodes = match parser.parse() {
                 Ok(nodes) => nodes,
+                Err(crate::parse::PyParseError::PyErr(error))
+                    if error.is_instance_of::<PyNotImplementedError>(py)
+                        && ["block", "extends"].iter().any(|tag| {
+                            error.value(py).to_string() == format!("not yet implemented: {tag}")
+                        }) =>
+                {
+                    python_renderer = Some(Arc::new(
+                        py.import("django_rusty_templates.inheritance")?
+                            .getattr("compile_inheritance")?
+                            .call1((
+                                template,
+                                PyEngine {
+                                    engine: engine.clone(),
+                                },
+                                Some(&filename).map(|path| path.to_string_lossy().into_owned()),
+                                Some(template_name),
+                            ))?
+                            .unbind(),
+                    ));
+                    Vec::new()
+                }
                 Err(error) => {
                     return Err(canonical_parse_error(
                         py,
@@ -1169,6 +1259,7 @@ pub mod django_rusty_templates {
                 template_name: Some(template_name.to_string()),
                 loader_path: Vec::new(),
                 inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
+                python_renderer,
                 nodes,
                 engine,
             })
@@ -1180,8 +1271,30 @@ pub mod django_rusty_templates {
             engine: Arc<Engine>,
         ) -> PyResult<Self> {
             let mut parser = Parser::new(py, TemplateString(&template), engine.clone(), None);
+            let mut python_renderer = None;
             let nodes = match parser.parse() {
                 Ok(nodes) => nodes,
+                Err(crate::parse::PyParseError::PyErr(error))
+                    if error.is_instance_of::<PyNotImplementedError>(py)
+                        && ["block", "extends"].iter().any(|tag| {
+                            error.value(py).to_string() == format!("not yet implemented: {tag}")
+                        }) =>
+                {
+                    python_renderer = Some(Arc::new(
+                        py.import("django_rusty_templates.inheritance")?
+                            .getattr("compile_inheritance")?
+                            .call1((
+                                &template,
+                                PyEngine {
+                                    engine: engine.clone(),
+                                },
+                                None::<String>,
+                                None::<String>,
+                            ))?
+                            .unbind(),
+                    ));
+                    Vec::new()
+                }
                 Err(error) => {
                     return Err(canonical_parse_error(
                         py,
@@ -1199,12 +1312,23 @@ pub mod django_rusty_templates {
                 template_name: None,
                 loader_path: Vec::new(),
                 inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
+                python_renderer,
                 nodes,
                 engine,
             })
         }
 
         pub fn render(&self, py: Python<'_>, context: &mut Context) -> RenderResult<'_> {
+            if let Some(renderer) = &self.python_renderer {
+                renderer
+                    .bind(py)
+                    .call_method1("bind_origin", (self.origin(),))?;
+                let output: String = renderer
+                    .bind(py)
+                    .call_method1("render", (context.django_context(py)?,))?
+                    .extract()?;
+                return Ok(Cow::Owned(output));
+            }
             let previous_invalid = std::mem::replace(
                 &mut context.string_if_invalid,
                 self.engine.string_if_invalid.clone(),
@@ -1277,6 +1401,47 @@ pub mod django_rusty_templates {
     #[pymethods]
     impl Template {
         #[getter]
+        fn _django_template<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+            if let Some(renderer) = &self.python_renderer {
+                renderer
+                    .bind(py)
+                    .call_method1("bind_origin", (self.origin(),))?;
+                return Ok(renderer.bind(py).clone());
+            }
+            py.import("django_rusty_templates.inheritance")?
+                .getattr("compile_inheritance")?
+                .call1((
+                    self.template.as_str(),
+                    PyEngine {
+                        engine: self.engine.clone(),
+                    },
+                    self.filename
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    self.template_name.as_deref(),
+                ))
+        }
+
+        #[pyo3(name = "_render")]
+        fn render_inheritance(
+            &self,
+            py: Python<'_>,
+            context: Bound<'_, PyAny>,
+        ) -> PyResult<String> {
+            if let Some(renderer) = &self.python_renderer {
+                renderer
+                    .bind(py)
+                    .call_method1("bind_origin", (self.origin(),))?;
+                renderer
+                    .bind(py)
+                    .call_method1("_render", (context,))?
+                    .extract()
+            } else {
+                self.py_render(py, Some(context), None)
+            }
+        }
+
+        #[getter]
         fn source(&self) -> &str {
             &self.template
         }
@@ -1309,6 +1474,9 @@ pub mod django_rusty_templates {
 
         #[getter]
         fn nodelist<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+            if let Some(renderer) = &self.python_renderer {
+                return renderer.bind(py).getattr("nodelist");
+            }
             // This Python tree is for Django tooling and inspection only;
             // rendering always uses the compiled Rust nodes above.
             self.inspection_nodes
@@ -1351,6 +1519,15 @@ pub mod django_rusty_templates {
             context: Option<Bound<'_, PyAny>>,
             request: Option<Bound<'_, PyAny>>,
         ) -> PyResult<String> {
+            if let Some(renderer) = &self.python_renderer {
+                renderer
+                    .bind(py)
+                    .call_method1("bind_origin", (self.origin(),))?;
+                return renderer
+                    .bind(py)
+                    .call_method1("render", (context, request))?
+                    .extract();
+            }
             let mut base_context = HashMap::from([
                 ("None".to_string(), py.None()),
                 ("True".to_string(), PyBool::new(py, true).to_owned().into()),
