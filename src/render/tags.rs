@@ -722,6 +722,48 @@ impl Render for Tag {
         context: &mut Context,
     ) -> RenderResult<'t> {
         Ok(match self {
+            Self::Regroup(group) => {
+                let results = PyList::empty(py);
+                if let Some(target) = group.target.resolve(
+                    py,
+                    template,
+                    context,
+                    ResolveFailures::IgnoreVariableDoesNotExist,
+                )? {
+                    let target = target.to_py(py);
+                    if !target.is_none() {
+                        let python_context = context.django_context(py)?;
+                        let kwargs = PyDict::new(py);
+                        kwargs.set_item("ignore_failures", true)?;
+                        let grouped_result = py
+                            .import("django.template.defaulttags")?
+                            .getattr("GroupedResult")?;
+                        let mut previous: Option<Bound<'_, PyAny>> = None;
+                        let mut items = PyList::empty(py);
+                        for item in target.try_iter()? {
+                            let item = item?;
+                            python_context.set_item(&group.asvar, &item)?;
+                            let key = group.expression.bind(py).call_method(
+                                "resolve",
+                                (&python_context,),
+                                Some(&kwargs),
+                            )?;
+                            let same = match &previous {
+                                Some(previous) => key.is(previous) || key.eq(previous)?,
+                                None => false,
+                            };
+                            if !same {
+                                items = PyList::empty(py);
+                                results.append(grouped_result.call1((&key, &items))?)?;
+                                previous = Some(key);
+                            }
+                            items.append(item)?;
+                        }
+                    }
+                }
+                context.insert(group.asvar.clone(), results.into_any());
+                Cow::Borrowed("")
+            }
             Self::IfChanged {
                 id,
                 values,

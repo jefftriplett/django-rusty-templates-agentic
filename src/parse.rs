@@ -125,6 +125,21 @@ impl Parse<Argument> for ArgumentToken {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct Regroup {
+    pub target: TagElement,
+    pub expression: Arc<Py<PyAny>>,
+    pub asvar: String,
+}
+
+impl PartialEq for Regroup {
+    fn eq(&self, other: &Self) -> bool {
+        self.target == other.target
+            && self.asvar == other.asvar
+            && Arc::ptr_eq(&self.expression, &other.expression)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum TagElement {
     Int(BigInt),
@@ -821,6 +836,7 @@ pub enum Tag {
         truthy: Vec<TokenTree>,
         falsey: Vec<TokenTree>,
     },
+    Regroup(Regroup),
     For(For),
     Include(Include),
     Load,
@@ -1662,6 +1678,56 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(TokenTree::Tag(Tag::ResetCycle(id)))
     }
 
+    fn parse_regroup(&self, parts: TagParts) -> Result<TokenTree, PyParseError> {
+        let tokens = TagElementKwargLexer::new(self.template, parts)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ParseError::from)?;
+        let error = crate::template::django_rusty_templates::TemplateSyntaxError::new_err;
+        if tokens.len() != 5 {
+            return Err(error("'regroup' tag takes five arguments").into());
+        }
+        if self.template.content(tokens[1].at) != "by" {
+            return Err(error("second argument to 'regroup' tag must be 'by'").into());
+        }
+        if self.template.content(tokens[3].at) != "as" {
+            return Err(error("next-to-last argument to 'regroup' tag must be 'as'").into());
+        }
+        let target = tokens[0].parse(self)?;
+        let asvar = self.template.content(tokens[4].at).to_string();
+        let expression = format!("{asvar}.{}", self.template.content(tokens[2].at));
+        let builtins = pyo3::types::PyList::empty(self.py);
+        for module in [
+            "django.template.defaulttags",
+            "django.template.defaultfilters",
+            "django.template.loader_tags",
+        ] {
+            builtins.append(self.py.import(module)?.getattr("register")?)?;
+        }
+        let parser = self
+            .py
+            .import("django.template.base")?
+            .getattr("Parser")?
+            .call1((
+                pyo3::types::PyList::empty(self.py),
+                self.py.None(),
+                builtins,
+            ))?;
+        let filters = parser.getattr("filters")?;
+        for (name, filter) in &self.external_filters {
+            filters.set_item(name, filter)?;
+        }
+        let expression = Arc::new(
+            parser
+                .call_method1("compile_filter", (expression,))?
+                .unbind(),
+        );
+        Ok(TokenTree::Tag(Tag::Regroup(Regroup {
+            target,
+            expression,
+            asvar,
+        })))
+    }
+
     fn parse_ifchanged(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
         let values = TagElementKwargLexer::new(self.template, parts)
             .map(|token| token.map_err(ParseError::from)?.parse(self))
@@ -1948,6 +2014,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                 at,
                 parts: None,
             }),
+            "regroup" => Either::Left(self.parse_regroup(tag.parts)?),
             "ifchanged" => Either::Left(self.parse_ifchanged(at, tag.parts)?),
             "endifchanged" => Either::Right(EndTag {
                 end: EndTagType::Custom("endifchanged".to_string()),
