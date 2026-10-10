@@ -18,7 +18,7 @@ pub mod django_rusty_templates {
     use pyo3::sync::{MutexExt, PyOnceLock};
     use pyo3::types::{PyBool, PyDict, PyIterator, PyList, PyString, PyTuple};
 
-    use crate::error::RenderError;
+    use crate::error::{PyRenderError, RenderError};
     use crate::loaders::{AppDirsLoader, CachedLoader, FileSystemLoader, Loader, LocMemLoader};
     use crate::parse::{Parser, TokenTree};
     use crate::render::types::{Context, PyContext};
@@ -1213,7 +1213,26 @@ pub mod django_rusty_templates {
                 let mut rendered = String::with_capacity(self.template.len());
                 let template = TemplateString(&self.template);
                 for node in &self.nodes {
-                    rendered.push_str(&node.render(py, template, context)?);
+                    match node.render(py, template, context) {
+                        Err(PyRenderError::PyErr(error)) => {
+                            if self.engine.debug.load(Ordering::Relaxed) {
+                                let _ = (|| -> PyResult<()> {
+                                    py.import("django_rusty_templates.diagnostics")?
+                                        .getattr("attach_debug")?
+                                        .call1((
+                                            self.template.as_str(),
+                                            error.value(py),
+                                            self.filename
+                                                .as_ref()
+                                                .map(|path| path.to_string_lossy().into_owned()),
+                                        ))?;
+                                    Ok(())
+                                })();
+                            }
+                            return Err(error.into());
+                        }
+                        result => rendered.push_str(&result?),
+                    }
                 }
                 Ok(Cow::Owned(rendered))
             })();

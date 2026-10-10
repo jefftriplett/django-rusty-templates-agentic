@@ -81,7 +81,7 @@ impl Resolve for Url {
             Some(view_name) => view_name,
             None => "".as_content(),
         };
-        let reverse = REVERSE.import(py, "django.urls", "reverse")?;
+        let reverse = REVERSE.import(py, "django_rusty_templates.diagnostics", "render_url")?;
 
         let current_app = current_app(py, context.request.as_ref())?;
         let url = if self.kwargs.is_empty() {

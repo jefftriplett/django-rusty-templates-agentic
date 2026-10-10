@@ -111,10 +111,13 @@ impl AnnotatePyErr for PyErr {
             // `__repr__` that returns the message exactly as we want it.
             // https://github.com/python/cpython/blob/43573028c6ae21c66c118b8bae866c8968b87b68/Objects/exceptions.c#L2946-L2954
             let message = KeyErrorMessage { message };
-            PyKeyError::new_err((message,))
+            let _ = self.value(py).setattr("args", (message,));
         } else {
-            let err_type = self.get_type(py);
-            Self::from_type(err_type, format!("{message:?}"))
+            let _ = self.value(py).setattr("args", (format!("{message:?}"),));
         }
+        if !self.value(py).hasattr("_rusty_token_span").unwrap_or(false) {
+            let _ = self.value(py).setattr("_rusty_token_span", at);
+        }
+        self
     }
 }
