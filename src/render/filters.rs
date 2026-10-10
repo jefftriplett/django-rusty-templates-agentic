@@ -1218,7 +1218,11 @@ mod tests {
             let template_string = "{{ var|slugify:invalid }}".to_string();
             let error = Template::new_from_string(py, template_string, engine).unwrap_err();
 
-            let error_string = format!("{error}");
+            let error_string = error
+                .value(py)
+                .getattr("rusty_diagnostic")
+                .unwrap()
+                .to_string();
             assert!(error_string.contains("slugify filter does not take an argument"));
         });
     }
@@ -1284,7 +1288,11 @@ mod tests {
             let template_string = "{{ var|capfirst:invalid }}".to_string();
             let error = Template::new_from_string(py, template_string, engine).unwrap_err();
 
-            let error_string = format!("{error}");
+            let error_string = error
+                .value(py)
+                .getattr("rusty_diagnostic")
+                .unwrap()
+                .to_string();
             assert!(error_string.contains("capfirst filter does not take an argument"));
         });
     }
@@ -1336,7 +1344,11 @@ mod tests {
             let template_string = "{{ var|center }}".to_string();
             let error = Template::new_from_string(py, template_string, engine).unwrap_err();
 
-            let error_string = format!("{error}");
+            let error_string = error
+                .value(py)
+                .getattr("rusty_diagnostic")
+                .unwrap()
+                .to_string();
 
             assert!(error_string.contains("Expected an argument"));
         });

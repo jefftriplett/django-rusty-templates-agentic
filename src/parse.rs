@@ -3220,7 +3220,11 @@ mod tests {
             let template_string = "{{ foo|addslashes:invalid }}".to_string();
             let error = Template::new_from_string(py, template_string, engine).unwrap_err();
 
-            let error_string = format!("{error}");
+            let error_string = error
+                .value(py)
+                .getattr("rusty_diagnostic")
+                .unwrap()
+                .to_string();
             assert!(error_string.contains("addslashes filter does not take an argument"));
         });
     }

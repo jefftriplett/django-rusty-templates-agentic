@@ -1466,6 +1466,7 @@ pub mod django_rusty_templates {
 
 #[cfg(test)]
 mod tests {
+    use pyo3::types::PyAnyMethods;
     use std::sync::Arc;
 
     use super::django_rusty_templates::*;
@@ -1501,7 +1502,10 @@ mod tests {
                     .unwrap_err()
             });
 
-            let error_string = format!("{error}");
+            let error_string = format!(
+                "TemplateSyntaxError: {}",
+                error.value(py).getattr("rusty_diagnostic").unwrap()
+            );
             assert_eq!(error_string, expected);
         });
     }
@@ -1525,7 +1529,10 @@ mod tests {
    ╰────
 ";
 
-            let error_string = format!("{error}");
+            let error_string = format!(
+                "TemplateSyntaxError: {}",
+                error.value(py).getattr("rusty_diagnostic").unwrap()
+            );
             assert_eq!(error_string, expected);
         });
     }

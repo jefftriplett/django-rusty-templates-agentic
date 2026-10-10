@@ -44,7 +44,7 @@ jobs:
       - name: Rust tests and lint
         run: |
           export PYO3_PYTHON="$PWD/.venv/bin/python"
-          export PYTHONPATH="$PWD:$PWD/.venv/lib/python3.13/site-packages"
+          export PYTHONPATH="$PWD/python:$PWD:$PWD/.venv/lib/python3.13/site-packages"
           cargo test --workspace -- --test-threads=1
           cargo fmt --check
           cargo clippy --all-targets --all-features -- -D warnings
