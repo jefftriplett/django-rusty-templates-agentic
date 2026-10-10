@@ -58,7 +58,12 @@ def prepare_checkout(args):
     if not checkout.exists():
         if args.django_checkout:
             raise ValueError(f"Django checkout does not exist: {checkout}")
-        log(f"Cloning stable/{args.django_version}.x into {checkout}")
+        branch = (
+            "main"
+            if args.django_version == "6.2"
+            else f"stable/{args.django_version}.x"
+        )
+        log(f"Cloning {branch} into {checkout}")
         subprocess.run(
             [
                 "git",
@@ -68,7 +73,7 @@ def prepare_checkout(args):
                 "1",
                 "--no-tags",
                 "--branch",
-                f"stable/{args.django_version}.x",
+                branch,
                 "https://github.com/django/django.git",
                 str(checkout),
             ],
@@ -121,7 +126,7 @@ def prepare_checkout(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--django-version", choices=["5.2", "6.0", "6.1"], default="5.2"
+        "--django-version", choices=["5.2", "6.0", "6.1", "6.2"], default="5.2"
     )
     parser.add_argument(
         "--django-ref", help="Branch, tag, or commit to fetch into the version's cache"

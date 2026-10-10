@@ -60,7 +60,10 @@ Build the extension with `uv run maturin develop`, then run a Django version loc
 uv run scripts/run_django_test_suite.py --django-version 5.2 --parsed-output /tmp/django-5.2.txt --json-output /tmp/django-5.2.json
 uv run scripts/run_django_test_suite.py --django-version 6.0 --parsed-output /tmp/django-6.0.txt --json-output /tmp/django-6.0.json
 uv run scripts/run_django_test_suite.py --django-version 6.1 --parsed-output /tmp/django-6.1.txt --json-output /tmp/django-6.1.json
+uv run scripts/run_django_test_suite.py --django-version 6.2 --django-ref dab0a5c47f159eb58472110dcbc10bd4a9b01adb --parsed-output /tmp/django-6.2.txt --json-output /tmp/django-6.2.json
 ```
+
+Django 6.2 is development support: its cache initially clones `main`, because `stable/6.2.x` does not yet exist. Pin `--django-ref` for reproducible results. The reference above is the audited checkout, not a claim of compatibility with future changes.
 
 Django 6 requires Python 3.12+. Development dependencies and the single Ubuntu/Python 3.13 CI sanity job continue to use Django 5.2; additional versions run locally without expanding CI.
 
