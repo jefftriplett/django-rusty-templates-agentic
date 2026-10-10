@@ -77,6 +77,33 @@ pub fn lex_variable(byte: usize, rest: &str) -> (At, usize, &str) {
     (at, byte, rest)
 }
 
+/// Extend a literal's span over an adjacent filter chain in a tag expression.
+pub(crate) fn lex_literal_filters(at: At, byte: usize, rest: &str) -> Option<(At, usize, &str)> {
+    if !rest.starts_with('|') {
+        return None;
+    }
+    let mut quote = None;
+    let mut escaped = false;
+    let mut end = 0;
+    for character in rest.chars() {
+        if escaped {
+            escaped = false;
+        } else if let Some(delimiter) = quote {
+            if character == '\\' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character.is_whitespace() {
+            break;
+        }
+        end += character.len_utf8();
+    }
+    Some(((at.0, at.1 + end), byte + end, &rest[end..]))
+}
+
 pub fn lex_text<'t>(
     byte: usize,
     rest: &'t str,

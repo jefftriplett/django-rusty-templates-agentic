@@ -3,8 +3,8 @@ use thiserror::Error;
 
 use crate::TemplateContent;
 use crate::common::{
-    LexerError, NextChar, lex_numeric, lex_text, lex_translated, lex_variable, text_content_at,
-    translated_text_content_at,
+    LexerError, NextChar, lex_literal_filters, lex_numeric, lex_text, lex_translated, lex_variable,
+    text_content_at, translated_text_content_at,
 };
 use crate::tag::TagParts;
 use crate::types::{At, TemplateString};
@@ -116,7 +116,7 @@ impl<'t> ForLexer<'t> {
             });
         }
         let mut chars = self.rest.chars();
-        let token = match chars.next().expect("self.rest is not empty") {
+        let mut token = match chars.next().expect("self.rest is not empty") {
             '_' => {
                 if let Some('(') = chars.next() {
                     self.lex_translated(&mut chars)?
@@ -129,6 +129,14 @@ impl<'t> ForLexer<'t> {
             '0'..='9' | '-' => self.lex_numeric(),
             _ => self.lex_variable(),
         };
+        if matches!(token.token_type, ForTokenType::Text | ForTokenType::Numeric)
+            && let Some((at, byte, rest)) = lex_literal_filters(token.at, self.byte, self.rest)
+        {
+            token.at = at;
+            token.token_type = ForTokenType::Variable;
+            self.byte = byte;
+            self.rest = rest;
+        }
         self.lex_remainder()?;
         Ok(token)
     }
