@@ -1033,7 +1033,7 @@ pub enum ParseError {
     #[error("'{name}' must have a first argument of 'content'")]
     RequiresContent {
         name: String,
-        #[label("loaded here")]
+        #[label("used here")]
         at: SourceSpan,
     },
     #[error(
@@ -1041,7 +1041,7 @@ pub enum ParseError {
     )]
     RequiresContext {
         name: String,
-        #[label("loaded here")]
+        #[label("used here")]
         at: SourceSpan,
     },
     #[error(
@@ -1049,7 +1049,7 @@ pub enum ParseError {
     )]
     RequiresContextAndContent {
         name: String,
-        #[label("loaded here")]
+        #[label("used here")]
         at: SourceSpan,
     },
     #[error("'{tag_name}' did not receive value(s) for the argument(s): {missing}")]
@@ -1235,6 +1235,7 @@ struct SimpleTagContext<'py> {
 
 #[derive(Clone)]
 enum TagContext<'py> {
+    Unloaded(Bound<'py, PyAny>),
     Simple(SimpleTagContext<'py>),
     SimpleBlock {
         end_tag_name: String,
@@ -1738,27 +1739,33 @@ impl<'t, 'py> Parser<'t, 'py> {
                 lex_templatetag(self.template, tag.parts).map_err(ParseError::from)?,
             ))),
             "cycle" => Either::Left(TokenTree::Tag(Tag::Cycle(self.parse_cycle(tag.parts)?))),
-            tag_name => match self.external_tags.get(tag_name) {
-                Some(TagContext::Simple(context)) => {
-                    Either::Left(self.parse_simple_tag(context, at, tag.parts)?)
+            tag_name => {
+                if let Some(TagContext::Unloaded(tag)) = self.external_tags.get(tag_name).cloned() {
+                    self.load_tag(at, tag_name, &tag)?;
                 }
-                Some(TagContext::SimpleBlock {
-                    context,
-                    end_tag_name,
-                }) => Either::Left(self.parse_simple_block_tag(
-                    context.clone(),
-                    tag_name.to_string(),
-                    end_tag_name.clone(),
-                    at,
-                    tag.parts,
-                )?),
-                Some(TagContext::EndSimpleBlock) => Either::Right(EndTag {
-                    end: EndTagType::Custom(tag_name.to_string()),
-                    at,
-                    parts: None,
-                }),
-                None => todo!("{tag_name}"),
-            },
+                match self.external_tags.get(tag_name) {
+                    Some(TagContext::Simple(context)) => {
+                        Either::Left(self.parse_simple_tag(context, at, tag.parts)?)
+                    }
+                    Some(TagContext::SimpleBlock {
+                        context,
+                        end_tag_name,
+                    }) => Either::Left(self.parse_simple_block_tag(
+                        context.clone(),
+                        tag_name.to_string(),
+                        end_tag_name.clone(),
+                        at,
+                        tag.parts,
+                    )?),
+                    Some(TagContext::EndSimpleBlock) => Either::Right(EndTag {
+                        end: EndTagType::Custom(tag_name.to_string()),
+                        at,
+                        parts: None,
+                    }),
+                    Some(TagContext::Unloaded(_)) => unreachable!("tag was loaded above"),
+                    None => todo!("{tag_name}"),
+                }
+            }
         })
     }
 
@@ -1897,7 +1904,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(TokenTree::Tag(Tag::SimpleBlockTag(tag)))
     }
 
-    fn parse_load(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
+    fn parse_load(&mut self, _at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
         let tokens: Vec<_> = LoadLexer::new(self.template, parts).collect();
         let mut rev = tokens.iter().rev();
         if let (Some(last), Some(prev)) = (rev.next(), rev.next())
@@ -1912,7 +1919,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                     self.external_filters
                         .insert(content.to_string(), filter.clone());
                 } else if let Some(tag) = tags.get(content) {
-                    self.load_tag(token.at, content, tag)?;
+                    self.register_tag(content, tag.clone())?;
                 } else {
                     return Err(ParseError::MissingFilterTag {
                         library: self.template.content(last.at).to_string(),
@@ -1930,11 +1937,31 @@ impl<'t, 'py> Parser<'t, 'py> {
             let filters = self.get_filters(library)?;
             let tags = self.get_tags(library)?;
             self.external_filters.extend(filters);
-            for (name, tag) in &tags {
-                self.load_tag(at, name, tag)?;
+            for (name, tag) in tags {
+                self.register_tag(&name, tag)?;
             }
         }
         Ok(TokenTree::Tag(Tag::Load))
+    }
+
+    fn register_tag(&mut self, name: &str, tag: Bound<'py, PyAny>) -> PyResult<()> {
+        // End markers are recognized even without a matching opening tag. Reading
+        // their names does not validate or compile the tag's callable.
+        if let Ok(code) = tag.getattr("__code__") {
+            let names: Vec<String> = code.getattr("co_freevars")?.extract()?;
+            if let Some(index) = names.iter().position(|name| name == "end_name") {
+                let end_name: String = tag
+                    .getattr("__closure__")?
+                    .get_item(index)?
+                    .getattr("cell_contents")?
+                    .extract()?;
+                self.external_tags
+                    .insert(end_name, TagContext::EndSimpleBlock);
+            }
+        }
+        self.external_tags
+            .insert(name.to_string(), TagContext::Unloaded(tag));
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)]
