@@ -37,7 +37,14 @@ impl Resolve for Filter {
         context: &mut Context,
         failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
-        let mut left = self.left.resolve(py, template, context, failures)?;
+        let mut left = match self.left.resolve(py, template, context, failures) {
+            Err(PyRenderError::RenderError(RenderError::VariableDoesNotExist { .. }))
+                if matches!(self.left, crate::parse::TagElement::Variable(_)) =>
+            {
+                None
+            }
+            result => result?,
+        };
         if left.is_none()
             && matches!(failures, ResolveFailures::IgnoreVariableDoesNotExist)
             && matches!(self.filter, FilterType::DefaultIfNone(_))
