@@ -2450,6 +2450,20 @@ impl<'t, 'py> Parser<'t, 'py> {
                 .map(|v| v?.getattr("cell_contents"))
                 .collect::<Result<Vec<_>, _>>()?;
 
+            // Django 6.1 validates and removes implicit arguments at registration.
+            let version: (u8, u8) = (
+                self.py
+                    .import("django")?
+                    .getattr("VERSION")?
+                    .get_item(0)?
+                    .extract()?,
+                self.py
+                    .import("django")?
+                    .getattr("VERSION")?
+                    .get_item(1)?
+                    .extract()?,
+            );
+            let normalized_params = version >= (6, 1);
             if closure_names.contains(&"filename".to_string()) {
                 let cell = |name: &str| -> PyResult<&Bound<'py, PyAny>> {
                     let index = closure_names
@@ -2465,7 +2479,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                 let takes_context = cell("takes_context")?.is_truthy()?;
                 let function_name: String = cell("function_name")?.extract()?;
                 let mut params: Vec<String> = cell("params")?.extract()?;
-                if takes_context {
+                if takes_context && !normalized_params {
                     if params.first().is_none_or(|name| name != "context") {
                         return Err(ParseError::RequiresContext {
                             name: function_name,
@@ -2501,32 +2515,36 @@ impl<'t, 'py> Parser<'t, 'py> {
                 let varargs = !closure_values[8].is_none();
                 let varkw = !closure_values[9].is_none();
 
-                let params = match takes_context {
-                    false => {
-                        if let Some(param) = params.first()
-                            && param == "content"
-                        {
-                            params.iter().skip(1).cloned().collect()
-                        } else {
-                            return Err(ParseError::RequiresContent {
-                                name: function_name,
-                                at: at.into(),
+                let params = if normalized_params {
+                    params
+                } else {
+                    match takes_context {
+                        false => {
+                            if let Some(param) = params.first()
+                                && param == "content"
+                            {
+                                params.iter().skip(1).cloned().collect()
+                            } else {
+                                return Err(ParseError::RequiresContent {
+                                    name: function_name,
+                                    at: at.into(),
+                                }
+                                .into());
                             }
-                            .into());
                         }
-                    }
-                    true => {
-                        if let Some([context, content]) = params.first_chunk::<2>()
-                            && context == "context"
-                            && content == "content"
-                        {
-                            params.iter().skip(2).cloned().collect()
-                        } else {
-                            return Err(ParseError::RequiresContextAndContent {
-                                name: function_name,
-                                at: at.into(),
+                        true => {
+                            if let Some([context, content]) = params.first_chunk::<2>()
+                                && context == "context"
+                                && content == "content"
+                            {
+                                params.iter().skip(2).cloned().collect()
+                            } else {
+                                return Err(ParseError::RequiresContextAndContent {
+                                    name: function_name,
+                                    at: at.into(),
+                                }
+                                .into());
                             }
-                            .into());
                         }
                     }
                 };
@@ -2558,7 +2576,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                 let varargs = !closure_values[7].is_none();
                 let varkw = !closure_values[8].is_none();
 
-                let params = match takes_context {
+                let params = match takes_context && !normalized_params {
                     false => params,
                     true => {
                         if let Some(param) = params.first()

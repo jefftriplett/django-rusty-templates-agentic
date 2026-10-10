@@ -725,7 +725,7 @@ pub mod django_rusty_templates {
     }
 
     #[derive(Debug)]
-    #[pyclass(name = "Engine")]
+    #[pyclass(name = "Engine", dict)]
     pub struct PyEngine {
         engine: Arc<Engine>,
     }
@@ -877,7 +877,26 @@ pub mod django_rusty_templates {
         ///
         /// See <https://docs.djangoproject.com/en/stable/ref/templates/api/#django.template.Engine.get_template>
         #[pyo3(signature = (template_name))]
-        pub fn get_template(
+        fn get_template<'py>(
+            slf: Bound<'py, Self>,
+            template_name: Option<Bound<'py, PyAny>>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let py = slf.py();
+            let template_name = template_name.unwrap_or_else(|| py.None().into_bound(py));
+            if slf.getattr("__dict__")?.contains("find_template")? {
+                return py
+                    .import("django_rusty_templates")?
+                    .getattr("_django_get_template")?
+                    .call1((slf, template_name));
+            }
+            slf.borrow()
+                .get_template_native(py, Some(template_name))?
+                .into_pyobject(py)
+                .map(Bound::into_any)
+        }
+
+        #[pyo3(signature = (template_name))]
+        pub fn get_template_native(
             &self,
             py: Python<'_>,
             template_name: Option<Bound<'_, PyAny>>,
@@ -1235,11 +1254,40 @@ pub mod django_rusty_templates {
                 Some(template_name),
             );
             let mut python_renderer = None;
-            let nodes = match parser.parse() {
+            let parsed = if template.contains("..")
+                && py
+                    .import("django")?
+                    .getattr("VERSION")?
+                    .get_item(0)?
+                    .extract::<u8>()?
+                    >= 6
+                && py
+                    .import("django")?
+                    .getattr("VERSION")?
+                    .get_item(1)?
+                    .extract::<u8>()?
+                    >= 1
+            {
+                Err(crate::parse::PyParseError::PyErr(
+                    PyNotImplementedError::new_err(
+                        "not yet implemented: Django 6.1 variable lookup",
+                    ),
+                ))
+            } else {
+                parser.parse()
+            };
+            let nodes = match parsed {
                 Ok(nodes) => nodes,
                 Err(crate::parse::PyParseError::PyErr(error))
                     if error.is_instance_of::<PyNotImplementedError>(py)
-                        && ["block", "extends", "Fully custom tag"].iter().any(|tag| {
+                        && [
+                            "block",
+                            "extends",
+                            "Fully custom tag",
+                            "Django 6.1 variable lookup",
+                        ]
+                        .iter()
+                        .any(|tag| {
                             error.value(py).to_string() == format!("not yet implemented: {tag}")
                         }) =>
                 {
@@ -1288,11 +1336,40 @@ pub mod django_rusty_templates {
         ) -> PyResult<Self> {
             let mut parser = Parser::new(py, TemplateString(&template), engine.clone(), None);
             let mut python_renderer = None;
-            let nodes = match parser.parse() {
+            let parsed = if template.contains("..")
+                && py
+                    .import("django")?
+                    .getattr("VERSION")?
+                    .get_item(0)?
+                    .extract::<u8>()?
+                    >= 6
+                && py
+                    .import("django")?
+                    .getattr("VERSION")?
+                    .get_item(1)?
+                    .extract::<u8>()?
+                    >= 1
+            {
+                Err(crate::parse::PyParseError::PyErr(
+                    PyNotImplementedError::new_err(
+                        "not yet implemented: Django 6.1 variable lookup",
+                    ),
+                ))
+            } else {
+                parser.parse()
+            };
+            let nodes = match parsed {
                 Ok(nodes) => nodes,
                 Err(crate::parse::PyParseError::PyErr(error))
                     if error.is_instance_of::<PyNotImplementedError>(py)
-                        && ["block", "extends", "Fully custom tag"].iter().any(|tag| {
+                        && [
+                            "block",
+                            "extends",
+                            "Fully custom tag",
+                            "Django 6.1 variable lookup",
+                        ]
+                        .iter()
+                        .any(|tag| {
                             error.value(py).to_string() == format!("not yet implemented: {tag}")
                         }) =>
                 {
@@ -1906,7 +1983,7 @@ user = User(["Lily"])
             )
             .unwrap();
             let template = engine
-                .get_template(py, Some(PyString::new(py, "full_example.html").into_any()))
+                .get_template_native(py, Some(PyString::new(py, "full_example.html").into_any()))
                 .unwrap();
             let cloned = template.clone();
             assert_eq!(cloned.filename, template.filename);

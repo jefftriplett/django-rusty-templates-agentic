@@ -440,3 +440,19 @@ def test_get_template_app_dirs_loader_error(engine_class):
         engine.get_template(template_path)
 
     assert str(exc_info.value) == template_path
+
+
+def test_engine_honors_find_template_override():
+    from unittest.mock import patch
+
+    from django_rusty_templates import Engine
+
+    engine = Engine()
+    template = engine.from_string("Hello {{ name }}")
+    with patch.object(
+        engine, "find_template", return_value=(template, template.origin)
+    ):
+        assert (
+            engine.get_template("override.html").render({"name": "Alice"})
+            == "Hello Alice"
+        )
