@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cached::macros::cached;
 use encoding_rs::Encoding;
 use pyo3::exceptions::PyUnicodeError;
 use pyo3::prelude::*;
@@ -48,11 +47,6 @@ fn get_app_template_dir(path: Bound<'_, PyAny>, dirname: &str) -> PyResult<Optio
     Ok(None)
 }
 
-#[cached(
-    max_size = 128,  // Cache size
-    key = "String",  // Use owned String as key
-    convert = r#"{ dirname.to_string() }"#  // Convert &str to String
-)]
 pub(crate) fn get_app_template_dirs(py: Python<'_>, dirname: &str) -> Result<Vec<PathBuf>, PyErr> {
     let apps = APPS.import(py, "django.apps", "apps")?;
     let app_configs = apps.call_method0("get_app_configs")?;
@@ -118,12 +112,16 @@ impl FileSystemLoader {
             let Some(path) = safe_join(template_dir, template_name) else {
                 continue;
             };
-            let Ok(bytes) = std::fs::read(&path) else {
-                tried.push((
-                    path.display().to_string(),
-                    "Source does not exist".to_string(),
-                ));
-                continue;
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tried.push((
+                        path.display().to_string(),
+                        "Source does not exist".to_string(),
+                    ));
+                    continue;
+                }
+                Err(error) => return Ok(Err(error.into())),
             };
             if Encoding::for_label(engine.file_charset.as_bytes()).is_none() {
                 let contents = pyo3::types::PyBytes::new(py, &bytes)
