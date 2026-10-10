@@ -3,7 +3,15 @@
 from django import VERSION
 from django.template import Context
 from django.template.context import make_context
-from django.template.base import DebugLexer, Lexer, Node, Parser, Template, VariableNode
+from django.template.base import (
+    DebugLexer,
+    Node,
+    NodeList,
+    Parser,
+    Template,
+    TextNode,
+    VariableNode,
+)
 from django.template.loader_tags import ExtendsNode
 
 
@@ -11,24 +19,10 @@ class NativeVariableNode(VariableNode):
     def __init__(self, node, native):
         super().__init__(node.filter_expression)
         self.native = native
-        variables = [node.filter_expression.var]
-        variables.extend(
-            argument
-            for _, arguments in node.filter_expression.filters
-            for lookup, argument in arguments
-            if lookup
-        )
-        self.context_names = tuple(
-            dict.fromkeys(
-                variable.lookups[0]
-                for variable in variables
-                if getattr(variable, "lookups", None)
-            )
-        )
 
     def render(self, context):
         try:
-            return self.native._render_fragment(context, self.context_names)
+            return self.native._render_fragment(context)
         except Exception as error:
             # The fragment has its own source offsets. Let Django's node hook
             # annotate this exception against the complete inherited template.
@@ -37,16 +31,76 @@ class NativeVariableNode(VariableNode):
             raise
 
 
+class NativeRegionNode(Node):
+    """Render adjacent native variables and text in one extension call."""
+
+    child_nodelists = ("nodelist",)
+    render = NativeVariableNode.render
+
+    def __init__(self, nodes, native):
+        self.nodelist = NodeList(nodes)
+        self.native = native
+        self.token = nodes[0].token
+        self.origin = nodes[0].origin
+
+
 class NativeParser(Parser):
     def __init__(self, source, engine, origin):
+        tokens = DebugLexer(source).tokenize()
+        for token in tokens:
+            token._native_position = token.position
+            if not engine.debug:
+                token.position = None
         super().__init__(
-            (DebugLexer if engine.debug else Lexer)(source).tokenize(),
+            tokens,
             engine.template_libraries,
             engine.template_builtins,
             origin,
         )
         self.native_engine = engine
+        self.source = source
         self.load_prefix = ""
+
+    def parse(self, parse_until=None):
+        nodes = super().parse(parse_until)
+        if self.native_engine.debug:
+            return nodes
+        grouped = NodeList()
+        grouped.contains_nontext = nodes.contains_nontext
+        region = []
+
+        def flush():
+            variables = [
+                node for node in region if isinstance(node, NativeVariableNode)
+            ]
+            if len(variables) >= 2:
+                start = region[0].token._native_position[0]
+                end = region[-1].token._native_position[1]
+                source = variables[0].load_prefix + self.source[start:end]
+                grouped.append(
+                    NativeRegionNode(region[:], self.native_engine.from_string(source))
+                )
+            else:
+                grouped.extend(region)
+            region.clear()
+
+        for node in nodes:
+            eligible = getattr(node.token, "_native_position", None) is not None and (
+                isinstance(node, NativeVariableNode)
+                or (type(node) is TextNode and node.token.token_type.value == 0)
+            )
+            if not eligible:
+                flush()
+                grouped.append(node)
+                continue
+            # Do not join spans separated by discarded comments or tags.
+            if region and (
+                region[-1].token._native_position[1] != node.token._native_position[0]
+            ):
+                flush()
+            region.append(node)
+        flush()
+        return grouped
 
     def extend_nodelist(self, nodelist, node, token):
         if token.contents.startswith("load ") and token.token_type.value == 2:
@@ -64,6 +118,7 @@ class NativeParser(Parser):
         ):
             fragment = self.load_prefix + "{{ " + token.contents + " }}"
             node = NativeVariableNode(node, self.native_engine.from_string(fragment))
+            node.load_prefix = self.load_prefix
         super().extend_nodelist(nodelist, node, token)
 
 
