@@ -107,7 +107,10 @@ impl FileSystemLoader {
     ) -> Result<PyResult<Template>, LoaderError> {
         let mut tried = Vec::new();
         let dirs = if self.uses_engine_dirs {
-            engine.dirs(py)
+            match engine.dirs(py) {
+                Ok(dirs) => dirs,
+                Err(error) => return Ok(Err(error)),
+            }
         } else {
             self.dirs.clone()
         };
@@ -122,6 +125,14 @@ impl FileSystemLoader {
                 ));
                 continue;
             };
+            if Encoding::for_label(engine.file_charset.as_bytes()).is_none() {
+                let contents = pyo3::types::PyBytes::new(py, &bytes)
+                    .call_method1("decode", (&engine.file_charset,))
+                    .and_then(|value| value.extract::<String>());
+                return Ok(contents.and_then(|contents| {
+                    Template::new(py, &contents, path, template_name, engine)
+                }));
+            }
             let (contents, encoding, malformed) = self.encoding.decode(&bytes);
             if malformed {
                 return Ok(Err(PyUnicodeError::new_err(format!(

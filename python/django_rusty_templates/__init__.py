@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.template import TemplateDoesNotExist
 from django.template.backends.base import BaseEngine
 from django.template.backends.django import get_installed_libraries
 
@@ -25,7 +26,11 @@ class RustyTemplates(BaseEngine):
         return self.engine.from_string(template_code)
 
     def get_template(self, template_name):
-        return self.engine.get_template(template_name)
+        try:
+            return self.engine.get_template(template_name)
+        except TemplateDoesNotExist as error:
+            error.backend = self
+            raise
 
     def get_templatetag_libraries(self, custom_libraries):
         """

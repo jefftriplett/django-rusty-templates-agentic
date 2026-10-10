@@ -209,6 +209,7 @@ impl Filter {
             "unordered_list" => Some(("unordered_list", false, false)),
             "make_list" => Some(("make_list", false, false)),
             "escapeseq" => Some(("escapeseq", false, false)),
+            "safeseq" => Some(("safeseq", false, false)),
             "iriencode" => Some(("iriencode", false, false)),
             "random" => Some(("random", false, false)),
             "phone2numeric" => Some(("phone2numeric", false, false)),
