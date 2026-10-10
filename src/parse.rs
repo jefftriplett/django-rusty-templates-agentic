@@ -191,6 +191,14 @@ impl Filter {
         left: TagElement,
         right: Option<Argument>,
     ) -> Result<Self, ParseError> {
+        if let Some(filter) = parser.external_filters.get(parser.template.content(at)) {
+            return Ok(Self {
+                at,
+                all_at,
+                left,
+                filter: FilterType::External(ExternalFilter::new(filter.clone().unbind(), right)),
+            });
+        }
         let django_filter = match parser.template.content(at) {
             "pluralize" => Some(("pluralize", false, true)),
             "join" => Some(("join", true, true)),
@@ -1411,6 +1419,19 @@ impl<'t, 'py> Parser<'t, 'py> {
     }
 
     pub fn parse(&mut self) -> Result<Vec<TokenTree>, PyParseError> {
+        let libraries = self
+            .engine
+            .template_builtins
+            .iter()
+            .skip(3)
+            .map(|library| library.bind(self.py).clone())
+            .collect::<Vec<_>>();
+        for library in libraries {
+            self.external_filters.extend(self.get_filters(&library)?);
+            for (name, tag) in self.get_tags(&library)? {
+                self.register_tag(&name, tag)?;
+            }
+        }
         let mut nodes = Vec::new();
         while let Some(token) = self.lexer.next() {
             let node = match token.token_type {

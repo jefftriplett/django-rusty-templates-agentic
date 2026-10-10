@@ -532,6 +532,7 @@ pub mod django_rusty_templates {
         pub file_charset: String,
         configuration: Option<Py<PyDict>>,
         builtins: Vec<String>,
+        pub template_builtins: Vec<Py<PyAny>>,
         pub autoescape: bool,
         loaded_context_processors: Vec<Py<PyAny>>,
         pub libraries: HashMap<String, Py<PyAny>>,
@@ -566,6 +567,7 @@ pub mod django_rusty_templates {
                 file_charset: "utf-8".to_string(),
                 configuration: None,
                 builtins: Vec::new(),
+                template_builtins: Vec::new(),
                 autoescape: false,
                 loaded_context_processors: Vec::new(),
                 libraries: HashMap::new(),
@@ -751,7 +753,18 @@ pub mod django_rusty_templates {
                 None => HashMap::new(),
                 Some(libraries) => import_libraries(libraries)?,
             };
-            let builtins = vec![];
+            let builtins: Vec<String> = configuration
+                .get_item("builtins")?
+                .expect("configured builtins")
+                .extract()?;
+            let template_builtins = builtins
+                .iter()
+                .map(|module| {
+                    py.import(module.as_str())?
+                        .getattr("register")
+                        .map(Bound::unbind)
+                })
+                .collect::<PyResult<Vec<_>>>()?;
             let engine = Engine {
                 dirs: Mutex::new(dirs),
                 app_dirs,
@@ -763,6 +776,7 @@ pub mod django_rusty_templates {
                 file_charset,
                 configuration: Some(configuration.unbind()),
                 builtins,
+                template_builtins,
                 autoescape,
                 loaded_context_processors,
                 libraries,
@@ -973,6 +987,22 @@ pub mod django_rusty_templates {
         }
 
         #[getter]
+        pub fn template_builtins<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+            PyList::new(
+                py,
+                self.engine
+                    .template_builtins
+                    .iter()
+                    .map(|library| library.bind(py)),
+            )
+        }
+
+        #[getter]
+        pub fn template_libraries<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+            self.libraries(py)
+        }
+
+        #[getter]
         pub fn autoescape(&self) -> bool {
             self.engine.autoescape
         }
@@ -1159,12 +1189,8 @@ pub mod django_rusty_templates {
                         libraries.set_item(name, library)?;
                     }
                     let builtins = PyList::empty(py);
-                    for module in [
-                        "django.template.defaulttags",
-                        "django.template.defaultfilters",
-                        "django.template.loader_tags",
-                    ] {
-                        builtins.append(py.import(module)?.getattr("register")?)?;
+                    for library in &self.engine.template_builtins {
+                        builtins.append(library.bind(py))?;
                     }
                     Ok(base
                         .getattr("Parser")?
