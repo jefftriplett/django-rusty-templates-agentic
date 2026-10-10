@@ -85,17 +85,13 @@ def test_escapejs_chained_with_lower(assert_render):
     [
         pytest.param(
             "\x7f",
-            r"\u007F",
+            r"\u007F" if VERSION >= (6, 1) else "\x7f",
             id="c1_control_first_element",
-            marks=pytest.mark.xfail(
-                VERSION < (6, 1), reason="Django before 6.1 does not escape DEL"
-            ),
         ),
         pytest.param(
             "\x9f",
-            r"\u009f",
+            "\x9f",
             id="c1_control_last_element",
-            marks=pytest.mark.xfail(reason="Django does not escape C1 controls"),
         ),
     ],
 )
