@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 pub mod django_rusty_templates {
     use std::borrow::Cow;
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -136,9 +136,15 @@ pub mod django_rusty_templates {
     #[pymethods]
     impl LoaderView {
         fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+            let other = other.getattr("_native").unwrap_or_else(|_| other.clone());
             other
                 .extract::<PyRef<'_, Self>>()
                 .is_ok_and(|other| self == &*other)
+        }
+
+        #[getter]
+        fn is_cached(&self, py: Python<'_>) -> bool {
+            self.with_loader(py, |loader| matches!(loader, Loader::Cached(_)))
         }
 
         #[getter]
@@ -159,25 +165,57 @@ pub mod django_rusty_templates {
                 .collect()
         }
 
-        fn get_dirs(&self, py: Python<'_>) -> PyResult<Vec<PathBuf>> {
+        fn get_dirs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+            let uses_engine_dirs = self.with_loader(
+                py,
+                |loader| matches!(loader, Loader::FileSystem(loader) if loader.uses_engine_dirs),
+            );
+            if uses_engine_dirs && let Some(configuration) = &self.engine.configuration {
+                return Ok(configuration
+                    .bind(py)
+                    .get_item("dirs")?
+                    .expect("configured dirs"));
+            }
             let own = self.with_loader(py, |loader| match loader {
-                Loader::FileSystem(loader) if !loader.uses_engine_dirs => {
-                    Some(Ok(loader.dirs.clone()))
-                }
-                Loader::FileSystem(_) => Some(self.engine.dirs(py)),
+                Loader::FileSystem(loader) => Some(loader.dirs.clone()),
                 _ => None,
             });
             if let Some(dirs) = own {
-                return dirs;
+                if let Some(configuration) = &self.engine.configuration {
+                    let mut configured = configuration
+                        .bind(py)
+                        .get_item("loaders")?
+                        .expect("configured loaders");
+                    for (position, index) in self.path.iter().enumerate() {
+                        configured = configured.get_item(*index)?;
+                        if position + 1 < self.path.len() {
+                            configured = configured.get_item(1)?;
+                        }
+                    }
+                    if !configured.is_instance_of::<PyString>() {
+                        return configured.get_item(1);
+                    }
+                }
+                return Ok(PyList::new(
+                    py,
+                    dirs.iter().map(|directory| directory.to_string_lossy()),
+                )?
+                .into_any());
             }
             if self.name(py) == "django.template.loaders.app_directories.Loader" {
-                return crate::loaders::get_app_template_dirs(py, "templates");
+                return Ok(PyList::new(
+                    py,
+                    crate::loaders::get_app_template_dirs(py, "templates")?,
+                )?
+                .into_any());
             }
-            let mut dirs = Vec::new();
+            let dirs = PyList::empty(py);
             for loader in self.loaders(py) {
-                dirs.extend(loader.get_dirs(py)?);
+                for directory in loader.get_dirs(py)?.try_iter()? {
+                    dirs.append(directory?)?;
+                }
             }
-            Ok(dirs)
+            Ok(dirs.into_any())
         }
 
         fn reset(&self, py: Python<'_>) {
@@ -295,7 +333,8 @@ pub mod django_rusty_templates {
             }
             let join = py.import("django.utils._os")?.getattr("safe_join")?;
             let mut origins = Vec::new();
-            for directory in self.get_dirs(py)? {
+            for directory in self.get_dirs(py)?.try_iter()? {
+                let directory = directory?;
                 match join.call1((directory, &name)) {
                     Ok(path) => origins.push(Origin {
                         name: path.extract()?,
@@ -532,6 +571,7 @@ pub mod django_rusty_templates {
         pub file_charset: String,
         configuration: Option<Py<PyDict>>,
         builtins: Vec<String>,
+        pub template_builtins: Vec<Py<PyAny>>,
         pub autoescape: bool,
         loaded_context_processors: Vec<Py<PyAny>>,
         pub libraries: HashMap<String, Py<PyAny>>,
@@ -566,6 +606,7 @@ pub mod django_rusty_templates {
                 file_charset: "utf-8".to_string(),
                 configuration: None,
                 builtins: Vec::new(),
+                template_builtins: Vec::new(),
                 autoescape: false,
                 loaded_context_processors: Vec::new(),
                 libraries: HashMap::new(),
@@ -751,7 +792,18 @@ pub mod django_rusty_templates {
                 None => HashMap::new(),
                 Some(libraries) => import_libraries(libraries)?,
             };
-            let builtins = vec![];
+            let builtins: Vec<String> = configuration
+                .get_item("builtins")?
+                .expect("configured builtins")
+                .extract()?;
+            let template_builtins = builtins
+                .iter()
+                .map(|module| {
+                    py.import(module.as_str())?
+                        .getattr("register")
+                        .map(Bound::unbind)
+                })
+                .collect::<PyResult<Vec<_>>>()?;
             let engine = Engine {
                 dirs: Mutex::new(dirs),
                 app_dirs,
@@ -763,6 +815,7 @@ pub mod django_rusty_templates {
                 file_charset,
                 configuration: Some(configuration.unbind()),
                 builtins,
+                template_builtins,
                 autoescape,
                 loaded_context_processors,
                 libraries,
@@ -929,18 +982,24 @@ pub mod django_rusty_templates {
         }
 
         #[getter]
-        fn template_loaders(&self, py: Python<'_>) -> Vec<LoaderView> {
-            let loaders = self
+        fn template_loaders<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+            let count = self
                 .engine
                 .template_loaders
                 .lock_py_attached(py)
-                .expect("Mutex should not be poisoned");
-            (0..loaders.len())
-                .map(|index| LoaderView {
+                .expect("Mutex should not be poisoned")
+                .len();
+            let wrap = py
+                .import("django_rusty_templates.loaders")?
+                .getattr("wrap_loader")?;
+            let loaders = PyList::empty(py);
+            for index in 0..count {
+                loaders.append(wrap.call1((LoaderView {
                     engine: self.engine.clone(),
                     path: vec![index],
-                })
-                .collect()
+                },))?)?;
+            }
+            Ok(loaders)
         }
 
         #[getter]
@@ -973,12 +1032,39 @@ pub mod django_rusty_templates {
         }
 
         #[getter]
+        pub fn template_builtins<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+            PyList::new(
+                py,
+                self.engine
+                    .template_builtins
+                    .iter()
+                    .map(|library| library.bind(py)),
+            )
+        }
+
+        #[getter]
+        pub fn template_libraries<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+            let dict = PyDict::new(py);
+            for (key, value) in &self.engine.libraries {
+                dict.set_item(key, value.bind(py))?;
+            }
+            Ok(dict)
+        }
+
+        #[getter]
         pub fn autoescape(&self) -> bool {
             self.engine.autoescape
         }
 
         #[getter]
         pub fn libraries<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+            if let Some(configuration) = &self.engine.configuration {
+                return Ok(configuration
+                    .bind(py)
+                    .get_item("libraries")?
+                    .expect("configured libraries")
+                    .cast_into::<PyDict>()?);
+            }
             let dict = PyDict::new(py);
             for (key, value) in &self.engine.libraries {
                 dict.set_item(key, value.bind(py))?;
@@ -1007,6 +1093,49 @@ pub mod django_rusty_templates {
         inspection_nodes: Arc<InspectionNodes>,
     }
 
+    fn canonical_parse_error(
+        py: Python<'_>,
+        error: crate::parse::PyParseError,
+        engine: Arc<Engine>,
+        source: &str,
+        filename: Option<&Path>,
+        template_name: Option<&str>,
+    ) -> PyErr {
+        let native = match error.try_into_parse_error() {
+            Ok(error) => {
+                if let Some(filename) = filename {
+                    TemplateSyntaxError::with_source_code(
+                        error.into(),
+                        miette::NamedSource::new(filename.to_string_lossy(), source.to_string()),
+                    )
+                } else {
+                    TemplateSyntaxError::with_source_code(error.into(), source.to_string())
+                }
+            }
+            Err(error) => error,
+        };
+        let validation = (|| -> PyResult<()> {
+            py.import("django_rusty_templates.diagnostics")?
+                .getattr("validate_syntax")?
+                .call1((
+                    source,
+                    PyEngine { engine },
+                    filename.map(|filename| filename.to_string_lossy().into_owned()),
+                    template_name,
+                ))?;
+            Ok(())
+        })();
+        match validation {
+            Err(error) => {
+                let diagnostic = native.value(py).to_string();
+                let _ = error.value(py).setattr("rusty_diagnostic", &diagnostic);
+                let _ = error.value(py).call_method1("add_note", (diagnostic,));
+                error
+            }
+            Ok(()) => native,
+        }
+    }
+
     impl Template {
         pub fn new(
             py: Python<'_>,
@@ -1023,11 +1152,15 @@ pub mod django_rusty_templates {
             );
             let nodes = match parser.parse() {
                 Ok(nodes) => nodes,
-                Err(err) => {
-                    let err = err.try_into_parse_error()?;
-                    let source =
-                        miette::NamedSource::new(filename.to_string_lossy(), template.to_string());
-                    return Err(TemplateSyntaxError::with_source_code(err.into(), source));
+                Err(error) => {
+                    return Err(canonical_parse_error(
+                        py,
+                        error,
+                        engine.clone(),
+                        template,
+                        Some(&filename),
+                        Some(template_name),
+                    ));
                 }
             };
             Ok(Self {
@@ -1049,9 +1182,15 @@ pub mod django_rusty_templates {
             let mut parser = Parser::new(py, TemplateString(&template), engine.clone(), None);
             let nodes = match parser.parse() {
                 Ok(nodes) => nodes,
-                Err(err) => {
-                    let err = err.try_into_parse_error()?;
-                    return Err(TemplateSyntaxError::with_source_code(err.into(), template));
+                Err(error) => {
+                    return Err(canonical_parse_error(
+                        py,
+                        error,
+                        engine.clone(),
+                        &template,
+                        None,
+                        None,
+                    ));
                 }
             };
             Ok(Self {
@@ -1066,13 +1205,20 @@ pub mod django_rusty_templates {
         }
 
         pub fn render(&self, py: Python<'_>, context: &mut Context) -> RenderResult<'_> {
-            let mut rendered = String::with_capacity(self.template.len());
-            let template = TemplateString(&self.template);
-            for node in &self.nodes {
-                let content = node.render(py, template, context)?;
-                rendered.push_str(&content);
-            }
-            Ok(Cow::Owned(rendered))
+            let previous_invalid = std::mem::replace(
+                &mut context.string_if_invalid,
+                self.engine.string_if_invalid.clone(),
+            );
+            let result = (|| {
+                let mut rendered = String::with_capacity(self.template.len());
+                let template = TemplateString(&self.template);
+                for node in &self.nodes {
+                    rendered.push_str(&node.render(py, template, context)?);
+                }
+                Ok(Cow::Owned(rendered))
+            })();
+            context.string_if_invalid = previous_invalid;
+            result
         }
 
         fn _render(&self, py: Python<'_>, context: &mut Context) -> PyResult<String> {
@@ -1159,12 +1305,8 @@ pub mod django_rusty_templates {
                         libraries.set_item(name, library)?;
                     }
                     let builtins = PyList::empty(py);
-                    for module in [
-                        "django.template.defaulttags",
-                        "django.template.defaultfilters",
-                        "django.template.loader_tags",
-                    ] {
-                        builtins.append(py.import(module)?.getattr("register")?)?;
+                    for library in &self.engine.template_builtins {
+                        builtins.append(library.bind(py))?;
                     }
                     Ok(base
                         .getattr("Parser")?
@@ -1324,6 +1466,7 @@ pub mod django_rusty_templates {
 
 #[cfg(test)]
 mod tests {
+    use pyo3::types::PyAnyMethods;
     use std::sync::Arc;
 
     use super::django_rusty_templates::*;
@@ -1359,7 +1502,10 @@ mod tests {
                     .unwrap_err()
             });
 
-            let error_string = format!("{error}");
+            let error_string = format!(
+                "TemplateSyntaxError: {}",
+                error.value(py).getattr("rusty_diagnostic").unwrap()
+            );
             assert_eq!(error_string, expected);
         });
     }
@@ -1383,7 +1529,10 @@ mod tests {
    ╰────
 ";
 
-            let error_string = format!("{error}");
+            let error_string = format!(
+                "TemplateSyntaxError: {}",
+                error.value(py).getattr("rusty_diagnostic").unwrap()
+            );
             assert_eq!(error_string, expected);
         });
     }

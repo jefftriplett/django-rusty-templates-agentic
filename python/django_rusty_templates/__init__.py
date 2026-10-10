@@ -1,14 +1,14 @@
 from django.conf import settings
 from django.template import TemplateDoesNotExist
 from django.template.backends.base import BaseEngine
-from django.template.backends.django import get_installed_libraries
+from django.template.backends.django import DjangoTemplates, get_installed_libraries
 
 from .django_rusty_templates import Engine, Template
 
 __all__ = ["RustyTemplates", "Template"]
 
 
-class RustyTemplates(BaseEngine):
+class RustyTemplates(DjangoTemplates):
     app_dirname = "templates"
 
     def __init__(self, params):
@@ -19,7 +19,7 @@ class RustyTemplates(BaseEngine):
         options.setdefault("file_charset", "utf-8")
         libraries = options.get("libraries", {})
         options["libraries"] = self.get_templatetag_libraries(libraries)
-        super().__init__(params)
+        BaseEngine.__init__(self, params)
         self.engine = Engine(self.dirs, self.app_dirs, **options)
 
     def from_string(self, template_code):

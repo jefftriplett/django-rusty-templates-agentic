@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use pyo3::exceptions::{PyAttributeError, PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -19,6 +20,10 @@ use crate::types::Text;
 use crate::types::TranslatedText;
 use dtl_lexer::types::Variable;
 
+static BASE_CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static DIR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static SIGNATURE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
 static GETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 /// Helper function to translate a string using Django's gettext
@@ -29,8 +34,9 @@ pub fn gettext(py: Python<'_>, text: &str) -> PyResult<String> {
 
 fn has_truthy_attr(variable: &Bound<'_, PyAny>, attr: &Bound<'_, PyString>) -> PyResult<bool> {
     match variable.getattr(attr) {
-        Ok(attr) if attr.is_truthy()? => Ok(true),
-        _ => Ok(false),
+        Ok(attr) => attr.is_truthy(),
+        Err(error) if error.is_instance_of::<PyAttributeError>(variable.py()) => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -45,7 +51,89 @@ fn resolve_callable(variable: Bound<'_, PyAny>) -> PyResult<Option<Bound<'_, PyA
     if has_truthy_attr(&variable, intern!(py, "alters_data"))? {
         return Ok(None);
     }
-    Ok(Some(variable.call0()?))
+    match variable.call0() {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.is_instance_of::<PyTypeError>(py) => {
+            let signature = SIGNATURE
+                .import(py, "django.utils.inspect", "signature")?
+                .call1((&variable,));
+            match signature {
+                Err(signature_error) if signature_error.is_instance_of::<PyValueError>(py) => {
+                    Ok(None)
+                }
+                Err(signature_error) => Err(signature_error),
+                Ok(signature) => match signature.call_method0("bind") {
+                    Err(bind_error) if bind_error.is_instance_of::<PyTypeError>(py) => Ok(None),
+                    Err(bind_error) => Err(bind_error),
+                    Ok(_) => Err(error),
+                },
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn lookup_part<'py>(
+    variable: Bound<'py, PyAny>,
+    part: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let py = variable.py();
+    if variable.get_type().hasattr("__getitem__")? {
+        match variable.get_item(part) {
+            Ok(value) => return Ok(Some(value)),
+            Err(error)
+                if error.is_instance_of::<PyTypeError>(py)
+                    || error.is_instance_of::<PyAttributeError>(py)
+                    || error.is_instance_of::<PyKeyError>(py)
+                    || error.is_instance_of::<PyValueError>(py)
+                    || error.is_instance_of::<PyIndexError>(py) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let base_context = BASE_CONTEXT.import(py, "django.template.context", "BaseContext")?;
+    let is_context = variable.is_instance(base_context)?;
+    if !is_context || !variable.get_type().hasattr(part)? {
+        match variable.getattr(part) {
+            Ok(value) => return Ok(Some(value)),
+            Err(error)
+                if error.is_instance_of::<PyTypeError>(py)
+                    || error.is_instance_of::<PyAttributeError>(py) =>
+            {
+                if !is_context
+                    && DIR
+                        .import(py, "builtins", "dir")?
+                        .call1((&variable,))?
+                        .contains(part)?
+                {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let Ok(index) = part.parse::<isize>() else {
+        return Ok(None);
+    };
+    match variable.get_item(index) {
+        Ok(value) => Ok(Some(value)),
+        Err(error)
+            if error.is_instance_of::<PyTypeError>(py)
+                || error.is_instance_of::<PyKeyError>(py)
+                || error.is_instance_of::<PyIndexError>(py)
+                || error.is_instance_of::<PyValueError>(py) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn silent_failure(error: &PyErr, py: Python<'_>) -> bool {
+    error
+        .value(py)
+        .getattr("silent_variable_failure")
+        .and_then(|value| value.is_truthy())
+        .unwrap_or(false)
 }
 
 impl Resolve for Variable {
@@ -61,46 +149,58 @@ impl Resolve for Variable {
         let Some(variable) = context.get(first) else {
             return Ok(None);
         };
-        let Some(mut variable) = resolve_callable(variable.bind(py).clone())
-            .map_err(|err| err.annotate(py, self.at, "here", template))?
-        else {
-            return Ok(None);
+        let mut variable = match resolve_callable(variable.bind(py).clone()) {
+            Ok(Some(variable)) => variable,
+            Ok(None) => return Ok(Some(Content::Py(context.invalid_value(py, None)?))),
+            Err(error) if silent_failure(&error, py) => {
+                return Ok(Some(Content::Py(context.invalid_value(py, None)?)));
+            }
+            Err(error) => return Err(error.annotate(py, self.at, "here", template).into()),
         };
-
         for (part, key_at) in parts {
-            variable = match variable.get_item(part) {
-                Ok(variable) => variable,
-                Err(_) => match variable.getattr(part) {
-                    Ok(variable) => variable,
-                    Err(_) => {
-                        let Ok(int) = part.parse::<usize>() else {
-                            return match failures {
-                                ResolveFailures::Raise => Err(RenderError::VariableDoesNotExist {
-                                    key: part.to_string(),
-                                    object: variable.str()?.to_string(),
-                                    key_at: key_at.into(),
-                                    object_at: Some(object_at.into()),
-                                }
-                                .into()),
-                                ResolveFailures::IgnoreVariableDoesNotExist => Ok(None),
-                            };
-                        };
-                        match variable.get_item(int) {
-                            Ok(variable) => variable,
-                            Err(_) => todo!(),
+            let resolved = lookup_part(variable.clone(), part).and_then(|value| match value {
+                Some(value) => resolve_callable(value),
+                None => Ok(None),
+            });
+            variable = match resolved {
+                Ok(Some(value)) => value,
+                Ok(None) => {
+                    return match failures {
+                        ResolveFailures::Raise => Err(RenderError::VariableDoesNotExist {
+                            key: part.to_string(),
+                            object: variable.str()?.to_string(),
+                            key_at: key_at.into(),
+                            object_at: Some(object_at.into()),
                         }
-                    }
-                },
-            };
-            variable = match resolve_callable(variable)
-                .map_err(|err| err.annotate(py, self.at, "here", template))?
-            {
-                Some(variable) => variable,
-                None => return Ok(None),
+                        .into()),
+                        ResolveFailures::IgnoreVariableDoesNotExist => Ok(None),
+                    };
+                }
+                Err(error) if silent_failure(&error, py) => {
+                    return Ok(Some(Content::Py(context.invalid_value(py, None)?)));
+                }
+                Err(error) => return Err(error.annotate(py, self.at, "here", template).into()),
             };
             object_at.1 += key_at.1 + 1;
         }
         Ok(Some(Content::Py(variable)))
+    }
+}
+
+fn resolve_output_variable<'t, 'py>(
+    variable: &Variable,
+    py: Python<'py>,
+    template: TemplateString<'t>,
+    context: &mut Context,
+) -> ResolveResult<'t, 'py> {
+    match variable.resolve(py, template, context, ResolveFailures::Raise) {
+        Ok(None)
+        | Err(crate::error::PyRenderError::RenderError(RenderError::VariableDoesNotExist {
+            ..
+        })) => Ok(Some(Content::Py(
+            context.invalid_value(py, Some(template.content(variable.at)))?,
+        ))),
+        result => result,
     }
 }
 
@@ -134,6 +234,22 @@ impl Resolve for ForVariable {
     }
 }
 
+fn unescape_literal(text: &str) -> Cow<'_, str> {
+    if !text.contains('\\') {
+        return Cow::Borrowed(text);
+    }
+    let mut chars = text.chars().peekable();
+    let mut output = String::with_capacity(text.len());
+    while let Some(character) = chars.next() {
+        if character == '\\' && matches!(chars.peek(), Some('\\' | '\'' | '"')) {
+            output.push(chars.next().expect("peeked character"));
+        } else {
+            output.push(character);
+        }
+    }
+    Cow::Owned(output)
+}
+
 impl Resolve for Text {
     fn resolve<'t, 'py>(
         &self,
@@ -142,7 +258,7 @@ impl Resolve for Text {
         context: &mut Context,
         _failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
-        let resolved = Cow::Borrowed(template.content(self.at));
+        let resolved = unescape_literal(template.content(self.at));
         Ok(Some(Content::String(match context.autoescape {
             false => ContentString::String(resolved),
             true => ContentString::HtmlSafe(resolved),
@@ -159,7 +275,7 @@ impl Resolve for TranslatedText {
         _failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
         let text = template.content(self.at);
-        let resolved = gettext(py, text)?;
+        let resolved = gettext(py, &unescape_literal(text))?;
         Ok(Some(Content::String(match context.autoescape {
             false => ContentString::String(Cow::Owned(resolved)),
             true => ContentString::HtmlSafe(Cow::Owned(resolved)),
@@ -214,10 +330,17 @@ impl Resolve for TagElement {
         failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
         match self {
-            Self::Text(text) | Self::TranslatedText(text) => {
-                text.resolve(py, template, context, failures)
+            Self::Text(text) => text.resolve(py, template, context, failures),
+            Self::TranslatedText(text) => {
+                TranslatedText::new(text.at).resolve(py, template, context, failures)
             }
-            Self::Variable(variable) => variable.resolve(py, template, context, failures),
+            Self::Variable(variable) => {
+                if failures == ResolveFailures::Raise {
+                    resolve_output_variable(variable, py, template, context)
+                } else {
+                    variable.resolve(py, template, context, failures)
+                }
+            }
             Self::ForVariable(variable) => variable.resolve(py, template, context, failures),
             Self::Filter(filter) => filter.resolve(py, template, context, failures),
             Self::Int(int) => Ok(Some(Content::Int(int.clone()))),
@@ -252,12 +375,20 @@ impl Render for TokenTree {
         context: &mut Context,
     ) -> RenderResult<'t> {
         match self {
-            Self::Text(text) => text.render(py, template, context),
-            Self::TranslatedText(_text) => todo!(),
+            Self::Text(text) => Ok(Cow::Borrowed(template.content(text.at))),
+            Self::LiteralText(text) => text.render(py, template, context),
+            Self::TranslatedText(text) => {
+                TranslatedText::new(text.at).render(py, template, context)
+            }
             Self::Int(n) => Ok(n.to_string().into()),
             Self::Float(f) => Ok(f.to_string().into()),
             Self::Tag(tag) => tag.render(py, template, context),
-            Self::Variable(variable) => variable.render(py, template, context),
+            Self::Variable(variable) => {
+                match resolve_output_variable(variable, py, template, context)? {
+                    Some(value) => value.render(context).map_err(Into::into),
+                    None => Ok(Cow::Borrowed("")),
+                }
+            }
             Self::ForVariable(variable) => variable.render(py, template, context),
             Self::Filter(filter) => filter.render(py, template, context),
         }

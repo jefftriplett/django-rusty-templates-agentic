@@ -1,7 +1,6 @@
 from inline_snapshot import snapshot
 import pytest
 from django.template import engines
-from django.template.base import VariableDoesNotExist
 from django.template.exceptions import TemplateSyntaxError
 from django.test import RequestFactory
 from django.urls import resolve, NoReverseMatch
@@ -166,19 +165,9 @@ def test_render_url_view_name_error():
     msg = "Reverse for '' not found. '' is not a valid view function or pattern name."
     assert django_error.value.args[0] == msg
 
-    with pytest.raises(VariableDoesNotExist) as rust_error:
+    with pytest.raises(NoReverseMatch) as rust_error:
         rust_template.render({"foo": {"bar": 1}})
-
-    expected = """\
-  × Failed lookup for key [1b] in 1
-   ╭────
- 1 │ {% url foo.bar.1b.baz %}
-   ·        ───┬─── ─┬
-   ·           │     ╰── key
-   ·           ╰── 1
-   ╰────
-"""
-    assert str(rust_error.value) == expected
+    assert "Reverse for '' not found." in str(rust_error.value)
 
 
 def test_render_url_invalid_keyword(assert_parse_error):
@@ -289,7 +278,7 @@ def test_render_url_missing_extra_kwarg(assert_render_error):
     rusty_message = snapshot(
         """\
   × Reverse for 'user' with keyword arguments '{'username': 'Lily', 'other':
-  │ None}' not found. 1 pattern(s) tried: ['users/(?P<username>[^/]+)/\\\\Z']
+  │ ''}' not found. 1 pattern(s) tried: ['users/(?P<username>[^/]+)/\\\\Z']
    ╭────
  1 │ {% url 'users:user' username='Lily' other=missing %}
    · ──────────────────────────┬─────────────────────────

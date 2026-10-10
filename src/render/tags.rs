@@ -113,9 +113,11 @@ impl Resolve for Url {
         match &self.asvar {
             None => Ok(Some(Content::Py(url?))),
             Some(variable) => {
-                if let Ok(url) = url.ok_or_isinstance_of::<NoReverseMatch>(py)? {
-                    context.insert(variable.clone(), url);
-                }
+                let value = match url.ok_or_isinstance_of::<NoReverseMatch>(py)? {
+                    Ok(url) => url,
+                    Err(_) => PyString::new(py, "").into_any(),
+                };
+                context.insert(variable.clone(), value);
                 Ok(None)
             }
         }
@@ -810,12 +812,7 @@ impl Render for Tag {
                     .iter()
                     .map(|(name, value)| {
                         value
-                            .resolve(
-                                py,
-                                template,
-                                context,
-                                ResolveFailures::IgnoreVariableDoesNotExist,
-                            )
+                            .resolve(py, template, context, ResolveFailures::Raise)
                             .map(|value| (name, value.unwrap_or_else(|| "".as_content()).to_py(py)))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -841,7 +838,7 @@ impl Render for Tag {
                     value = filter.resolve(value, py, template, context)?;
                 }
                 match value {
-                    Some(value) => value.render(context)?,
+                    Some(value) => Cow::Owned(value.to_py(py).str()?.extract::<String>()?),
                     None => Cow::Borrowed(""),
                 }
             }
@@ -1037,18 +1034,20 @@ impl Render for For {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> RenderResult<'t> {
-        let Some(iterable) =
-            self.iterable
-                .iterable
-                .resolve(py, template, context, ResolveFailures::Raise)?
+        let Some(iterable) = self.iterable.iterable.resolve(
+            py,
+            template,
+            context,
+            ResolveFailures::IgnoreVariableDoesNotExist,
+        )?
         else {
             return self.empty.render(py, template, context);
         };
         match iterable {
             Content::Py(iterable) => self.render_python(&iterable, py, template, context),
             Content::String(s) => self.render_string(s.as_raw(), py, template, context),
-            Content::Float(_) | Content::Int(_) | Content::Bool(_) => {
-                unreachable!("float, int and bool literals are not iterable")
+            value @ (Content::Float(_) | Content::Int(_) | Content::Bool(_)) => {
+                self.render_python(&value.to_py(py), py, template, context)
             }
         }
     }
@@ -1156,6 +1155,16 @@ impl Include {
                     .map(IncludeTemplate::Template)
             }
             Content::Py(content) => {
+                if !content.is_truthy()? {
+                    return Err(TemplateDoesNotExist::new_err("No template names provided")
+                        .annotate(
+                            py,
+                            self.template_at(),
+                            "This variable is not in the context",
+                            template,
+                        )
+                        .into());
+                }
                 if let Some(render) = content.getattr_opt(intern!(py, "render"))?
                     && render.is_callable()
                 {
@@ -1289,20 +1298,20 @@ impl Render for Include {
     }
 }
 
-fn call_tag<'t>(
-    py: Python<'_>,
+fn call_tag<'t, 'py>(
+    py: Python<'py>,
     func: &Arc<Py<PyAny>>,
     at: At,
     template: TemplateString<'t>,
-    args: VecDeque<Bound<'_, PyAny>>,
-    kwargs: Bound<'_, PyDict>,
-) -> RenderResult<'t> {
+    args: VecDeque<Bound<'py, PyAny>>,
+    kwargs: Bound<'py, PyDict>,
+) -> Result<Bound<'py, PyAny>, PyRenderError> {
     let func = func.bind(py);
     match func.call(
         PyTuple::new(py, args).expect("All arguments should be valid Python objects"),
         Some(&kwargs),
     ) {
-        Ok(content) => Ok(Cow::Owned(content.to_string())),
+        Ok(content) => Ok(content),
         Err(error) => Err(error.annotate(py, at, "here", template).into()),
     }
 }
@@ -1383,17 +1392,27 @@ fn build_kwargs<'py>(
 }
 
 fn store_target_var<'t>(
-    py: Python<'_>,
+    _py: Python<'_>,
     context: &mut Context,
-    content: Cow<'t, str>,
+    content: Bound<'_, PyAny>,
     target_var: Option<&String>,
-) -> Cow<'t, str> {
+) -> RenderResult<'t> {
     match target_var {
-        None => content,
+        None => {
+            let output = if context.autoescape {
+                content
+                    .py()
+                    .import("django.utils.html")?
+                    .getattr("conditional_escape")?
+                    .call1((content,))?
+            } else {
+                content
+            };
+            Ok(Cow::Owned(output.str()?.extract::<String>()?))
+        }
         Some(target_var) => {
-            let content = PyString::new(py, &content).into_any();
             context.insert(target_var.clone(), content);
-            Cow::Borrowed("")
+            Ok(Cow::Borrowed(""))
         }
     }
 }
@@ -1498,12 +1517,7 @@ impl Render for SimpleTag {
         } else {
             call_tag(py, &self.func, self.at, template, args, kwargs)?
         };
-        Ok(store_target_var(
-            py,
-            context,
-            content,
-            self.target_var.as_ref(),
-        ))
+        store_target_var(py, context, content, self.target_var.as_ref())
     }
 }
 
@@ -1518,7 +1532,10 @@ impl Render for SimpleBlockTag {
         let kwargs = build_kwargs(py, template, context, &self.kwargs)?;
 
         let content = self.nodes.render(py, template, context)?;
-        let content = PyString::new(py, &content).into_any();
+        let content = py
+            .import("django.utils.safestring")?
+            .getattr("mark_safe")?
+            .call1((&*content,))?;
         args.push_front(content);
 
         let content = if self.takes_context {
@@ -1535,12 +1552,7 @@ impl Render for SimpleBlockTag {
         } else {
             call_tag(py, &self.func, self.at, template, args, kwargs)?
         };
-        Ok(store_target_var(
-            py,
-            context,
-            content,
-            self.target_var.as_ref(),
-        ))
+        store_target_var(py, context, content, self.target_var.as_ref())
     }
 }
 

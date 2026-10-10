@@ -191,6 +191,14 @@ impl Filter {
         left: TagElement,
         right: Option<Argument>,
     ) -> Result<Self, ParseError> {
+        if let Some(filter) = parser.external_filters.get(parser.template.content(at)) {
+            return Ok(Self {
+                at,
+                all_at,
+                left,
+                filter: FilterType::External(ExternalFilter::new(filter.clone().unbind(), right)),
+            });
+        }
         let django_filter = match parser.template.content(at) {
             "pluralize" => Some(("pluralize", false, true)),
             "join" => Some(("join", true, true)),
@@ -204,6 +212,8 @@ impl Filter {
             "timesince" => Some(("timesince", false, true)),
             "timeuntil" => Some(("timeuntil", false, true)),
             "urlencode" => Some(("urlencode", false, true)),
+            "urlize" => Some(("urlize", false, false)),
+            "urlizetrunc" => Some(("urlizetrunc", true, true)),
             "json_script" => Some(("json_script", false, true)),
             "floatformat" => Some(("floatformat", false, true)),
             "unordered_list" => Some(("unordered_list", false, false)),
@@ -666,12 +676,7 @@ fn parse_for_loop(
         .collect();
     let expression_content = expression_token.content(parser.template);
     let expression = match expression_token.token_type {
-        ForTokenType::Numeric => {
-            return Err(ParseError::NotIterable {
-                literal: expression_content.to_string(),
-                at: expression_token.at.into(),
-            });
-        }
+        ForTokenType::Numeric => parse_numeric(expression_content, expression_token.at)?,
         ForTokenType::Text => TagElement::Text(Text::new(text_content_at(expression_token.at))),
         ForTokenType::TranslatedText => {
             TagElement::TranslatedText(Text::new(translated_text_content_at(expression_token.at)))
@@ -933,6 +938,7 @@ impl EndTag {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TokenTree {
     Text(Text),
+    LiteralText(Text),
     TranslatedText(Text),
     Int(BigInt),
     Float(f64),
@@ -945,7 +951,7 @@ pub enum TokenTree {
 impl From<TagElement> for TokenTree {
     fn from(tag_element: TagElement) -> Self {
         match tag_element {
-            TagElement::Text(text) => Self::Text(text),
+            TagElement::Text(text) => Self::LiteralText(text),
             TagElement::TranslatedText(text) => Self::TranslatedText(text),
             TagElement::Variable(variable) => Self::Variable(variable),
             TagElement::ForVariable(variable) => Self::ForVariable(variable),
@@ -1046,12 +1052,6 @@ pub enum ParseError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     IncludeLexerError(#[from] IncludeLexerError),
-    #[error("{literal} is not iterable")]
-    NotIterable {
-        literal: String,
-        #[label("here")]
-        at: SourceSpan,
-    },
     #[error(transparent)]
     #[diagnostic(transparent)]
     RelativePathError(#[from] RelativePathError),
@@ -1408,6 +1408,19 @@ impl<'t, 'py> Parser<'t, 'py> {
     }
 
     pub fn parse(&mut self) -> Result<Vec<TokenTree>, PyParseError> {
+        let libraries = self
+            .engine
+            .template_builtins
+            .iter()
+            .skip(3)
+            .map(|library| library.bind(self.py).clone())
+            .collect::<Vec<_>>();
+        for library in libraries {
+            self.external_filters.extend(self.get_filters(&library)?);
+            for (name, tag) in self.get_tags(&library)? {
+                self.register_tag(&name, tag)?;
+            }
+        }
         let mut nodes = Vec::new();
         while let Some(token) = self.lexer.next() {
             let node = match token.token_type {
@@ -1537,8 +1550,17 @@ impl<'t, 'py> Parser<'t, 'py> {
     ) -> Result<TagElement, ParseError> {
         let trimmed = variable.trim_start();
         let start = start + variable.len() - trimmed.len();
-        let (mut var, at, filter_lexer) = if let Some(quote @ ('"' | '\'')) = trimmed.chars().next()
-        {
+        let (mut var, at, filter_lexer) = if trimmed.starts_with("_(") {
+            let mut chars = trimmed.chars();
+            chars.next();
+            chars.next();
+            let (at, byte, rest) = dtl_lexer::common::lex_translated(start, trimmed, &mut chars)?;
+            (
+                TagElement::TranslatedText(Text::new(translated_text_content_at(at))),
+                at,
+                FilterLexer::new(rest, byte)?,
+            )
+        } else if let Some(quote @ ('"' | '\'')) = trimmed.chars().next() {
             let mut chars = trimmed.chars();
             chars.next();
             let (at, byte, rest) = dtl_lexer::common::lex_text(start, trimmed, &mut chars, quote)?;
@@ -2101,11 +2123,21 @@ impl<'t, 'py> Parser<'t, 'py> {
                 at,
                 parts: Some(tag.parts),
             }),
-            "else" => Either::Right(EndTag {
-                end: EndTagType::Else,
-                at,
-                parts: None,
-            }),
+            "else" => {
+                if !self.template.content(tag.parts.at).trim().is_empty() {
+                    return Err(
+                        crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
+                            "Malformed template tag",
+                        )
+                        .into(),
+                    );
+                }
+                Either::Right(EndTag {
+                    end: EndTagType::Else,
+                    at,
+                    parts: None,
+                })
+            }
             "endif" => Either::Right(EndTag {
                 end: EndTagType::EndIf,
                 at,
@@ -2317,6 +2349,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         let tokens: Vec<_> = LoadLexer::new(self.template, parts).collect();
         let mut rev = tokens.iter().rev();
         if let (Some(last), Some(prev)) = (rev.next(), rev.next())
+            && tokens.len() > 2
             && self.template.content(prev.at) == "from"
         {
             let library = last.load_library(self.py, &self.engine.libraries, self.template)?;
@@ -3187,7 +3220,11 @@ mod tests {
             let template_string = "{{ foo|addslashes:invalid }}".to_string();
             let error = Template::new_from_string(py, template_string, engine).unwrap_err();
 
-            let error_string = format!("{error}");
+            let error_string = error
+                .value(py)
+                .getattr("rusty_diagnostic")
+                .unwrap()
+                .to_string();
             assert!(error_string.contains("addslashes filter does not take an argument"));
         });
     }

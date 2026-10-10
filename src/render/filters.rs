@@ -37,7 +37,29 @@ impl Resolve for Filter {
         context: &mut Context,
         failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
-        let mut left = self.left.resolve(py, template, context, failures)?;
+        let resolved = match &self.left {
+            crate::parse::TagElement::Variable(variable) => {
+                variable.resolve(py, template, context, failures)
+            }
+            left => left.resolve(py, template, context, failures),
+        };
+        let mut left = match resolved {
+            Err(PyRenderError::RenderError(RenderError::VariableDoesNotExist { .. }))
+                if matches!(self.left, crate::parse::TagElement::Variable(_)) =>
+            {
+                None
+            }
+            result => result?,
+        };
+        if left.is_none()
+            && failures == ResolveFailures::Raise
+            && !context.string_if_invalid.is_empty()
+            && let crate::parse::TagElement::Variable(variable) = &self.left
+        {
+            return Ok(Some(Content::Py(
+                context.invalid_value(py, Some(template.content(variable.at)))?,
+            )));
+        }
         if left.is_none()
             && matches!(failures, ResolveFailures::IgnoreVariableDoesNotExist)
             && matches!(self.filter, FilterType::DefaultIfNone(_))
@@ -413,7 +435,7 @@ impl ResolveFilter for EscapeFilter {
     fn resolve<'t, 'py>(
         &self,
         variable: Option<Content<'t, 'py>>,
-        _py: Python<'py>,
+        py: Python<'py>,
         _template: TemplateString<'t>,
         _context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
@@ -429,10 +451,11 @@ impl ResolveFilter for EscapeFilter {
                     Content::Int(n) => Cow::Owned(n.to_string()),
                     Content::Float(n) => Cow::Owned(n.to_string()),
                     Content::Py(object) => {
-                        let content = object.str()?.extract::<String>()?;
-                        let mut encoded = String::new();
-                        encode_quoted_attribute_to_string(&content, &mut encoded);
-                        Cow::Owned(encoded)
+                        let escaped = py
+                            .import("django.utils.html")?
+                            .getattr("conditional_escape")?
+                            .call1((object,))?;
+                        Cow::Owned(escaped.extract::<String>()?)
                     }
                     Content::Bool(true) => Cow::Borrowed("True"),
                     Content::Bool(false) => Cow::Borrowed("False"),
@@ -567,6 +590,9 @@ impl ResolveFilter for ForceEscapeFilter {
             Some(Content::String(ContentString::HtmlSafe(c))) => {
                 Some(Content::String(ContentString::String(c)))
             }
+            Some(Content::Py(value)) => Some(Content::String(ContentString::String(Cow::Owned(
+                value.str()?.extract::<String>()?,
+            )))),
             other => other,
         };
         EscapeFilter.resolve(variable, py, template, context)
@@ -777,7 +803,12 @@ impl ResolveFilter for UpperFilter {
         let content = match variable {
             Some(content) => {
                 let content = content.resolve_string(context)?;
-                content.map_content(|content| Cow::Owned(content.to_uppercase()))
+                let uppercase = Cow::Owned(content.as_raw().to_uppercase());
+                Content::String(if context.autoescape {
+                    ContentString::HtmlUnsafe(uppercase)
+                } else {
+                    ContentString::String(uppercase)
+                })
             }
             None => "".as_content(),
         };
@@ -1187,7 +1218,11 @@ mod tests {
             let template_string = "{{ var|slugify:invalid }}".to_string();
             let error = Template::new_from_string(py, template_string, engine).unwrap_err();
 
-            let error_string = format!("{error}");
+            let error_string = error
+                .value(py)
+                .getattr("rusty_diagnostic")
+                .unwrap()
+                .to_string();
             assert!(error_string.contains("slugify filter does not take an argument"));
         });
     }
@@ -1253,7 +1288,11 @@ mod tests {
             let template_string = "{{ var|capfirst:invalid }}".to_string();
             let error = Template::new_from_string(py, template_string, engine).unwrap_err();
 
-            let error_string = format!("{error}");
+            let error_string = error
+                .value(py)
+                .getattr("rusty_diagnostic")
+                .unwrap()
+                .to_string();
             assert!(error_string.contains("capfirst filter does not take an argument"));
         });
     }
@@ -1305,7 +1344,11 @@ mod tests {
             let template_string = "{{ var|center }}".to_string();
             let error = Template::new_from_string(py, template_string, engine).unwrap_err();
 
-            let error_string = format!("{error}");
+            let error_string = error
+                .value(py)
+                .getattr("rusty_diagnostic")
+                .unwrap()
+                .to_string();
 
             assert!(error_string.contains("Expected an argument"));
         });

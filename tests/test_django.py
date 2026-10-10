@@ -29,7 +29,7 @@ def test_parse_error():
    ·                              ╰── here
    ╰────
 """
-    assert str(excinfo.value) == expected % (template_dir, os.sep)
+    assert excinfo.value.rusty_diagnostic == expected % (template_dir, os.sep)
 
 
 def test_parse_error_from_string():
@@ -51,4 +51,4 @@ This is an invalid filter name: {{ variable|'invalid'|title }}
    ·                                                 ╰── here
    ╰────
 """
-    assert str(excinfo.value) == expected
+    assert excinfo.value.rusty_diagnostic == expected
