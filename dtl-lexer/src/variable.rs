@@ -268,7 +268,13 @@ impl<'t> FilterLexer<'t> {
         self.byte += next;
 
         let mut chars = self.rest.chars();
-        Ok(Some(match chars.next().unwrap() {
+        let Some(first) = chars.next() else {
+            return Err(LexerError::InvalidRemainder {
+                at: (self.byte - 1, 1).into(),
+            }
+            .into());
+        };
+        Ok(Some(match first {
             '_' => {
                 if let Some('(') = chars.next() {
                     self.lex_translated(&mut chars)?

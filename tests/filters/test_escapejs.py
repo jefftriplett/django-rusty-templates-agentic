@@ -80,26 +80,10 @@ def test_escapejs_chained_with_lower(assert_render):
     assert_render(template, context, r"hello\u003Cworld\u003E")
 
 
-@pytest.mark.parametrize(
-    "value,expected",
-    [
-        pytest.param(
-            "\x7f",
-            r"\u007F",
-            id="c1_control_first_element",
-            marks=pytest.mark.xfail(
-                VERSION < (6, 1), reason="Django before 6.1 does not escape DEL"
-            ),
-        ),
-        pytest.param(
-            "\x9f",
-            r"\u009f",
-            id="c1_control_last_element",
-            marks=pytest.mark.xfail(reason="Django does not escape C1 controls"),
-        ),
-    ],
-)
-def test_escapejs_c1_control_characters(assert_render, value, expected):
+@pytest.mark.parametrize("code", range(0x7F, 0xA0))
+def test_escapejs_c1_control_characters(assert_render, code):
+    value = chr(code)
+    expected = f"\\u{code:04X}" if VERSION >= (6, 1) else value
     template = "{{ value|escapejs }}"
     context = {"value": value}
     assert_render(template, context, expected)
