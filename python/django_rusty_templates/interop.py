@@ -11,10 +11,24 @@ class NativeVariableNode(VariableNode):
     def __init__(self, node, native):
         super().__init__(node.filter_expression)
         self.native = native
+        variables = [node.filter_expression.var]
+        variables.extend(
+            argument
+            for _, arguments in node.filter_expression.filters
+            for lookup, argument in arguments
+            if lookup
+        )
+        self.context_names = tuple(
+            dict.fromkeys(
+                variable.lookups[0]
+                for variable in variables
+                if getattr(variable, "lookups", None)
+            )
+        )
 
     def render(self, context):
         try:
-            return self.native.render(context)
+            return self.native._render_fragment(context, self.context_names)
         except Exception as error:
             # The fragment has its own source offsets. Let Django's node hook
             # annotate this exception against the complete inherited template.

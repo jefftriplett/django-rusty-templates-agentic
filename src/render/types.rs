@@ -78,6 +78,7 @@ pub struct Context {
     pub use_l10n: Option<bool>,
     pub use_tz: Option<bool>,
     pub format_values: bool,
+    pub formatting_context: Option<Py<PyAny>>,
     pub string_if_invalid: String,
     names: Vec<HashSet<String>>,
     include_cache: HashMap<(CycleId, IncludeTemplateKey), Arc<Template>>,
@@ -101,6 +102,7 @@ impl Context {
             use_l10n: None,
             use_tz: None,
             format_values: false,
+            formatting_context: None,
             string_if_invalid: String::new(),
             loops: Vec::new(),
             names: Vec::new(),
@@ -124,6 +126,7 @@ impl Context {
             use_l10n: self.use_l10n,
             use_tz: self.use_tz,
             format_values: self.format_values,
+            formatting_context: self.formatting_context.as_ref().map(|v| v.clone_ref(py)),
             string_if_invalid: self.string_if_invalid.clone(),
             loops: self.loops.clone(),
             names: self.names.clone(),
@@ -179,6 +182,9 @@ impl Context {
     }
 
     pub fn django_context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(context) = &self.formatting_context {
+            return Ok(context.bind(py).clone());
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item("autoescape", self.autoescape)?;
         kwargs.set_item("use_l10n", self.use_l10n)?;
