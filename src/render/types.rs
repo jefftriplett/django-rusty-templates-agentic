@@ -79,6 +79,7 @@ pub struct Context {
     cycle_indices: HashMap<CycleId, usize>,
     changed_states: Vec<HashMap<CycleId, Py<PyAny>>>,
     assigned: HashSet<String>,
+    cycle_variables: HashSet<String>,
 }
 
 impl Context {
@@ -101,6 +102,7 @@ impl Context {
             cycle_indices: HashMap::new(),
             changed_states: vec![HashMap::new()],
             assigned: HashSet::new(),
+            cycle_variables: HashSet::new(),
         }
     }
 
@@ -121,6 +123,7 @@ impl Context {
             include_cache: self.include_cache.clone(),
             cycle_indices: self.cycle_indices.clone(),
             assigned: self.assigned.clone(),
+            cycle_variables: self.cycle_variables.clone(),
             changed_states: self
                 .changed_states
                 .iter()
@@ -383,7 +386,20 @@ impl Context {
         self.cycle_indices.remove(&id);
     }
 
-    pub fn merge_render_state(&mut self, scoped: Self) {
+    pub fn insert_cycle(&mut self, key: String, value: Bound<'_, PyAny>) {
+        self.cycle_variables.insert(key.clone());
+        self.insert(key, value);
+    }
+
+    pub fn merge_render_state(&mut self, py: Python<'_>, scoped: Self, local_names: &[String]) {
+        for name in &scoped.cycle_variables {
+            if !local_names.contains(name)
+                && self.context.contains_key(name)
+                && let Some(value) = scoped.context.get(name).and_then(|values| values.last())
+            {
+                self.insert_cycle(name.clone(), value.bind(py).clone());
+            }
+        }
         self.cycle_indices = scoped.cycle_indices;
         self.changed_states = scoped.changed_states;
         self.include_cache = scoped.include_cache;

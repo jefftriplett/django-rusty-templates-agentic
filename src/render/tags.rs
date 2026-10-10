@@ -820,11 +820,15 @@ impl Render for Tag {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut scoped = context.clone_ref(py);
+                let local_names = values
+                    .iter()
+                    .map(|(name, _)| (*name).clone())
+                    .collect::<Vec<_>>();
                 for (name, value) in values {
                     scoped.insert(name.clone(), value);
                 }
                 let rendered = nodes.render(py, template, &mut scoped);
-                context.merge_render_state(scoped);
+                context.merge_render_state(py, scoped, &local_names);
                 rendered?
             }
             Self::FilterBlock { filters, nodes } => {
@@ -1754,9 +1758,9 @@ impl NamedCycle {
         let ResolvedCycleValue { at, content } = self.cycle.resolve_next(py, template, context)?;
 
         if let Some(content) = &content {
-            context.insert(self.asvar.clone(), content.to_py(py));
+            context.insert_cycle(self.asvar.clone(), content.to_py(py));
         } else {
-            context.insert(self.asvar.clone(), intern!(py, "").clone().into_any());
+            context.insert_cycle(self.asvar.clone(), intern!(py, "").clone().into_any());
         }
 
         Ok(ResolvedCycleValue { at, content })
