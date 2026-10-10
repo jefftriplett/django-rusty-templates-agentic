@@ -59,3 +59,13 @@ def test_missing_template_cache_avoids_repeated_loader_reads(debug):
             with pytest.raises(TemplateDoesNotExist):
                 engine.get_template("missing.html#fragment")
         contents.assert_called_once()
+
+
+def test_cached_partial_source_keeps_loader_origin():
+    engine = partial_engine(debug=True)
+    for _ in range(2):
+        full = engine.get_template("parts.html")
+        partial = engine.get_template("parts.html#greeting")
+        assert partial.source == full.source
+        assert partial.origin.loader is not None
+        assert partial.render(Context({"name": "<Alice>"})) == "Hi &lt;Alice&gt;"

@@ -90,6 +90,9 @@ class InteropTemplate(Template):
     def bind_origin(self, origin):
         old_origin = self.origin
         self.origin = origin
+        for partial in self.extra_data.get("partials", {}).values():
+            if partial.origin is old_origin:
+                partial.origin = origin
         for node in self.nodelist.get_nodes_by_type(Node):
             if node.origin is old_origin:
                 node.origin = origin
@@ -116,6 +119,7 @@ def find_template(engine, name, skip=None):
     # the same filename from an earlier directory in the loader search order.
     from django.template import TemplateDoesNotExist
     from django.template.backends.django import copy_exception
+    from .django_rusty_templates import Template as NativeTemplate
 
     tried = []
     for loader in engine.template_loaders:
@@ -129,8 +133,9 @@ def find_template(engine, name, skip=None):
                     raise cached(name)
                 if isinstance(cached, TemplateDoesNotExist):
                     raise copy_exception(cached)
-                if cached is not None and hasattr(cached, "_django_template"):
-                    return cached, cached.origin
+                if isinstance(cached, NativeTemplate):
+                    template = cached if cached._is_native else cached._django_template
+                    return template, cached.origin
             loader_tried = []
             for origin in loader.get_template_sources(name):
                 if skip is not None and origin in skip:
@@ -142,10 +147,12 @@ def find_template(engine, name, skip=None):
                     tried.append((origin, "Source does not exist"))
                     loader_tried.append((origin.name, "Source does not exist"))
                     continue
-                template = InteropTemplate(contents, origin, name, engine)
+                template = engine._compile_loaded_template(contents, origin, name)
                 if key is not None:
                     loader._cache_template(key, template)
-                    return loader.get_template_cache[key], origin
+                    cached = loader.get_template_cache[key]
+                    template = cached if cached._is_native else cached._django_template
+                    return template, origin
                 return template, origin
             if key is not None:
                 loader._cache_missing(key, loader_tried)
