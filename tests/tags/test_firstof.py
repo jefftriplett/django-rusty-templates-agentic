@@ -148,3 +148,16 @@ def test_firstof_existing_false_then_truthy(assert_render):
         context={"a": "", "b": "ok"},
         expected="ok",
     )
+
+
+@pytest.mark.parametrize("value, expected", [(2, "2"), ("<", "&lt;")])
+def test_firstof_asvar_stores_rendered_string(template_engine, value, expected):
+    from django.template import Context
+
+    context = Context({"value": value})
+    template = template_engine.engine.from_string(
+        "{% firstof value as chosen %}{{ chosen }}"
+    )
+    assert template.render(context) == expected
+    assert context["chosen"] == expected
+    assert isinstance(context["chosen"], str)
