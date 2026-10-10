@@ -2391,7 +2391,10 @@ impl<'t, 'py> Parser<'t, 'py> {
         // their names does not validate or compile the tag's callable.
         if let Ok(code) = tag.getattr("__code__") {
             let names: Vec<String> = code.getattr("co_freevars")?.extract()?;
-            if let Some(index) = names.iter().position(|name| name == "end_name") {
+            if code.getattr("co_name")?.extract::<String>()? == "compile_func"
+                && names.iter().any(|name| name == "func")
+                && let Some(index) = names.iter().position(|name| name == "end_name")
+            {
                 let end_name: String = tag
                     .getattr("__closure__")?
                     .get_item(index)?
@@ -2413,12 +2416,34 @@ impl<'t, 'py> Parser<'t, 'py> {
         name: &str,
         tag: &Bound<'py, PyAny>,
     ) -> Result<(), PyParseError> {
-        let closure = tag.getattr("__closure__")?;
+        let Ok(closure) = tag.getattr("__closure__") else {
+            todo!("Fully custom tag")
+        };
         let tag = if closure.is_none() {
             todo!("Fully custom tag")
         } else {
             let tag_code = tag.getattr("__code__")?;
             let closure_names: Vec<String> = tag_code.getattr("co_freevars")?.extract()?;
+            // Only Django's generated helpers have the closure layout below.
+            // Arbitrary compilers, including closures and callable objects, use
+            // the compatible Python parser instead of indexing assumed cells.
+            if tag_code.getattr("co_name")?.extract::<String>()? != "compile_func"
+                || ![
+                    "defaults",
+                    "func",
+                    "function_name",
+                    "kwonly",
+                    "kwonly_defaults",
+                    "params",
+                    "takes_context",
+                    "varargs",
+                    "varkw",
+                ]
+                .iter()
+                .all(|required| closure_names.iter().any(|name| name == required))
+            {
+                todo!("Fully custom tag")
+            }
             let closure_values = closure
                 .try_iter()?
                 .map(|v| v?.getattr("cell_contents"))
