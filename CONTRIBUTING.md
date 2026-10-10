@@ -111,7 +111,7 @@ $ just rust-coverage-browser
 
 ### Comprehensive CI controls
 
-This restoration remains a draft PR until approved. Marking it ready for review runs the broader jobs; it does not merge the PR. Draft pushes run only `Ubuntu / Python 3.13 sanity`, preserving the existing check name. `ready_for_review` triggers the deferred matrices. Manual dispatch can run each workflow explicitly. Workflows do not duplicate PR runs on main pushes, and wheel builds remain tagged-release/manual only.
+This restoration remains unmerged until approved. Ready PRs run the broader jobs so platform availability can be evaluated in CI; draft PRs defer them. Marking a PR ready for review does not merge it. Draft pushes run only `Ubuntu / Python 3.13 sanity`, preserving the existing check name. `ready_for_review` triggers the deferred matrices. Manual dispatch can run each workflow explicitly. Workflows do not duplicate PR runs on main pushes, and wheel builds remain tagged-release/manual only.
 
 Python covers Ubuntu, macOS, and Windows with 3.11, 3.12, 3.13, 3.14, 3.14t, and exact final versions 3.15.0/3.15.0t (the Ubuntu/3.13 matrix entry is covered by sanity). Python 3.15 entries install Django 6.1 and use `uv run --no-sync` to preserve that version; all other Python matrix entries use Django 5.2. Build steps assert a final interpreter and the expected Django series. Python 3.10 is removed from CI, without changing the package minimum version. Rust coverage runs on all three operating systems with serial embedded-Python tests. Python coverage runs once on macOS/3.13. Coverage reports are retained as artifacts for seven days; **Codecov uploads remain disabled**.
 
