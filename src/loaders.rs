@@ -6,6 +6,7 @@ use encoding_rs::Encoding;
 use pyo3::exceptions::PyUnicodeError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
+use pyo3::types::PyDict;
 use sugar_path::SugarPath;
 
 use crate::template::django_rusty_templates::{Engine, Template};
@@ -171,6 +172,7 @@ impl AppDirsLoader {
 #[derive(Debug)]
 pub struct CachedLoader {
     pub cache: HashMap<String, Result<Template, LoaderError>>,
+    pub cache_view: Option<Py<PyDict>>,
     pub loaders: Vec<Loader>,
 }
 
@@ -179,6 +181,7 @@ impl CachedLoader {
         Self {
             loaders,
             cache: HashMap::new(),
+            cache_view: None,
         }
     }
 
