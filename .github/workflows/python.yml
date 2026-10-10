@@ -91,6 +91,7 @@ jobs:
         cargo llvm-cov report --workspace --codecov --output-path codecov.json
 
     - name: Upload to codecov
+      if: github.repository == 'LilyFirefly/django-rusty-templates'
       uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
       with:
         files: coverage.xml,codecov.json
