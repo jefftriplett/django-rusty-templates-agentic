@@ -22,6 +22,7 @@ use crate::filters::DateFilter;
 use crate::filters::DefaultFilter;
 use crate::filters::DefaultIfNoneFilter;
 use crate::filters::DivisibleByFilter;
+use crate::filters::DjangoFilter;
 use crate::filters::EscapeFilter;
 use crate::filters::EscapejsFilter;
 use crate::filters::ExternalFilter;
@@ -158,6 +159,49 @@ impl Filter {
         left: TagElement,
         right: Option<Argument>,
     ) -> Result<Self, ParseError> {
+        let django_filter = match parser.template.content(at) {
+            "pluralize" => Some(("pluralize", false, true)),
+            "join" => Some(("join", true, true)),
+            "ljust" => Some(("ljust", true, true)),
+            "rjust" => Some(("rjust", true, true)),
+            "slice" => Some(("slice", true, true)),
+            "stringformat" => Some(("stringformat", true, true)),
+            "truncatechars" => Some(("truncatechars", true, true)),
+            "truncatewords" => Some(("truncatewords", true, true)),
+            "time" => Some(("time", false, true)),
+            "urlencode" => Some(("urlencode", false, true)),
+            "json_script" => Some(("json_script", false, true)),
+            "floatformat" => Some(("floatformat", false, true)),
+            "unordered_list" => Some(("unordered_list", false, false)),
+            "make_list" => Some(("make_list", false, false)),
+            "escapeseq" => Some(("escapeseq", false, false)),
+            "iriencode" => Some(("iriencode", false, false)),
+            "random" => Some(("random", false, false)),
+            "phone2numeric" => Some(("phone2numeric", false, false)),
+            "striptags" => Some(("striptags", false, false)),
+            "linebreaks" => Some(("linebreaks", false, false)),
+            "linebreaksbr" => Some(("linebreaksbr", false, false)),
+            "linenumbers" => Some(("linenumbers", false, false)),
+            "first" => Some(("first", false, false)),
+            _ => None,
+        };
+        if let Some((name, required, accepts_argument)) = django_filter {
+            if required && right.is_none() {
+                return Err(ParseError::MissingArgument { at: at.into() });
+            }
+            if !accepts_argument && let Some(right) = right {
+                return Err(unexpected_argument(name, right));
+            }
+            return Ok(Self {
+                at,
+                all_at,
+                left,
+                filter: FilterType::Django(DjangoFilter {
+                    name,
+                    argument: right,
+                }),
+            });
+        }
         let filter = match parser.template.content(at) {
             "add" => match right {
                 Some(right) => FilterType::Add(AddFilter::new(right)),
@@ -772,6 +816,18 @@ pub enum Tag {
     For(For),
     Include(Include),
     Load,
+    ResetCycle(CycleId),
+    With {
+        assignments: Vec<(String, TagElement)>,
+        nodes: Vec<TokenTree>,
+    },
+    FilterBlock {
+        filters: Vec<FilterType>,
+        nodes: Vec<TokenTree>,
+    },
+    Spaceless(Vec<TokenTree>),
+    Verbatim(Vec<TokenTree>),
+    Debug,
     SimpleTag(SimpleTag),
     SimpleBlockTag(SimpleBlockTag),
     Url(Url),
@@ -780,6 +836,10 @@ pub enum Tag {
     Comment(Comment),
     Now(Now),
     FirstOf(FirstOf),
+    WidthRatio {
+        args: Vec<TagElement>,
+        asvar: Option<String>,
+    },
     TemplateTag(TemplateTag),
     Cycle(Cycle),
 }
@@ -1254,6 +1314,7 @@ pub struct Parser<'t, 'py> {
     external_filters: HashMap<String, Bound<'py, PyAny>>,
     forloop_depth: usize,
     named_cycles: HashMap<String, Cycle>,
+    last_cycle: Option<CycleId>,
 }
 
 impl<'t, 'py> Parser<'t, 'py> {
@@ -1273,6 +1334,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             external_filters: HashMap::new(),
             forloop_depth: 0,
             named_cycles: HashMap::new(),
+            last_cycle: None,
         }
     }
 
@@ -1292,6 +1354,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             external_filters,
             forloop_depth: 0,
             named_cycles: HashMap::new(),
+            last_cycle: None,
         }
     }
 
@@ -1567,6 +1630,146 @@ impl<'t, 'py> Parser<'t, 'py> {
         })
     }
 
+    fn parse_resetcycle(&self, parts: TagParts) -> Result<TokenTree, PyParseError> {
+        let arguments: Vec<_> = self.template.content(parts.at).split_whitespace().collect();
+        let error = |message: String| {
+            crate::template::django_rusty_templates::TemplateSyntaxError::new_err(message)
+        };
+        let id = match arguments.as_slice() {
+            [] => self
+                .last_cycle
+                .ok_or_else(|| error("No cycles in template.".to_string()))?,
+            [name] => match self.named_cycles.get(*name) {
+                Some(Cycle::Simple(cycle)) => cycle.id,
+                Some(Cycle::Named(cycle)) => cycle.cycle.id,
+                Some(Cycle::SilentNamed(cycle)) => cycle.cycle.cycle.id,
+                None => return Err(error(format!("Named cycle '{name}' does not exist.")).into()),
+            },
+            _ => {
+                return Err(
+                    error("'resetcycle' tag accepts at most one argument.".to_string()).into(),
+                );
+            }
+        };
+        Ok(TokenTree::Tag(Tag::ResetCycle(id)))
+    }
+
+    fn parse_with(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
+        let tokens = TagElementKwargLexer::new(self.template, parts)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ParseError::from)?;
+        let mut assignments = Vec::new();
+        if !tokens.is_empty() && tokens.iter().all(|token| token.kwarg.is_some()) {
+            for token in &tokens {
+                let key = token.kwarg.expect("keyword was checked above");
+                assignments.push((self.template.content(key).to_string(), token.parse(self)?));
+            }
+        } else {
+            let mut remaining = tokens.as_slice();
+            while let [value, as_token, name, rest @ ..] = remaining {
+                if self.template.content(as_token.at) != "as" || name.kwarg.is_some() {
+                    break;
+                }
+                assignments.push((
+                    self.template.content(name.at).to_string(),
+                    value.parse(self)?,
+                ));
+                remaining = rest;
+                if let [and, rest @ ..] = remaining
+                    && self.template.content(and.at) == "and"
+                {
+                    remaining = rest;
+                } else {
+                    break;
+                }
+            }
+            if !remaining.is_empty() {
+                assignments.clear();
+            }
+        }
+        if assignments.is_empty() {
+            return Err(
+                crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
+                    "'with' expected at least one variable assignment",
+                )
+                .into(),
+            );
+        }
+        let (nodes, _) = self.parse_until(
+            vec![EndTagType::Custom("endwith".to_string())],
+            "with".into(),
+            at,
+        )?;
+        Ok(TokenTree::Tag(Tag::With { assignments, nodes }))
+    }
+
+    fn parse_filter_block(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
+        // The synthetic numeric input aligns every real filter span with the source.
+        let expression = format!("0|{}", self.template.content(parts.at));
+        let (_, _, lexer) = lex_variable_or_filter(&expression, parts.at.0 - 2)
+            .map_err(ParseError::from)?
+            .expect("the synthetic input is nonempty");
+        let mut filters = Vec::new();
+        for token in lexer {
+            let token = token.map_err(ParseError::from)?;
+            let name = self.template.content(token.at);
+            if matches!(name, "safe" | "escape") {
+                return Err(
+                    crate::template::django_rusty_templates::TemplateSyntaxError::new_err(format!(
+                        r#""{name}" filter is not permitted. Use the "autoescape" tag instead."#
+                    ))
+                    .into(),
+                );
+            }
+            let right = token
+                .argument
+                .as_ref()
+                .map(|argument| argument.parse(self))
+                .transpose()?;
+            filters.push(
+                Filter::new(
+                    self,
+                    token.at,
+                    token.at,
+                    TagElement::Int(BigInt::ZERO),
+                    right,
+                )?
+                .filter,
+            );
+        }
+        let (nodes, _) = self.parse_until(
+            vec![EndTagType::Custom("endfilter".to_string())],
+            "filter".into(),
+            at,
+        )?;
+        Ok(TokenTree::Tag(Tag::FilterBlock { filters, nodes }))
+    }
+
+    fn parse_widthratio(&self, parts: TagParts) -> Result<TokenTree, PyParseError> {
+        let mut tokens = TagElementKwargLexer::new(self.template, parts)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ParseError::from)?;
+        let asvar =
+            if tokens.len() >= 2 && self.template.content(tokens[tokens.len() - 2].at) == "as" {
+                extract_as_variable(&mut tokens, &self.template)?
+            } else {
+                None
+            };
+        if tokens.len() != 3 || tokens.iter().any(|token| token.kwarg.is_some()) {
+            return Err(
+                crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
+                    "widthratio takes three arguments",
+                )
+                .into(),
+            );
+        }
+        let args = tokens
+            .iter()
+            .map(|token| token.parse(self))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(TokenTree::Tag(Tag::WidthRatio { args, asvar }))
+    }
+
     fn parse_firstof(&mut self, parts: TagParts) -> Result<TokenTree, PyParseError> {
         let mut tokens = TagElementKwargLexer::new(self.template, parts.clone())
             .collect::<Result<Vec<_>, _>>()
@@ -1658,6 +1861,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             .collect::<Result<Vec<_>, ParseError>>()?;
 
         let id = CycleId(NEXT_CYCLE_ID.fetch_add(1, Ordering::Relaxed));
+        self.last_cycle = Some(id);
         let simple_cycle = SimpleCycle { id, values };
 
         let Some(name_at) = name_at else {
@@ -1687,6 +1891,30 @@ impl<'t, 'py> Parser<'t, 'py> {
         let tag = lex_tag(tag, at.0 + START_TAG_LEN).map_err(ParseError::from)?;
 
         Ok(match tag.content(self.template) {
+            "resetcycle" => Either::Left(self.parse_resetcycle(tag.parts)?),
+            "with" => Either::Left(self.parse_with(at, tag.parts)?),
+            "filter" => Either::Left(self.parse_filter_block(at, tag.parts)?),
+            "debug" => Either::Left(TokenTree::Tag(Tag::Debug)),
+            "spaceless" | "verbatim" => {
+                let name = tag.content(self.template);
+                let end = if name == "verbatim" {
+                    EndTagType::Verbatim
+                } else {
+                    EndTagType::Custom("endspaceless".to_string())
+                };
+                let (nodes, _) = self.parse_until(vec![end], name.to_string().into(), at)?;
+                Either::Left(TokenTree::Tag(if name == "verbatim" {
+                    Tag::Verbatim(nodes)
+                } else {
+                    Tag::Spaceless(nodes)
+                }))
+            }
+            name @ ("endwith" | "endfilter" | "endspaceless") => Either::Right(EndTag {
+                end: EndTagType::Custom(name.to_string()),
+                at,
+                parts: None,
+            }),
+            "widthratio" => Either::Left(self.parse_widthratio(tag.parts)?),
             "url" => Either::Left(self.parse_url(at, tag.parts)?),
             "firstof" => Either::Left(self.parse_firstof(tag.parts)?),
             "csrf_token" => Either::Left(TokenTree::Tag(Tag::CsrfToken(CsrfToken))),

@@ -10,10 +10,10 @@ use pyo3::types::{PyDate, PyDateTime, PyTime};
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
-    DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, EscapeFilter, EscapejsFilter,
-    ExternalFilter, FilterType, ForceEscapeFilter, LastFilter, LengthFilter, LowerFilter,
-    SafeFilter, SlugifyFilter, TitleFilter, UpperFilter, WordcountFilter, WordwrapFilter,
-    YesnoFilter,
+    DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
+    EscapejsFilter, ExternalFilter, FilterType, ForceEscapeFilter, LastFilter, LengthFilter,
+    LowerFilter, SafeFilter, SlugifyFilter, TitleFilter, UpperFilter, WordcountFilter,
+    WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -21,6 +21,9 @@ use crate::render::types::{AsBorrowedContent, Content, ContentString, Context, I
 use crate::render::{Resolve, ResolveFailures, ResolveResult};
 use dtl_lexer::types::TemplateString;
 use unicode_normalization::UnicodeNormalization;
+
+static DJANGO_FILTERS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static MARK_FILTER_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static GET_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -35,30 +38,43 @@ impl Resolve for Filter {
         failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
         let left = self.left.resolve(py, template, context, failures)?;
-        match &self.filter {
-            FilterType::Add(filter) => filter.resolve(left, py, template, context),
-            FilterType::AddSlashes(filter) => filter.resolve(left, py, template, context),
-            FilterType::Capfirst(filter) => filter.resolve(left, py, template, context),
-            FilterType::Center(filter) => filter.resolve(left, py, template, context),
-            FilterType::Cut(filter) => filter.resolve(left, py, template, context),
-            FilterType::Default(filter) => filter.resolve(left, py, template, context),
-            FilterType::DefaultIfNone(filter) => filter.resolve(left, py, template, context),
-            FilterType::DivisibleBy(filter) => filter.resolve(left, py, template, context),
-            FilterType::Date(filter) => filter.resolve(left, py, template, context),
-            FilterType::Escape(filter) => filter.resolve(left, py, template, context),
-            FilterType::Escapejs(filter) => filter.resolve(left, py, template, context),
-            FilterType::External(filter) => filter.resolve(left, py, template, context),
-            FilterType::ForceEscape(filter) => filter.resolve(left, py, template, context),
-            FilterType::Last(filter) => filter.resolve(left, py, template, context),
-            FilterType::Lower(filter) => filter.resolve(left, py, template, context),
-            FilterType::Length(filter) => filter.resolve(left, py, template, context),
-            FilterType::Safe(filter) => filter.resolve(left, py, template, context),
-            FilterType::Slugify(filter) => filter.resolve(left, py, template, context),
-            FilterType::Title(filter) => filter.resolve(left, py, template, context),
-            FilterType::Upper(filter) => filter.resolve(left, py, template, context),
-            FilterType::Wordcount(filter) => filter.resolve(left, py, template, context),
-            FilterType::Wordwrap(filter) => filter.resolve(left, py, template, context),
-            FilterType::Yesno(filter) => filter.resolve(left, py, template, context),
+        self.filter.resolve(left, py, template, context)
+    }
+}
+
+impl ResolveFilter for FilterType {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        match self {
+            FilterType::Add(filter) => filter.resolve(variable, py, template, context),
+            FilterType::AddSlashes(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Capfirst(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Center(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Cut(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Default(filter) => filter.resolve(variable, py, template, context),
+            FilterType::DefaultIfNone(filter) => filter.resolve(variable, py, template, context),
+            FilterType::DivisibleBy(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Date(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Django(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Escape(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Escapejs(filter) => filter.resolve(variable, py, template, context),
+            FilterType::External(filter) => filter.resolve(variable, py, template, context),
+            FilterType::ForceEscape(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Last(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Lower(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Length(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Safe(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Slugify(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Title(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Upper(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Wordcount(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Wordwrap(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Yesno(filter) => filter.resolve(variable, py, template, context),
         }
     }
 }
@@ -486,6 +502,48 @@ impl ResolveFilter for ExternalFilter {
             None => filter.call1((variable,))?,
         };
         Ok(Some(Content::Py(value)))
+    }
+}
+
+impl ResolveFilter for DjangoFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let registry = DJANGO_FILTERS
+            .import(py, "django.template.defaultfilters", "register")?
+            .getattr("filters")?;
+        let filter = registry.get_item(self.name)?;
+        let value = variable.unwrap_or_else(|| "".as_content()).to_py(py);
+        let safe_type = SAFEDATA.import(py, "django.utils.safestring", "SafeData")?;
+        let preserve_safe = filter
+            .getattr("is_safe")
+            .is_ok_and(|flag| flag.is_truthy().unwrap_or(false))
+            && value.is_instance(safe_type)?;
+        let mut args = vec![value];
+        if let Some(argument) = &self.argument {
+            let argument = argument.resolve(py, template, context, ResolveFailures::Raise)?;
+            args.push(argument.map_or_else(|| py.None().into_bound(py), |value| value.to_py(py)));
+        }
+        let kwargs = pyo3::types::PyDict::new(py);
+        if filter
+            .getattr("needs_autoescape")
+            .is_ok_and(|flag| flag.is_truthy().unwrap_or(false))
+        {
+            kwargs.set_item("autoescape", context.autoescape)?;
+        }
+        let result = filter.call(pyo3::types::PyTuple::new(py, args)?, Some(&kwargs))?;
+        let result = if preserve_safe {
+            MARK_FILTER_SAFE
+                .import(py, "django.utils.safestring", "mark_safe")?
+                .call1((result,))?
+        } else {
+            result
+        };
+        Ok(Some(Content::Py(result)))
     }
 }
 

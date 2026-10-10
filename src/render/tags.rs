@@ -4,13 +4,16 @@ use std::sync::Arc;
 
 use num_bigint::{BigInt, Sign};
 use num_traits::cast::ToPrimitive;
-use pyo3::exceptions::{PyAttributeError, PyTypeError};
+use pyo3::exceptions::{
+    PyAttributeError, PyOverflowError, PyTypeError, PyValueError, PyZeroDivisionError,
+};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
 use pyo3::types::{PyBool, PyDict, PyList, PyNone, PyString, PyTuple};
 
 use crate::parse::Now;
+use crate::render::filters::ResolveFilter;
 use crate::render::lorem::{COMMON_WORDS, paragraphs, words};
 use dtl_lexer::tag::lorem::LoremMethod;
 use dtl_lexer::types::{At, TemplateString};
@@ -25,8 +28,16 @@ use crate::parse::{
     NamedCycle, SilentNamedCycle, SimpleBlockTag, SimpleCycle, SimpleTag, Tag, TagElement, Url,
 };
 use crate::path::construct_relative_path;
-use crate::template::django_rusty_templates::{NoReverseMatch, Template, TemplateDoesNotExist};
+use crate::template::django_rusty_templates::{
+    NoReverseMatch, Template, TemplateDoesNotExist, TemplateSyntaxError,
+};
 use crate::utils::PyResultMethods;
+
+static STRIP_SPACES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static DEBUG_NODE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static MARK_BLOCK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+static BUILTINS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static PROMISE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static REVERSE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -644,6 +655,65 @@ impl Evaluate for IfCondition {
     }
 }
 
+fn render_widthratio(
+    args: &[TagElement],
+    py: Python<'_>,
+    template: TemplateString<'_>,
+    context: &mut Context,
+) -> Result<String, PyRenderError> {
+    let values = args
+        .iter()
+        .map(|arg| {
+            arg.resolve(
+                py,
+                template,
+                context,
+                ResolveFailures::IgnoreVariableDoesNotExist,
+            )
+            .map(|value| value.unwrap_or_else(|| "".as_content()).to_py(py))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let builtins = BUILTINS
+        .get_or_try_init(py, || {
+            py.import("builtins")
+                .map(|module| module.into_any().unbind())
+        })?
+        .bind(py);
+    let width = match builtins.getattr("int")?.call1((&values[2],)) {
+        Ok(width) => width,
+        Err(error)
+            if error.is_instance_of::<PyValueError>(py)
+                || error.is_instance_of::<PyTypeError>(py) =>
+        {
+            return Err(
+                TemplateSyntaxError::new_err("widthratio final argument must be a number").into(),
+            );
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let compute = || -> PyResult<String> {
+        let float = builtins.getattr("float")?;
+        let value = float.call1((&values[0],))?;
+        let maximum = float.call1((&values[1],))?;
+        let ratio = value
+            .call_method1("__truediv__", (maximum,))?
+            .call_method1("__mul__", (width,))?;
+        builtins.getattr("round")?.call1((ratio,))?.str()?.extract()
+    };
+    match compute() {
+        Ok(value) => Ok(value),
+        Err(error) if error.is_instance_of::<PyZeroDivisionError>(py) => Ok("0".to_string()),
+        Err(error)
+            if error.is_instance_of::<PyValueError>(py)
+                || error.is_instance_of::<PyTypeError>(py)
+                || error.is_instance_of::<PyOverflowError>(py) =>
+        {
+            Ok(String::new())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 impl Render for Tag {
     fn render<'t>(
         &self,
@@ -652,6 +722,84 @@ impl Render for Tag {
         context: &mut Context,
     ) -> RenderResult<'t> {
         Ok(match self {
+            Self::ResetCycle(id) => {
+                context.reset_cycle(*id);
+                Cow::Borrowed("")
+            }
+            Self::With { assignments, nodes } => {
+                let values = assignments
+                    .iter()
+                    .map(|(name, value)| {
+                        value
+                            .resolve(
+                                py,
+                                template,
+                                context,
+                                ResolveFailures::IgnoreVariableDoesNotExist,
+                            )
+                            .map(|value| (name, value.unwrap_or_else(|| "".as_content()).to_py(py)))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut scoped = context.clone_ref(py);
+                for (name, value) in values {
+                    scoped.insert(name.clone(), value);
+                }
+                let rendered = nodes.render(py, template, &mut scoped);
+                context.merge_render_state(scoped);
+                rendered?
+            }
+            Self::FilterBlock { filters, nodes } => {
+                let output = nodes.render(py, template, context)?;
+                let safe = MARK_BLOCK_SAFE
+                    .import(py, "django.utils.safestring", "mark_safe")?
+                    .call1((output.as_ref(),))?;
+                let mut value = Some(Content::Py(safe));
+                for filter in filters {
+                    value = filter.resolve(value, py, template, context)?;
+                }
+                match value {
+                    Some(value) => value.render(context)?,
+                    None => Cow::Borrowed(""),
+                }
+            }
+            Self::Spaceless(nodes) => {
+                let output = nodes.render(py, template, context)?;
+                Cow::Owned(
+                    STRIP_SPACES
+                        .import(py, "django.utils.html", "strip_spaces_between_tags")?
+                        .call1((output.trim(),))?
+                        .extract()?,
+                )
+            }
+            Self::Verbatim(nodes) => nodes.render(py, template, context)?,
+            Self::Debug => {
+                let values = context.as_dict(py)?;
+                for name in ["True", "False", "None"] {
+                    if values.contains(name)? {
+                        values.del_item(name)?;
+                    }
+                }
+                let ctx = py
+                    .import("django.template.context")?
+                    .getattr("Context")?
+                    .call1((values,))?;
+                Cow::Owned(
+                    DEBUG_NODE
+                        .import(py, "django.template.defaulttags", "DebugNode")?
+                        .call0()?
+                        .call_method1("render", (ctx,))?
+                        .extract()?,
+                )
+            }
+            Self::WidthRatio { args, asvar } => {
+                let result = render_widthratio(args, py, template, context)?;
+                if let Some(name) = asvar {
+                    context.insert(name.clone(), PyString::new(py, &result).into_any());
+                    Cow::Borrowed("")
+                } else {
+                    Cow::Owned(result)
+                }
+            }
             Self::Cycle(cycle) => cycle.render(py, template, context)?,
             Self::Autoescape { enabled, nodes } => {
                 let autoescape = context.autoescape;
@@ -1027,6 +1175,9 @@ impl Render for Include {
                     .as_ref()
                     .map(|request| request.clone_ref(py));
                 let mut new_context = Context::new(inner_context, request, context.autoescape);
+                new_context.use_l10n = context.use_l10n;
+                new_context.use_tz = context.use_tz;
+                new_context.format_values = context.format_values;
                 include
                     .render(py, &mut new_context, self.template_at(), template)
                     .map(|content| Cow::Owned(content.into_owned()))

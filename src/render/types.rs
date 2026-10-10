@@ -22,6 +22,9 @@ use crate::template::django_rusty_templates::{Engine, Template, get_template, se
 use crate::utils::PyResultMethods;
 use dtl_lexer::types::{At, TemplateString};
 
+static DJANGO_CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static RENDER_VALUE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
 static MARK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 #[derive(Debug, Clone)]
@@ -68,6 +71,9 @@ pub struct Context {
     loops: Vec<ForLoop>,
     pub request: Option<Py<PyAny>>,
     pub autoescape: bool,
+    pub use_l10n: Option<bool>,
+    pub use_tz: Option<bool>,
+    pub format_values: bool,
     names: Vec<HashSet<String>>,
     include_cache: HashMap<IncludeTemplateKey, Arc<Template>>,
     cycle_indices: HashMap<CycleId, usize>,
@@ -84,6 +90,9 @@ impl Context {
             request,
             context,
             autoescape,
+            use_l10n: None,
+            use_tz: None,
+            format_values: false,
             loops: Vec::new(),
             names: Vec::new(),
             include_cache: HashMap::new(),
@@ -100,11 +109,34 @@ impl Context {
                 .map(|(k, v)| (k.clone(), v.iter().map(|v| v.clone_ref(py)).collect()))
                 .collect(),
             autoescape: self.autoescape,
+            use_l10n: self.use_l10n,
+            use_tz: self.use_tz,
+            format_values: self.format_values,
             loops: self.loops.clone(),
             names: self.names.clone(),
             include_cache: self.include_cache.clone(),
             cycle_indices: self.cycle_indices.clone(),
         }
+    }
+
+    pub fn as_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        for (key, values) in &self.context {
+            if let Some(value) = values.last() {
+                dict.set_item(key, value)?;
+            }
+        }
+        Ok(dict)
+    }
+
+    pub fn django_context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("autoescape", self.autoescape)?;
+        kwargs.set_item("use_l10n", self.use_l10n)?;
+        kwargs.set_item("use_tz", self.use_tz)?;
+        DJANGO_CONTEXT
+            .import(py, "django.template.context", "Context")?
+            .call((self.as_dict(py)?,), Some(&kwargs))
     }
 
     pub fn get(&self, key: &str) -> Option<&Py<PyAny>> {
@@ -299,6 +331,15 @@ impl Context {
         }
     }
 
+    pub fn reset_cycle(&mut self, id: CycleId) {
+        self.cycle_indices.remove(&id);
+    }
+
+    pub fn merge_render_state(&mut self, scoped: Self) {
+        self.cycle_indices = scoped.cycle_indices;
+        self.include_cache = scoped.include_cache;
+    }
+
     pub fn next_cycle_index(&mut self, id: CycleId, length: usize) -> usize {
         *self
             .cycle_indices
@@ -481,6 +522,13 @@ fn render_value_in_context<'t>(value: ContentString<'t>, context: &Context) -> C
 impl<'t, 'py> Content<'t, 'py> {
     pub fn render(self, context: &Context) -> PyResult<Cow<'t, str>> {
         let output = match self {
+            Self::Py(content) if context.format_values => {
+                let py = content.py();
+                let rendered = RENDER_VALUE
+                    .import(py, "django.template.base", "render_value_in_context")?
+                    .call1((content, context.django_context(py)?))?;
+                return Ok(Cow::Owned(rendered.extract()?));
+            }
             Self::Py(content) => resolve_python(content, context)?,
             Self::String(content) => content,
             Self::Float(content) => return Ok(content.to_string().into()),
