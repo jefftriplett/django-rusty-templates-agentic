@@ -34,6 +34,10 @@ pub struct ForLoop {
 }
 
 impl ForLoop {
+    pub fn length(&self) -> usize {
+        self.len
+    }
+
     pub fn counter0(&self) -> usize {
         self.count
     }
@@ -336,6 +340,16 @@ impl Context {
             let dict = PyDict::new(py);
             dict.set_item("parentloop", forloop_dict)
                 .expect("Can always set a str: dict key/value");
+            if py
+                .import("django")
+                .and_then(|django| django.getattr("VERSION"))
+                .and_then(|version| version.get_item(0))
+                .and_then(|major| major.extract::<u8>())
+                .is_ok_and(|major| major >= 6)
+            {
+                dict.set_item("length", forloop.length())
+                    .expect("Can always set a str: int key/value");
+            }
             dict.set_item("counter0", forloop.counter0())
                 .expect("Can always set a str: int key/value");
             dict.set_item("counter", forloop.counter())

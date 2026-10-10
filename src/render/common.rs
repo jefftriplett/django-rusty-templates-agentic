@@ -216,6 +216,7 @@ impl Resolve for ForVariable {
             return Ok(Some("{}".as_content()));
         };
         Ok(Some(match self.variant {
+            ForVariableName::Length => Content::Int(for_loop.length().into()),
             ForVariableName::Counter => Content::Int(for_loop.counter().into()),
             ForVariableName::Counter0 => Content::Int(for_loop.counter0().into()),
             ForVariableName::RevCounter => Content::Int(for_loop.rev_counter().into()),

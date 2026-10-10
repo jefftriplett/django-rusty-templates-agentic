@@ -1513,6 +1513,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             });
         };
         let variant = match part.trim() {
+            "length" => ForVariableName::Length,
             "counter" => ForVariableName::Counter,
             "counter0" => ForVariableName::Counter0,
             "revcounter" => ForVariableName::RevCounter,
