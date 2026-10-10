@@ -37,7 +37,13 @@ impl Resolve for Filter {
         context: &mut Context,
         failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
-        let left = self.left.resolve(py, template, context, failures)?;
+        let mut left = self.left.resolve(py, template, context, failures)?;
+        if left.is_none()
+            && matches!(failures, ResolveFailures::IgnoreVariableDoesNotExist)
+            && matches!(self.filter, FilterType::DefaultIfNone(_))
+        {
+            left = Some(Content::Py(py.None().into_bound(py)));
+        }
         self.filter.resolve(left, py, template, context)
     }
 }
@@ -176,7 +182,8 @@ impl ResolveFilter for CenterFilter {
         let Some(content) = variable else {
             return Ok(Some("".as_content()));
         };
-        let content = content.render(context)?;
+        let content = content.resolve_string(context)?;
+        let length = content.as_raw().chars().count();
         let arg = self
             .argument
             .resolve(py, template, context, ResolveFailures::Raise)?
@@ -184,25 +191,25 @@ impl ResolveFilter for CenterFilter {
 
         let size = arg.resolve_usize(self.argument.at)?;
 
-        if size <= content.len() {
-            return Ok(Some(content.into_content()));
+        if size <= length {
+            return Ok(Some(Content::String(content)));
         }
-        let round_up = size % 2 == 0 && content.len() % 2 != 0;
+        let round_up = size % 2 == 0 && length % 2 != 0;
         let right = if round_up {
             // If the size is even and the content length is odd, we need to adjust the centering
-            (size - content.len()).div_ceil(2)
+            (size - length).div_ceil(2)
         } else {
-            (size - content.len()) / 2
+            (size - length) / 2
         };
-        let left = size - content.len() - right;
+        let left = size - length - right;
 
         let mut centered = String::with_capacity(size);
 
         centered.push_str(&" ".repeat(left));
-        centered.push_str(&content);
+        centered.push_str(content.as_raw());
         centered.push_str(&" ".repeat(right));
 
-        Ok(Some(centered.into_content()))
+        Ok(Some(content.map_content(|_| Cow::Owned(centered))))
     }
 }
 
