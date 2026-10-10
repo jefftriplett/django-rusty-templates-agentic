@@ -161,12 +161,14 @@ pub mod django_rusty_templates {
 
         fn get_dirs(&self, py: Python<'_>) -> PyResult<Vec<PathBuf>> {
             let own = self.with_loader(py, |loader| match loader {
-                Loader::FileSystem(loader) if !loader.uses_engine_dirs => Some(loader.dirs.clone()),
+                Loader::FileSystem(loader) if !loader.uses_engine_dirs => {
+                    Some(Ok(loader.dirs.clone()))
+                }
                 Loader::FileSystem(_) => Some(self.engine.dirs(py)),
                 _ => None,
             });
             if let Some(dirs) = own {
-                return Ok(dirs);
+                return dirs;
             }
             if self.name(py) == "django.template.loaders.app_directories.Loader" {
                 return crate::loaders::get_app_template_dirs(py, "templates");
@@ -528,6 +530,7 @@ pub mod django_rusty_templates {
         #[allow(dead_code)]
         encoding: &'static Encoding,
         pub file_charset: String,
+        configuration: Option<Py<PyDict>>,
         builtins: Vec<String>,
         pub autoescape: bool,
         loaded_context_processors: Vec<Py<PyAny>>,
@@ -535,11 +538,19 @@ pub mod django_rusty_templates {
     }
 
     impl Engine {
-        pub fn dirs(&self, py: Python<'_>) -> Vec<PathBuf> {
-            self.dirs
+        pub fn dirs(&self, py: Python<'_>) -> PyResult<Vec<PathBuf>> {
+            if let Some(configuration) = &self.configuration {
+                return configuration
+                    .bind(py)
+                    .get_item("dirs")?
+                    .expect("configured dirs")
+                    .extract();
+            }
+            Ok(self
+                .dirs
                 .lock_py_attached(py)
                 .expect("Mutex should not be poisoned")
-                .clone()
+                .clone())
         }
 
         #[cfg(test)]
@@ -553,6 +564,7 @@ pub mod django_rusty_templates {
                 string_if_invalid: String::new(),
                 encoding: encoding_rs::UTF_8,
                 file_charset: "utf-8".to_string(),
+                configuration: None,
                 builtins: Vec::new(),
                 autoescape: false,
                 loaded_context_processors: Vec::new(),
@@ -648,6 +660,51 @@ pub mod django_rusty_templates {
             #[allow(unused_variables)] builtins: Option<Bound<'_, PyAny>>,
             autoescape: bool,
         ) -> PyResult<Self> {
+            let configuration = PyDict::new(py);
+            configuration.set_item(
+                "dirs",
+                dirs.as_ref()
+                    .map_or_else(|| PyList::empty(py).into_any(), Clone::clone),
+            )?;
+            configuration.set_item(
+                "context_processors",
+                context_processors
+                    .as_ref()
+                    .map_or_else(|| PyList::empty(py).into_any(), Clone::clone),
+            )?;
+            configuration.set_item(
+                "libraries",
+                libraries
+                    .as_ref()
+                    .map_or_else(|| PyDict::new(py).into_any(), Clone::clone),
+            )?;
+            let builtin_names = PyList::new(
+                py,
+                [
+                    "django.template.defaulttags",
+                    "django.template.defaultfilters",
+                    "django.template.loader_tags",
+                ],
+            )?;
+            if let Some(builtins) = &builtins {
+                for builtin in builtins.try_iter()? {
+                    builtin_names.append(builtin?)?;
+                }
+            }
+            configuration.set_item("builtins", builtin_names)?;
+            let configured_loaders = match &loaders {
+                Some(loaders) => loaders.clone(),
+                None => {
+                    let inner = PyList::new(py, ["django.template.loaders.filesystem.Loader"])?;
+                    if app_dirs {
+                        inner.append("django.template.loaders.app_directories.Loader")?;
+                    }
+                    let outer = PyList::empty(py);
+                    outer.append(("django.template.loaders.cached.Loader", inner))?;
+                    outer.into_any()
+                }
+            };
+            configuration.set_item("loaders", configured_loaders)?;
             let dirs = match dirs {
                 Some(dirs) => dirs.extract()?,
                 None => Vec::new(),
@@ -704,6 +761,7 @@ pub mod django_rusty_templates {
                 string_if_invalid,
                 encoding,
                 file_charset,
+                configuration: Some(configuration.unbind()),
                 builtins,
                 autoescape,
                 loaded_context_processors,
@@ -762,22 +820,92 @@ pub mod django_rusty_templates {
             template.py_render(py, context, None)
         }
 
+        fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+            let configuration = self
+                .engine
+                .configuration
+                .as_ref()
+                .expect("Python engines have configuration")
+                .bind(py);
+            let mut parts = vec!["<Engine:".to_string()];
+            let dirs = configuration.get_item("dirs")?.expect("configured dirs");
+            if dirs.is_truthy()? {
+                parts.push(format!("dirs={}", dirs.repr()?));
+            }
+            parts.push(format!(
+                "app_dirs={}",
+                if self.engine.app_dirs {
+                    "True"
+                } else {
+                    "False"
+                }
+            ));
+            let processors = configuration
+                .get_item("context_processors")?
+                .expect("configured processors");
+            if processors.is_truthy()? {
+                parts.push(format!("context_processors={}", processors.repr()?));
+            }
+            parts.push(format!(
+                "debug={}",
+                if self.debug() { "True" } else { "False" }
+            ));
+            parts.push(format!(
+                "loaders={}",
+                configuration
+                    .get_item("loaders")?
+                    .expect("configured loaders")
+                    .repr()?
+            ));
+            parts.push(format!(
+                "string_if_invalid={}",
+                PyString::new(py, &self.engine.string_if_invalid).repr()?
+            ));
+            parts.push(format!(
+                "file_charset={}",
+                PyString::new(py, &self.engine.file_charset).repr()?
+            ));
+            for name in ["libraries", "builtins"] {
+                let value = configuration.get_item(name)?.expect("configured option");
+                if value.is_truthy()? {
+                    parts.push(format!("{name}={}", value.repr()?));
+                }
+            }
+            parts.push(format!(
+                "autoescape={}>",
+                if self.engine.autoescape {
+                    "True"
+                } else {
+                    "False"
+                }
+            ));
+            Ok(parts.join(" "))
+        }
+
         #[getter]
-        pub fn dirs(&self, py: Python<'_>) -> Vec<String> {
+        pub fn dirs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
             self.engine
-                .dirs(py)
-                .iter()
-                .map(|path| path.to_string_lossy().to_string())
-                .collect()
+                .configuration
+                .as_ref()
+                .expect("Python engines have configuration")
+                .bind(py)
+                .get_item("dirs")?
+                .ok_or_else(|| PyAttributeError::new_err("dirs"))
         }
 
         #[setter]
-        pub fn set_dirs(&self, py: Python<'_>, dirs: Vec<PathBuf>) {
+        pub fn set_dirs(&self, py: Python<'_>, dirs: Bound<'_, PyAny>) -> PyResult<()> {
             *self
                 .engine
                 .dirs
                 .lock_py_attached(py)
-                .expect("Mutex should not be poisoned") = dirs;
+                .expect("Mutex should not be poisoned") = dirs.extract()?;
+            self.engine
+                .configuration
+                .as_ref()
+                .expect("Python engines have configuration")
+                .bind(py)
+                .set_item("dirs", dirs)
         }
 
         #[getter]
@@ -983,6 +1111,11 @@ pub mod django_rusty_templates {
 
     #[pymethods]
     impl Template {
+        #[getter]
+        fn source(&self) -> &str {
+            &self.template
+        }
+
         #[getter]
         fn origin(&self) -> Origin {
             Origin {

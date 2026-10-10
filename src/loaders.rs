@@ -107,7 +107,10 @@ impl FileSystemLoader {
     ) -> Result<PyResult<Template>, LoaderError> {
         let mut tried = Vec::new();
         let dirs = if self.uses_engine_dirs {
-            engine.dirs(py)
+            match engine.dirs(py) {
+                Ok(dirs) => dirs,
+                Err(error) => return Ok(Err(error)),
+            }
         } else {
             self.dirs.clone()
         };
