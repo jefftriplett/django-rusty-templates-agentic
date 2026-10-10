@@ -885,9 +885,8 @@ pub mod django_rusty_templates {
             let template_name = template_name.unwrap_or_else(|| py.None().into_bound(py));
             if slf.getattr("__dict__")?.contains("find_template")? {
                 return py
-                    .import("django.template.engine")?
-                    .getattr("Engine")?
-                    .getattr("get_template")?
+                    .import("django_rusty_templates")?
+                    .getattr("_django_get_template")?
                     .call1((slf, template_name));
             }
             slf.borrow()

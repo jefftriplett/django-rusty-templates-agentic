@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.template import Engine as DjangoEngine
 from django.template import TemplateDoesNotExist
 from django.template.backends.base import BaseEngine
 from django.template.backends.django import DjangoTemplates, get_installed_libraries
@@ -6,6 +7,9 @@ from django.template.backends.django import DjangoTemplates, get_installed_libra
 from .django_rusty_templates import Engine, Template
 
 __all__ = ["RustyTemplates", "Template"]
+
+# Preserve Django's implementation when conformance runners replace Engine.
+_django_get_template = DjangoEngine.get_template
 
 
 class RustyTemplates(DjangoTemplates):
