@@ -65,7 +65,7 @@ uv run scripts/run_django_test_suite.py --django-version 6.2 --django-ref dab0a5
 
 Django 6.2 is development support: its cache initially clones `main`, because `stable/6.2.x` does not yet exist. Pin `--django-ref` for reproducible results. The reference above is the audited checkout, not a claim of compatibility with future changes.
 
-Django 6 requires Python 3.12+. Development dependencies and the single Ubuntu/Python 3.13 CI sanity job continue to use Django 5.2; additional versions run locally without expanding CI.
+Django 6 requires Python 3.12+. Development dependencies and the default Ubuntu/Python 3.13 sanity job use Django 5.2. Every PR also checks unchanged upstream Django 5.2, 6.0, and 6.1 template tests on Python 3.13. Broader OS/Python matrices and Django 6.2 run by manual dispatch.
 
 The runner clones each series into its own ignored `scripts/.django-{version}` checkout. It substitutes Engine and the backend at runtime without changing Django's assertions, fixtures, or source files. Existing caches retain their reference until `--django-ref stable/6.1.x` (or a tag/commit) is supplied. JSON output records the Django/Python versions, reference commit, skipped tests, and failure tracebacks. The pass percentage counts runnable test methods once, including methods with multiple failing subtests, and excludes skips. A failing suite returns a nonzero exit code.
 
@@ -107,3 +107,24 @@ $ just python-coverage
 $ just rust-coverage
 $ just rust-coverage-browser
 ```
+
+
+### CI controls
+
+Every PR runs the Ubuntu/Python 3.13 sanity job (local Python and serial Rust tests, Ruff, rustfmt, and Clippy), plus upstream template conformance against Django 5.2, 6.0, and 6.1. Same-repository, non-draft PRs receive a summary comment. These four test jobs protect stable-version compatibility without running the full OS matrix.
+
+Once this PR is merged and the workflow is present on the default branch, open **Actions → Full CI → Run workflow** and select the branch for comprehensive coverage. This manually calls the Python, Rust, lint, Django, and optional CodSpeed workflows from that same revision. After these workflow definitions exist on the default branch, the CLI equivalent is:
+
+```bash
+gh workflow run full.yml --ref YOUR_BRANCH --repo jefftriplett/django-rusty-templates-private
+```
+
+Individual workflows remain dispatchable. `Full CI` runs the Python 3.11–3.14/3.14t and exact final 3.15.0/3.15.0t matrix across Ubuntu, macOS, and Windows, serial Rust OS coverage, cargo-shear, and Django 5.2–6.2 conformance. Python 3.15 entries use uv-managed final runtimes and Django 6.1 with `--no-sync`; Django 5.2/6.0 are excluded on 3.15. Python 3.10 stays outside CI without changing the package minimum version. CodSpeed runs only when the private repository is connected and `ENABLE_CODSPEED=true` is configured.
+
+Coverage reports are retained as artifacts for seven days. **Codecov uploads remain disabled.** Wheel builds remain tag/manual only. No duplicate main-push test runs or schedules are added. The restoration PR remains unmerged until approved.
+
+Django base/PR comparisons use the exact same pristine upstream checkout. Structured summaries reject mismatched references and empty results; suite failures retain failing job status. Manual runs use the selected commit for both sides, and report results without posting a PR comment. PR comment permissions are confined to a separate job for same-repository PRs.
+
+uv cache keys include job/matrix-specific suffixes so concurrent jobs do not compete to save the same key. Rust caches, timeouts, and workflow-specific cancellation groups limit repeated work. Cancellation groups use explicit workflow prefixes so reusable workflows called by `Full CI` cannot cancel each other or their caller. Linux runners are pinned to `ubuntu-24.04` to avoid the October–November 2026 `ubuntu-latest` migration to Ubuntu 26.04; the image can be upgraded deliberately after validation.
+
+The repository currently has no branch protection or rulesets. Required checks can be selected after review; the existing sanity check name is preserved.

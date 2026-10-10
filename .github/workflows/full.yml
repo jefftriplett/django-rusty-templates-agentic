@@ -1,0 +1,30 @@
+name: Full CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    uses: ./.github/workflows/python.yml
+  rust:
+    uses: ./.github/workflows/rust.yml
+  lint:
+    uses: ./.github/workflows/lint.yml
+  django:
+    uses: ./.github/workflows/django.yml
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+  benchmarks:
+    uses: ./.github/workflows/codspeed.yml
+    permissions:
+      contents: read
+      id-token: write
