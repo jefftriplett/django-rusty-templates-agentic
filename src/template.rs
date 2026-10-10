@@ -1235,11 +1235,40 @@ pub mod django_rusty_templates {
                 Some(template_name),
             );
             let mut python_renderer = None;
-            let nodes = match parser.parse() {
+            let parsed = if template.contains("..")
+                && py
+                    .import("django")?
+                    .getattr("VERSION")?
+                    .get_item(0)?
+                    .extract::<u8>()?
+                    >= 6
+                && py
+                    .import("django")?
+                    .getattr("VERSION")?
+                    .get_item(1)?
+                    .extract::<u8>()?
+                    >= 1
+            {
+                Err(crate::parse::PyParseError::PyErr(
+                    PyNotImplementedError::new_err(
+                        "not yet implemented: Django 6.1 variable lookup",
+                    ),
+                ))
+            } else {
+                parser.parse()
+            };
+            let nodes = match parsed {
                 Ok(nodes) => nodes,
                 Err(crate::parse::PyParseError::PyErr(error))
                     if error.is_instance_of::<PyNotImplementedError>(py)
-                        && ["block", "extends", "Fully custom tag"].iter().any(|tag| {
+                        && [
+                            "block",
+                            "extends",
+                            "Fully custom tag",
+                            "Django 6.1 variable lookup",
+                        ]
+                        .iter()
+                        .any(|tag| {
                             error.value(py).to_string() == format!("not yet implemented: {tag}")
                         }) =>
                 {
@@ -1288,11 +1317,40 @@ pub mod django_rusty_templates {
         ) -> PyResult<Self> {
             let mut parser = Parser::new(py, TemplateString(&template), engine.clone(), None);
             let mut python_renderer = None;
-            let nodes = match parser.parse() {
+            let parsed = if template.contains("..")
+                && py
+                    .import("django")?
+                    .getattr("VERSION")?
+                    .get_item(0)?
+                    .extract::<u8>()?
+                    >= 6
+                && py
+                    .import("django")?
+                    .getattr("VERSION")?
+                    .get_item(1)?
+                    .extract::<u8>()?
+                    >= 1
+            {
+                Err(crate::parse::PyParseError::PyErr(
+                    PyNotImplementedError::new_err(
+                        "not yet implemented: Django 6.1 variable lookup",
+                    ),
+                ))
+            } else {
+                parser.parse()
+            };
+            let nodes = match parsed {
                 Ok(nodes) => nodes,
                 Err(crate::parse::PyParseError::PyErr(error))
                     if error.is_instance_of::<PyNotImplementedError>(py)
-                        && ["block", "extends", "Fully custom tag"].iter().any(|tag| {
+                        && [
+                            "block",
+                            "extends",
+                            "Fully custom tag",
+                            "Django 6.1 variable lookup",
+                        ]
+                        .iter()
+                        .any(|tag| {
                             error.value(py).to_string() == format!("not yet implemented: {tag}")
                         }) =>
                 {

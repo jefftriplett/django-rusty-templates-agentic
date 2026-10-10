@@ -1,5 +1,6 @@
 """Django parser/node interoperability with native variable rendering."""
 
+from django import VERSION
 from django.template import Context
 from django.template.context import make_context
 from django.template.base import DebugLexer, Node, Parser, Template, VariableNode
@@ -38,7 +39,9 @@ class NativeParser(Parser):
             self.load_prefix += "{% " + token.contents + " %}"
         if isinstance(node, ExtendsNode):
             node.parent_name = ParentExpression(node.parent_name)
-        if type(node) is VariableNode:
+        if type(node) is VariableNode and not (
+            VERSION >= (6, 1) and ".." in token.contents
+        ):
             fragment = self.load_prefix + "{{ " + token.contents + " }}"
             node = NativeVariableNode(node, self.native_engine.from_string(fragment))
         super().extend_nodelist(nodelist, node, token)
