@@ -22,6 +22,7 @@ use crate::filters::DateFilter;
 use crate::filters::DefaultFilter;
 use crate::filters::DefaultIfNoneFilter;
 use crate::filters::DivisibleByFilter;
+use crate::filters::DjangoFilter;
 use crate::filters::EscapeFilter;
 use crate::filters::EscapejsFilter;
 use crate::filters::ExternalFilter;
@@ -225,6 +226,10 @@ impl Filter {
                 Some(right) => return Err(unexpected_argument("length", right)),
                 None => FilterType::Length(LengthFilter),
             },
+            "pluralize" => FilterType::Django(DjangoFilter {
+                name: "pluralize",
+                argument: right,
+            }),
             "safe" => match right {
                 Some(right) => return Err(unexpected_argument("safe", right)),
                 None => FilterType::Safe(SafeFilter),

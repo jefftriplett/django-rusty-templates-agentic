@@ -16,6 +16,7 @@ pub enum FilterType {
     DefaultIfNone(DefaultIfNoneFilter),
     DivisibleBy(DivisibleByFilter),
     Date(DateFilter),
+    Django(DjangoFilter),
     Escape(EscapeFilter),
     Escapejs(EscapejsFilter),
     External(ExternalFilter),
@@ -205,4 +206,11 @@ impl DivisibleByFilter {
     pub fn new(at: At, argument: Argument) -> Self {
         Self { at, argument }
     }
+}
+
+/// Django-backed filters preserve Python protocol and escaping behavior.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DjangoFilter {
+    pub name: &'static str,
+    pub argument: Option<Argument>,
 }
