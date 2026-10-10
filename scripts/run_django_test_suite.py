@@ -12,6 +12,7 @@ SCRIPT_DIR = Path(__file__).parent
 DJANGO_REPO_CACHE = SCRIPT_DIR / ".django"
 PATCH_FILE = SCRIPT_DIR / "django_tests_use_rusty_templates.patch"
 
+
 def log(header: str):
     print(f"\033[1;32m==> {header}\033[0m\n", flush=True)
 
