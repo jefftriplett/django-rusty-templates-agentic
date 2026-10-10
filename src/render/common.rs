@@ -134,6 +134,22 @@ impl Resolve for ForVariable {
     }
 }
 
+fn unescape_literal(text: &str) -> Cow<'_, str> {
+    if !text.contains('\\') {
+        return Cow::Borrowed(text);
+    }
+    let mut chars = text.chars().peekable();
+    let mut output = String::with_capacity(text.len());
+    while let Some(character) = chars.next() {
+        if character == '\\' && matches!(chars.peek(), Some('\\' | '\'' | '"')) {
+            output.push(chars.next().expect("peeked character"));
+        } else {
+            output.push(character);
+        }
+    }
+    Cow::Owned(output)
+}
+
 impl Resolve for Text {
     fn resolve<'t, 'py>(
         &self,
@@ -142,7 +158,7 @@ impl Resolve for Text {
         context: &mut Context,
         _failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
-        let resolved = Cow::Borrowed(template.content(self.at));
+        let resolved = unescape_literal(template.content(self.at));
         Ok(Some(Content::String(match context.autoescape {
             false => ContentString::String(resolved),
             true => ContentString::HtmlSafe(resolved),
@@ -159,7 +175,7 @@ impl Resolve for TranslatedText {
         _failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
         let text = template.content(self.at);
-        let resolved = gettext(py, text)?;
+        let resolved = gettext(py, &unescape_literal(text))?;
         Ok(Some(Content::String(match context.autoescape {
             false => ContentString::String(Cow::Owned(resolved)),
             true => ContentString::HtmlSafe(Cow::Owned(resolved)),
@@ -214,8 +230,9 @@ impl Resolve for TagElement {
         failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
         match self {
-            Self::Text(text) | Self::TranslatedText(text) => {
-                text.resolve(py, template, context, failures)
+            Self::Text(text) => text.resolve(py, template, context, failures),
+            Self::TranslatedText(text) => {
+                TranslatedText::new(text.at).resolve(py, template, context, failures)
             }
             Self::Variable(variable) => variable.resolve(py, template, context, failures),
             Self::ForVariable(variable) => variable.resolve(py, template, context, failures),
@@ -252,8 +269,11 @@ impl Render for TokenTree {
         context: &mut Context,
     ) -> RenderResult<'t> {
         match self {
-            Self::Text(text) => text.render(py, template, context),
-            Self::TranslatedText(_text) => todo!(),
+            Self::Text(text) => Ok(Cow::Borrowed(template.content(text.at))),
+            Self::LiteralText(text) => text.render(py, template, context),
+            Self::TranslatedText(text) => {
+                TranslatedText::new(text.at).render(py, template, context)
+            }
             Self::Int(n) => Ok(n.to_string().into()),
             Self::Float(f) => Ok(f.to_string().into()),
             Self::Tag(tag) => tag.render(py, template, context),

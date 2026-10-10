@@ -935,6 +935,7 @@ impl EndTag {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TokenTree {
     Text(Text),
+    LiteralText(Text),
     TranslatedText(Text),
     Int(BigInt),
     Float(f64),
@@ -947,7 +948,7 @@ pub enum TokenTree {
 impl From<TagElement> for TokenTree {
     fn from(tag_element: TagElement) -> Self {
         match tag_element {
-            TagElement::Text(text) => Self::Text(text),
+            TagElement::Text(text) => Self::LiteralText(text),
             TagElement::TranslatedText(text) => Self::TranslatedText(text),
             TagElement::Variable(variable) => Self::Variable(variable),
             TagElement::ForVariable(variable) => Self::ForVariable(variable),
@@ -1539,8 +1540,17 @@ impl<'t, 'py> Parser<'t, 'py> {
     ) -> Result<TagElement, ParseError> {
         let trimmed = variable.trim_start();
         let start = start + variable.len() - trimmed.len();
-        let (mut var, at, filter_lexer) = if let Some(quote @ ('"' | '\'')) = trimmed.chars().next()
-        {
+        let (mut var, at, filter_lexer) = if trimmed.starts_with("_(") {
+            let mut chars = trimmed.chars();
+            chars.next();
+            chars.next();
+            let (at, byte, rest) = dtl_lexer::common::lex_translated(start, trimmed, &mut chars)?;
+            (
+                TagElement::TranslatedText(Text::new(translated_text_content_at(at))),
+                at,
+                FilterLexer::new(rest, byte)?,
+            )
+        } else if let Some(quote @ ('"' | '\'')) = trimmed.chars().next() {
             let mut chars = trimmed.chars();
             chars.next();
             let (at, byte, rest) = dtl_lexer::common::lex_text(start, trimmed, &mut chars, quote)?;
