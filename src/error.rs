@@ -60,7 +60,7 @@ pub enum RenderError {
         #[label("{object}")]
         object_at: Option<SourceSpan>,
     },
-    #[error("Need {expected_count} values to unpack; got {actual_count}.")]
+    #[error("Need {expected_count} values to unpack in for loop; got {actual_count}.")]
     TupleUnpackError {
         expected_count: usize,
         actual_count: usize,

@@ -1046,8 +1046,8 @@ impl Render for For {
         match iterable {
             Content::Py(iterable) => self.render_python(&iterable, py, template, context),
             Content::String(s) => self.render_string(s.as_raw(), py, template, context),
-            Content::Float(_) | Content::Int(_) | Content::Bool(_) => {
-                unreachable!("float, int and bool literals are not iterable")
+            value @ (Content::Float(_) | Content::Int(_) | Content::Bool(_)) => {
+                self.render_python(&value.to_py(py), py, template, context)
             }
         }
     }

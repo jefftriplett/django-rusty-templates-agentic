@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 pub mod django_rusty_templates {
     use std::borrow::Cow;
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -1093,6 +1093,49 @@ pub mod django_rusty_templates {
         inspection_nodes: Arc<InspectionNodes>,
     }
 
+    fn canonical_parse_error(
+        py: Python<'_>,
+        error: crate::parse::PyParseError,
+        engine: Arc<Engine>,
+        source: &str,
+        filename: Option<&Path>,
+        template_name: Option<&str>,
+    ) -> PyErr {
+        let native = match error.try_into_parse_error() {
+            Ok(error) => {
+                if let Some(filename) = filename {
+                    TemplateSyntaxError::with_source_code(
+                        error.into(),
+                        miette::NamedSource::new(filename.to_string_lossy(), source.to_string()),
+                    )
+                } else {
+                    TemplateSyntaxError::with_source_code(error.into(), source.to_string())
+                }
+            }
+            Err(error) => error,
+        };
+        let validation = (|| -> PyResult<()> {
+            py.import("django_rusty_templates.diagnostics")?
+                .getattr("validate_syntax")?
+                .call1((
+                    source,
+                    PyEngine { engine },
+                    filename.map(|filename| filename.to_string_lossy().into_owned()),
+                    template_name,
+                ))?;
+            Ok(())
+        })();
+        match validation {
+            Err(error) => {
+                let diagnostic = native.value(py).to_string();
+                let _ = error.value(py).setattr("rusty_diagnostic", &diagnostic);
+                let _ = error.value(py).call_method1("add_note", (diagnostic,));
+                error
+            }
+            Ok(()) => native,
+        }
+    }
+
     impl Template {
         pub fn new(
             py: Python<'_>,
@@ -1109,11 +1152,15 @@ pub mod django_rusty_templates {
             );
             let nodes = match parser.parse() {
                 Ok(nodes) => nodes,
-                Err(err) => {
-                    let err = err.try_into_parse_error()?;
-                    let source =
-                        miette::NamedSource::new(filename.to_string_lossy(), template.to_string());
-                    return Err(TemplateSyntaxError::with_source_code(err.into(), source));
+                Err(error) => {
+                    return Err(canonical_parse_error(
+                        py,
+                        error,
+                        engine.clone(),
+                        template,
+                        Some(&filename),
+                        Some(template_name),
+                    ));
                 }
             };
             Ok(Self {
@@ -1135,9 +1182,15 @@ pub mod django_rusty_templates {
             let mut parser = Parser::new(py, TemplateString(&template), engine.clone(), None);
             let nodes = match parser.parse() {
                 Ok(nodes) => nodes,
-                Err(err) => {
-                    let err = err.try_into_parse_error()?;
-                    return Err(TemplateSyntaxError::with_source_code(err.into(), template));
+                Err(error) => {
+                    return Err(canonical_parse_error(
+                        py,
+                        error,
+                        engine.clone(),
+                        &template,
+                        None,
+                        None,
+                    ));
                 }
             };
             Ok(Self {

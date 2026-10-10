@@ -82,7 +82,12 @@ def assert_parse_error(request):
         )
         with pytest.raises(exception) as exc_info:
             engines[request.param].from_string(template)
-        assert str(exc_info.value) == message
+        diagnostic = getattr(exc_info.value, "rusty_diagnostic", None)
+        if diagnostic is not None:
+            assert diagnostic == message
+            assert str(exc_info.value) == django_message
+        else:
+            assert str(exc_info.value) == message
 
     return _assert_parse_error
 

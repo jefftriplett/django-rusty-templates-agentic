@@ -676,12 +676,7 @@ fn parse_for_loop(
         .collect();
     let expression_content = expression_token.content(parser.template);
     let expression = match expression_token.token_type {
-        ForTokenType::Numeric => {
-            return Err(ParseError::NotIterable {
-                literal: expression_content.to_string(),
-                at: expression_token.at.into(),
-            });
-        }
+        ForTokenType::Numeric => parse_numeric(expression_content, expression_token.at)?,
         ForTokenType::Text => TagElement::Text(Text::new(text_content_at(expression_token.at))),
         ForTokenType::TranslatedText => {
             TagElement::TranslatedText(Text::new(translated_text_content_at(expression_token.at)))
@@ -1057,12 +1052,6 @@ pub enum ParseError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     IncludeLexerError(#[from] IncludeLexerError),
-    #[error("{literal} is not iterable")]
-    NotIterable {
-        literal: String,
-        #[label("here")]
-        at: SourceSpan,
-    },
     #[error(transparent)]
     #[diagnostic(transparent)]
     RelativePathError(#[from] RelativePathError),
@@ -2134,11 +2123,21 @@ impl<'t, 'py> Parser<'t, 'py> {
                 at,
                 parts: Some(tag.parts),
             }),
-            "else" => Either::Right(EndTag {
-                end: EndTagType::Else,
-                at,
-                parts: None,
-            }),
+            "else" => {
+                if !self.template.content(tag.parts.at).trim().is_empty() {
+                    return Err(
+                        crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
+                            "Malformed template tag",
+                        )
+                        .into(),
+                    );
+                }
+                Either::Right(EndTag {
+                    end: EndTagType::Else,
+                    at,
+                    parts: None,
+                })
+            }
             "endif" => Either::Right(EndTag {
                 end: EndTagType::EndIf,
                 at,
@@ -2350,6 +2349,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         let tokens: Vec<_> = LoadLexer::new(self.template, parts).collect();
         let mut rev = tokens.iter().rev();
         if let (Some(last), Some(prev)) = (rev.next(), rev.next())
+            && tokens.len() > 2
             && self.template.content(prev.at) == "from"
         {
             let library = last.load_library(self.py, &self.engine.libraries, self.template)?;

@@ -25,7 +25,8 @@ def test_extends_locmem_loader(engine_class):
         engine.get_template("template")
 
     if engine_class == RustyTemplates:
-        assert str(exc_info.value) == snapshot("""\
+        assert str(exc_info.value) == "Empty variable tag on line 1"
+        assert exc_info.value.rusty_diagnostic == snapshot("""\
   × Empty variable tag
    ╭─[template:1:1]
  1 │ {{ }}

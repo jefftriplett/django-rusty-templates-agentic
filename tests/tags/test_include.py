@@ -478,7 +478,7 @@ def test_relative_from_string_template(assert_parse_error):
         django_message=django_message,
         rusty_message=rusty_message,
         exception=AttributeError,
-        rusty_exception=TemplateSyntaxError,
+        rusty_exception=AttributeError,
     )
 
 
@@ -529,7 +529,8 @@ def test_relative_outside_file_hierarchy(template_engine):
     if template_engine.name == "django":
         assert str(exc_info.value) == django_message
     else:
-        assert str(exc_info.value) == rusty_message
+        assert str(exc_info.value) == django_message
+        assert exc_info.value.rusty_diagnostic == rusty_message
 
 
 def test_relative_outside_file_hierarchy_variable(template_engine):

@@ -4,7 +4,6 @@ from textwrap import dedent
 import pytest
 from django.template import engines
 from django.template.base import VariableDoesNotExist
-from django.template.exceptions import TemplateSyntaxError
 
 
 class BrokenIterator:
@@ -57,11 +56,11 @@ def test_render_for_loop_numeric():
 
     assert str(exc_info.value) == "'int' object is not iterable"
 
-    with pytest.raises(TemplateSyntaxError) as exc_info:
-        engines["rusty"].from_string(template)
+    with pytest.raises(TypeError) as exc_info:
+        engines["rusty"].from_string(template).render({})
 
     expected = """\
-  × 1 is not iterable
+  × 'int' object is not iterable
    ╭────
  1 │ {% for x in 1 %}{{ x }}{% endfor %}
    ·             ┬
@@ -553,7 +552,7 @@ def test_unexpected_expression_after_reversed(assert_parse_error):
 def test_render_for_loop_unpack_tuple_mismatch(assert_render_error):
     django_message = snapshot("Need 3 values to unpack in for loop; got 2. ")
     rusty_message = snapshot("""\
-  × Need 3 values to unpack; got 2.
+  × Need 3 values to unpack in for loop; got 2.
    ╭─[1:8]
  1 │ {% for x, y, z in l %}{{ x }}-{{ y }}-{{ z }}
    ·        ───┬───    ┬
@@ -574,7 +573,7 @@ def test_render_for_loop_unpack_tuple_mismatch(assert_render_error):
 def test_render_for_loop_unpack_tuple_invalid(assert_render_error):
     django_message = snapshot("Need 3 values to unpack in for loop; got 1. ")
     rusty_message = snapshot("""\
-  × Need 3 values to unpack; got 1.
+  × Need 3 values to unpack in for loop; got 1.
    ╭─[1:8]
  1 │ {% for x, y, z in l %}{{ x }}-{{ y }}-{{ z }}
    ·        ───┬───    ┬
@@ -635,7 +634,7 @@ def test_render_for_loop_unpack_tuple_broken_iterator(assert_render_error):
 def test_render_for_loop_unpack_string(assert_render_error):
     django_message = snapshot("Need 2 values to unpack in for loop; got 1. ")
     rusty_message = snapshot("""\
-  × Need 2 values to unpack; got 1.
+  × Need 2 values to unpack in for loop; got 1.
    ╭────
  1 │ {% for x, y in 'foo' %}{{ x }}{{ y }}{% endfor %}
    ·        ──┬─    ──┬──
