@@ -12,7 +12,13 @@ def test_supported_loaded_templates_do_not_render_variable_fragments(
     def unexpected_fragment(self, context):
         raise AssertionError("Supported loaded template used variable interoperability")
 
+    def unexpected_inspection(*args, **kwargs):
+        raise AssertionError("Native cache hit compiled a Django inspection tree")
+
     monkeypatch.setattr(NativeVariableNode, "render", unexpected_fragment)
+    monkeypatch.setattr(
+        "django_rusty_templates.interop.compile_template", unexpected_inspection
+    )
     templates = {
         "catalog.html": (
             "<ul>{% for row in rows %}<li>{{ row.name }} "
