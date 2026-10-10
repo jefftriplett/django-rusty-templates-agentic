@@ -324,6 +324,7 @@ name = "django-rusty-templates"
 version = "0.1.0"
 dependencies = [
  "cargo-llvm-cov",
+ "dtl-core",
  "dtl-lexer",
  "either",
  "encoding_rs",
@@ -344,9 +345,17 @@ dependencies = [
 name = "dtl-browser"
 version = "0.1.0"
 dependencies = [
- "dtl-lexer",
+ "dtl-core",
  "serde_json",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "dtl-core"
+version = "0.1.0"
+dependencies = [
+ "dtl-lexer",
+ "serde_json",
 ]
 
 [[package]]

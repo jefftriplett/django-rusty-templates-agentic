@@ -229,5 +229,155 @@
       }
     },
     "expected": "z;a;"
+  },
+  {
+    "name": "inheritance",
+    "source": "{% extends 'base' %}{% block title %}{{ title }}{% endblock %}{% block content %}{% for row in rows %}{% include 'card' %}{% endfor %}{% endblock %}",
+    "templates": {
+      "base": "<title>{% block title %}Default{% endblock %}</title><main>{% block content %}base{% endblock %}</main>",
+      "card": "<b>{{ row.name }}</b>"
+    },
+    "context": {
+      "title": "Café & books",
+      "rows": [
+        {
+          "name": "<one>"
+        }
+      ]
+    },
+    "expected": "<title>Café &amp; books</title><main><b>&lt;one&gt;</b></main>"
+  },
+  {
+    "name": "super_safe",
+    "source": "{% extends 'base' %}{% block body %}{{ block.super }}<i>{{ name }}</i>{% endblock body %}",
+    "templates": {
+      "base": "{% block body %}<b>{{ name }}</b>{% endblock %}"
+    },
+    "context": {
+      "name": "<&"
+    },
+    "expected": "<b>&lt;&amp;</b><i>&lt;&amp;</i>"
+  },
+  {
+    "name": "three_levels",
+    "source": "{% extends 'middle' %}{% block body %}C({{ block.super }}){% endblock %}",
+    "templates": {
+      "base": "{% block body %}A{% endblock %}",
+      "middle": "{% extends 'base' %}{% block body %}B({{ block.super }}){% endblock %}"
+    },
+    "context": {},
+    "expected": "C(B(A))"
+  },
+  {
+    "name": "dynamic_parent",
+    "source": "{% extends parent|lower %}{% block body %}child{% endblock %}",
+    "templates": {
+      "base": "[{% block body %}base{% endblock %}]"
+    },
+    "context": {
+      "parent": "BASE"
+    },
+    "expected": "[child]"
+  },
+  {
+    "name": "nested_blocks",
+    "source": "{% extends 'base' %}{% block inner %}child{% endblock %}",
+    "templates": {
+      "base": "{% block outer %}outer({% block inner %}base{% endblock %}){% endblock %}"
+    },
+    "context": {},
+    "expected": "outer(child)"
+  },
+  {
+    "name": "nested_super",
+    "source": "{% extends 'base' %}{% block outer %}child({{ block.super }}){% endblock %}{% block inner %}inner{% endblock %}",
+    "templates": {
+      "base": "{% block outer %}outer({% block inner %}base{% endblock %}){% endblock %}"
+    },
+    "context": {},
+    "expected": "child(outer(inner))"
+  },
+  {
+    "name": "include_isolation",
+    "source": "{% extends 'base' %}{% block body %}{% include 'other' %}{% endblock %}",
+    "templates": {
+      "base": "{% block body %}base{% endblock %}",
+      "other": "{% block body %}other{% endblock %}"
+    },
+    "context": {},
+    "expected": "other"
+  },
+  {
+    "name": "include_inheritance",
+    "source": "{% include 'child' %}",
+    "templates": {
+      "base": "[{% block body %}base{% endblock %}]",
+      "child": "{% extends 'base' %}{% block body %}child{% endblock %}"
+    },
+    "context": {},
+    "expected": "[child]"
+  },
+  {
+    "name": "pages/detail.html",
+    "source": "{% extends '../base.html' %}{% block body %}{% include './card.html' %}{% endblock %}",
+    "templates": {
+      "base.html": "[{% block body %}base{% endblock %}]",
+      "pages/card.html": "{{ name }}"
+    },
+    "context": {
+      "name": "<&"
+    },
+    "expected": "[&lt;&amp;]"
+  },
+  {
+    "name": "prefix",
+    "source": "prefix{% extends 'base' %}ignored{% block body %}child{% endblock %}",
+    "templates": {
+      "base": "[{% block body %}base{% endblock %}]"
+    },
+    "context": {},
+    "expected": "prefix[child]"
+  },
+  {
+    "name": "lazy_super",
+    "source": "{% extends 'base' %}{% block body %}{% if False %}{{ block.super }}{% endif %}child{% endblock %}",
+    "templates": {
+      "base": "{% block body %}{{ array }}{% endblock %}"
+    },
+    "context": {
+      "array": [
+        1
+      ]
+    },
+    "expected": "child"
+  },
+  {
+    "name": "live_super",
+    "source": "{% extends 'base' %}{% block body %}{% for item in items %}{{ block.super }};{% endfor %}{% endblock %}",
+    "templates": {
+      "base": "{% block body %}{{ item }}{% endblock %}"
+    },
+    "context": {
+      "items": [
+        "a",
+        "b"
+      ]
+    },
+    "expected": "a;b;"
+  },
+  {
+    "name": "super_empty",
+    "source": "{% extends 'base' %}{% block body %}before{{ block.super }}after{% endblock %}",
+    "context": {},
+    "expected": "beforeafter",
+    "templates": {
+      "base": "{% block body %}{% endblock %}"
+    }
+  },
+  {
+    "name": "block_name",
+    "source": "{% block body %}{{ block.name }}{% endblock %}",
+    "context": {},
+    "expected": "body"
   }
 ]

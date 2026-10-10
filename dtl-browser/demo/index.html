@@ -17,32 +17,20 @@
   @media (max-width: 700px) { .editors { grid-template-columns: 1fr; } }
 </style>
 <h1>Rusty Templates in your browser</h1>
-<p>Render a Django-style template with JSON data. This prototype runs locally in WebAssembly, without Python or a server render.</p>
+<p>Use the same Django-style template bundle on the server and in your browser. This prototype runs locally in WebAssembly, without Python or a server render.</p>
 <div class="editors">
   <section>
     <label for="template">Page template</label>
-    <textarea id="template"><h1>{{ title }}</h1>
-<ul>
-{% for row in rows %}
-  {% include "card.html" %}
-{% empty %}
-  <li>No products yet.</li>
-{% endfor %}
-</ul></textarea>
+    <textarea id="template"></textarea>
+    <label for="base">base.html</label>
+    <textarea id="base"></textarea>
     <label for="card">card.html</label>
-    <textarea id="card"><li>{{ forloop.counter }}. {{ row.name|upper }}
-{% if row.available %}— Available{% else %}— Sold out{% endif %}</li></textarea>
+    <textarea id="card"></textarea>
   </section>
   <section>
     <label for="context">JSON context</label>
-    <textarea id="context">{
-  "title": "Books & browser experiments",
-  "rows": [
-    {"name": "Café & books", "available": true},
-    {"name": "<Special edition>", "available": false}
-  ]
-}</textarea>
-    <p>Supported: variables, dotted lookups, filters, <code>if/elif/else</code>, <code>for/empty</code>, and includes. Inheritance, Python custom tags, translation and Django formatting are outside this prototype.</p>
+    <textarea id="context"></textarea>
+    <p>Supported: variables, dotted lookups, filters, <code>if/elif/else</code>, <code>for/empty</code>, includes, and inheritance with blocks and <code>block.super</code>. Python custom tags, translation and Django formatting are outside this prototype.</p>
   </section>
 </div>
 <button id="render" disabled>Loading renderer…</button>

@@ -30,10 +30,13 @@ try {
   await page.getByRole("button", { name: "Render template", exact: true }).waitFor();
   assert.match(await page.locator("#output").textContent(), /&lt;SPECIAL EDITION&gt;/);
   assert.match(await page.frameLocator("#preview").locator("body").textContent(), /CAFÉ & BOOKS/);
+  const sharedExample = JSON.parse(await readFile(resolve(root, "demo/catalog.json"), "utf8"));
+  assert.equal(await page.locator("#output").textContent(), sharedExample.expected);
 
   const measurements = await page.evaluate(async () => {
     const { BrowserEngine } = await import("../pkg/dtl_browser.js");
     const cases = await (await fetch("../tests/parity.json")).json();
+    cases.push(await (await fetch("./catalog.json")).json());
     for (const test of cases) {
       const engine = new BrowserEngine();
       try {
@@ -58,7 +61,7 @@ try {
       return { parityCases: cases.length, browser: navigator.userAgent, loop100MedianUs: sorted[7], samplesUs };
     } finally { engine.free(); }
   });
-  await page.locator("#template").fill("{% extends 'base.html' %}");
+  await page.locator("#template").fill("{% load unsupported %}");
   await page.getByRole("button", { name: "Render template", exact: true }).click();
   assert.match(await page.locator("#status").textContent(), /Unsupported tag/);
   await page.locator("#template").fill("Hello {{ title }}");

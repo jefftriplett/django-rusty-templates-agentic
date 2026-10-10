@@ -10,6 +10,7 @@ function render() {
     const context = element("context").value;
     JSON.parse(context);
     const compileStart = performance.now();
+    engine.addTemplate("base.html", element("base").value);
     engine.addTemplate("card.html", element("card").value);
     engine.addTemplate("page.html", element("template").value);
     const compileMs = performance.now() - compileStart;
@@ -29,6 +30,13 @@ function render() {
 }
 
 try {
+  const response = await fetch("./catalog.json");
+  if (!response.ok) throw new Error("Could not load the shared template bundle");
+  const example = await response.json();
+  element("base").value = example.templates["base.html"];
+  element("card").value = example.templates["card.html"];
+  element("template").value = example.source;
+  element("context").value = JSON.stringify(example.context, null, 2);
   await init();
   engine = new BrowserEngine();
   button.disabled = false;

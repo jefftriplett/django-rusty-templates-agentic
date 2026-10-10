@@ -1,0 +1,22 @@
+{
+  "name": "page.html",
+  "source": "{% extends \"base.html\" %}\n{% block title %}{{ block.super }} — {{ title }}{% endblock %}\n{% block content %}\n{{ block.super }}\n<h1>{{ title }}</h1>\n<ul>\n{% for row in rows %}\n  {% include \"card.html\" %}\n{% empty %}\n  <li>No products yet.</li>\n{% endfor %}\n</ul>\n{% endblock %}",
+  "templates": {
+    "base.html": "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>{% block title %}Catalog{% endblock %}</title></head>\n<body><header>Shared catalog</header><main>{% block content %}<p>Rendered from one template bundle.</p>{% endblock %}</main></body></html>",
+    "card.html": "<li>{{ forloop.counter }}. {{ row.name|upper }}\n{% if row.available %}— Available{% else %}— Sold out{% endif %}</li>"
+  },
+  "context": {
+    "title": "Books & browser experiments",
+    "rows": [
+      {
+        "name": "Café & books",
+        "available": true
+      },
+      {
+        "name": "<Special edition>",
+        "available": false
+      }
+    ]
+  },
+  "expected": "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Catalog — Books &amp; browser experiments</title></head>\n<body><header>Shared catalog</header><main>\n<p>Rendered from one template bundle.</p>\n<h1>Books &amp; browser experiments</h1>\n<ul>\n\n  <li>1. CAFÉ &amp; BOOKS\n— Available</li>\n\n  <li>2. &lt;SPECIAL EDITION&gt;\n— Sold out</li>\n\n</ul>\n</main></body></html>"
+}

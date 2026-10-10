@@ -1,0 +1,10 @@
+[package]
+name = "dtl-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+dtl-lexer = { path = "../dtl-lexer" }
+serde_json = { version = "1.0", features = ["preserve_order"] }

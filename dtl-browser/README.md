@@ -1,8 +1,10 @@
 # Browser WebAssembly prototype
 
-A Python-free experiment on `prototype/browser-wasm`. It reuses `dtl-lexer`
-and implements a small, independent parser/runtime over JSON values. The
-production Python/Django renderer is unchanged. This is a feasibility prototype,
+An experiment on `prototype/shared-template-inheritance`, building on the first
+Wasm prototype. The Python-free `dtl-core` crate now owns the portable parser and
+renderer, including inheritance. Thin Python `PortableEngine` and browser
+`BrowserEngine` adapters use that exact same core. The existing production
+`Engine` / `RustyTemplates` backend keeps its full Django implementation. This is a feasibility prototype,
 not a replacement for the Django backend or a claim of full DTL compatibility.
 
 ## Build and open the demo
@@ -16,8 +18,9 @@ bash dtl-browser/build.sh
 python3 -m http.server 8000 --bind 127.0.0.1 --directory dtl-browser
 ```
 
-Open <http://127.0.0.1:8000/demo/index.html>. Edit the page, included card and JSON
-data, then click Render template. The renderer runs entirely in the browser;
+Open <http://127.0.0.1:8000/demo/index.html>. Edit the page, base template, included
+card and JSON data, then click Render template. The initial bundle is loaded from
+`demo/catalog.json`, the same source/data fixture tested on all server runtimes. The renderer runs entirely in the browser;
 the local HTTP server only serves static files. HTTP is required for loading the
 Wasm module; opening the HTML file directly is insufficient.
 
@@ -47,6 +50,29 @@ compilation. Includes resolve against the current registry at render time.
 Errors throw strings across the binding. Free engine instances when finished.
 This API generates HTML; it does not implement DOM reconciliation or reactivity.
 
+## Use the same bundle on the server
+
+The rebuilt Python extension exports an experimental, opt-in `PortableEngine`:
+
+```python
+import json
+from pathlib import Path
+from django_rusty_templates import PortableEngine
+
+bundle = json.loads(Path("dtl-browser/demo/catalog.json").read_text())
+engine = PortableEngine()
+for name, source in {**bundle["templates"], bundle["name"]: bundle["source"]}.items():
+    engine.add_template(name, source)
+html = engine.render_json(bundle["name"], json.dumps(bundle["context"]))
+assert html == bundle["expected"]
+```
+
+Rebuild with `.venv/bin/maturin develop` first. This adapter accepts the same
+JSON data representation as browser `render`, and raises `ValueError` for core
+errors. It is not automatically selected by the Django backend and does not
+replace existing Python object/tag/filter behavior. The shared example is also
+rendered unchanged by the **existing** Rusty Django backend and Django itself.
+
 ## Supported subset
 
 - Text, inline comments, variable output and HTML autoescaping.
@@ -60,21 +86,27 @@ This API generates HTML; it does not implement DOM reconciliation or reactivity.
 - Single-variable `for`, `reversed`, `empty`, strings/arrays/object keys,
   counters and nested `forloop.parentloop`; loop scopes are restored.
 - `include` with a literal or dynamic name and the current context.
+- `extends`, named `block`/`endblock`, dynamic/filtered parent names, nested blocks,
+  multiple inheritance levels and lazy, escaped-once `block.super`. Relative parent
+  and include paths resolve within the registered template namespace; includes
+  use an independent inheritance block map.
 
 Unsupported tags and filters fail during registration rather than silently
 falling back to Python. Unsupported rendering operations also return errors.
 
 ## Limits and deliberate differences
 
-No inheritance/blocks, custom Python or JavaScript tags, callable/attribute
+No custom Python or JavaScript tags, callable/attribute
 protocol, request/context processors, translation, localization/timezones,
 `include with/only`, unpacking loops, `autoescape off`, or general Django filters.
+Cross-include `block.super` references and recursive same-name loader/origin
+selection are not implemented. Only in-memory named templates are supported.
 Direct JSON array/object output is rejected. JSON object iteration retains input
 order. JSON/JavaScript numbers and Unicode casing do not promise every Python
 numeric/string edge case. Only the shared fixtures below establish parity; the
 full Django suite has **not** been ported to this runtime.
 
-Templates/context strings and rendered output are limited to 1 MiB, nesting to
+Templates/context strings and rendered output are limited to 1 MiB, nesting/inheritance to
 32, conditions/filter chains to 64 terms/filters, and rendering to 100,000 steps.
 These are experimental guardrails, not a comprehensive resource sandbox.
 Templates should be trusted application assets. `safe` deliberately bypasses
@@ -88,10 +120,12 @@ cargo test -p dtl-browser
 .venv/bin/python dtl-browser/tests/check_django.py
 bash dtl-browser/build.sh
 node dtl-browser/tests/wasm.mjs
+.venv/bin/pytest -q tests/test_portable_templates.py
 ```
 
-The same 24 fixtures are checked against Django, native Rust and the generated
-Wasm/JavaScript bindings. Rust tests also cover unsupported syntax, invalid JSON,
+The same 39 fixtures (including the actual demo bundle) are checked against
+Django, the existing Rusty server backend, the new shared-core Python adapter,
+native Rust and generated Wasm/JavaScript bindings. Rust tests also cover unsupported syntax, invalid JSON,
 recursive includes, failed replacement, output limits and work limits.
 
 Optional real-browser verification uses Playwright, kept local to this crate:
@@ -113,8 +147,8 @@ No additional CI jobs or browser matrix have been enabled.
 
 Measured locally on macOS ARM64, Python-free Wasm in headless Chrome 150:
 
-- Generated Wasm: approximately 150 KiB before compression (binding JS additional).
-- 100-row loop: approximately 272 µs median, including JSON parsing, lookups,
+- Generated Wasm: approximately 167 KiB before compression (binding JS additional).
+- 100-row loop: approximately 278 µs median, including JSON parsing, lookups,
   escaping and the JavaScript/Wasm boundary; 15 samples of 200 renders after warmup.
 
 This is a synthetic loop benchmark, not an application benchmark or a browser
@@ -122,6 +156,10 @@ speedup claim. Initialization/network/DOM costs are excluded from the render
 timing. Existing native Python-wheel timings must not be assumed to apply here.
 
 Before considering a shared production core, measure an actual application's
-templates, data conversion costs and startup/download costs. Supporting the
-usual `base.html` inheritance pattern would require native block/inheritance
-work. Keep that work separate from validating this initial browser subset.
+templates, data conversion costs and startup/download costs. This branch
+demonstrates the usual `base.html` pattern without weakening the existing Django
+backend. It does not migrate the full backend to this experimental core.
+
+The production compatibility gate remains the unchanged Django 5.2/6.0/6.1
+conformance suites plus pinned 6.2 development coverage, together with the existing
+project tests. Browser subset coverage is reported separately from those results.

@@ -3,7 +3,8 @@ use serde_json::Value;
 
 #[test]
 fn shared_parity_cases() {
-    let cases: Vec<Value> = serde_json::from_str(include_str!("parity.json")).unwrap();
+    let mut cases: Vec<Value> = serde_json::from_str(include_str!("parity.json")).unwrap();
+    cases.push(serde_json::from_str(include_str!("../demo/catalog.json")).unwrap());
     for case in cases {
         let mut engine = Engine::new();
         let name = case["name"].as_str().unwrap();
@@ -26,7 +27,7 @@ fn shared_parity_cases() {
 #[test]
 fn rejects_unsupported_or_malformed_syntax() {
     for source in [
-        "{% extends 'base' %}",
+        "{% extends 'base' %}{% extends 'other' %}",
         "{% load i18n %}",
         "{{ name|unknown }}",
         "{{ name|default: }}",
@@ -36,6 +37,9 @@ fn rejects_unsupported_or_malformed_syntax() {
         "{% for a,b in rows %}{% endfor %}",
         "{% include 'card' only %}",
         "{% if %}{% endif %}",
+        "{% block a %}{% endblock b %}",
+        "{% block a %}{% endblock %}{% block a %}{% endblock %}",
+        "{% if True %}{% extends 'base' %}{% endif %}",
     ] {
         assert!(
             Engine::new().add_template("bad", source).is_err(),
@@ -87,5 +91,75 @@ fn output_and_work_limits() {
             .render("busy", &context.to_string())
             .unwrap_err()
             .contains("step")
+    );
+}
+
+#[test]
+fn inheritance_errors_and_recovery() {
+    let mut engine = Engine::new();
+    engine.add_template("a", "{% extends 'b' %}").unwrap();
+    engine.add_template("b", "{% extends 'a' %}").unwrap();
+    assert!(
+        engine
+            .render("a", "{}")
+            .unwrap_err()
+            .contains("Inheritance cycle")
+    );
+    engine
+        .add_template("missing", "{% extends 'absent' %}")
+        .unwrap();
+    assert!(
+        engine
+            .render("missing", "{}")
+            .unwrap_err()
+            .contains("Template not found")
+    );
+    engine
+        .add_template(
+            "base_super",
+            "{% block body %}{{ block.super }}{% endblock %}",
+        )
+        .unwrap();
+    assert!(
+        engine
+            .render("base_super", "{}")
+            .unwrap_err()
+            .contains("inheritance context")
+    );
+    engine
+        .add_template("good", "{% block body %}good{% endblock %}")
+        .unwrap();
+    assert_eq!(engine.render("good", "{}").unwrap(), "good");
+}
+
+#[test]
+fn parent_selection_and_replacement_are_live() {
+    let mut engine = Engine::new();
+    engine
+        .add_template("base", "A:{% block body %}base{% endblock %}")
+        .unwrap();
+    engine
+        .add_template("other", "B:{% block body %}other{% endblock %}")
+        .unwrap();
+    engine
+        .add_template(
+            "child",
+            "{% extends parent %}{% block body %}{{ block.super }}+child{% endblock %}",
+        )
+        .unwrap();
+    assert_eq!(
+        engine.render("child", r#"{"parent":"base"}"#).unwrap(),
+        "A:base+child"
+    );
+    assert_eq!(
+        engine.render("child", r#"{"parent":"other"}"#).unwrap(),
+        "B:other+child"
+    );
+    engine
+        .add_template("base", "C:{% block body %}changed{% endblock %}")
+        .unwrap();
+    assert_eq!(
+        engine.render("child", r#"{"parent":"base"}"#).unwrap(),
+        "C:changed+child"
     );
 }
