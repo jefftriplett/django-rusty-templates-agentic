@@ -24,8 +24,9 @@ use super::types::{
 use super::{Evaluate, Render, RenderResult, Resolve, ResolveFailures, ResolveResult};
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::parse::{
-    CsrfToken, Cycle, CycleValue, FirstOf, For, IfCondition, Include, IncludeTemplateName, Lorem,
-    NamedCycle, SilentNamedCycle, SimpleBlockTag, SimpleCycle, SimpleTag, Tag, TagElement, Url,
+    CsrfToken, Cycle, CycleValue, FirstOf, For, IfCondition, Include, IncludeTemplateName,
+    InclusionTag, Lorem, NamedCycle, SilentNamedCycle, SimpleBlockTag, SimpleCycle, SimpleTag, Tag,
+    TagElement, Url,
 };
 use crate::path::construct_relative_path;
 use crate::template::django_rusty_templates::{
@@ -722,6 +723,84 @@ impl Render for Tag {
         context: &mut Context,
     ) -> RenderResult<'t> {
         Ok(match self {
+            Self::Regroup(group) => {
+                let results = PyList::empty(py);
+                if let Some(target) = group.target.resolve(
+                    py,
+                    template,
+                    context,
+                    ResolveFailures::IgnoreVariableDoesNotExist,
+                )? {
+                    let target = target.to_py(py);
+                    if !target.is_none() {
+                        let python_context = context.django_context(py)?;
+                        let kwargs = PyDict::new(py);
+                        kwargs.set_item("ignore_failures", true)?;
+                        let grouped_result = py
+                            .import("django.template.defaulttags")?
+                            .getattr("GroupedResult")?;
+                        let mut previous: Option<Bound<'_, PyAny>> = None;
+                        let mut items = PyList::empty(py);
+                        for item in target.try_iter()? {
+                            let item = item?;
+                            python_context.set_item(&group.asvar, &item)?;
+                            let key = group.expression.bind(py).call_method(
+                                "resolve",
+                                (&python_context,),
+                                Some(&kwargs),
+                            )?;
+                            let same = match &previous {
+                                Some(previous) => key.is(previous) || key.eq(previous)?,
+                                None => false,
+                            };
+                            if !same {
+                                items = PyList::empty(py);
+                                results.append(grouped_result.call1((&key, &items))?)?;
+                                previous = Some(key);
+                            }
+                            items.append(item)?;
+                        }
+                    }
+                }
+                context.insert(group.asvar.clone(), results.into_any());
+                Cow::Borrowed("")
+            }
+            Self::IfChanged {
+                id,
+                values,
+                truthy,
+                falsey,
+            } => {
+                let mut output = None;
+                let comparison = if values.is_empty() {
+                    let rendered = truthy.render(py, template, context)?.into_owned();
+                    let value = PyString::new(py, &rendered).into_any();
+                    output = Some(rendered);
+                    value
+                } else {
+                    let list = PyList::empty(py);
+                    for value in values {
+                        let value = value.resolve(
+                            py,
+                            template,
+                            context,
+                            ResolveFailures::IgnoreVariableDoesNotExist,
+                        )?;
+                        list.append(
+                            value.map_or_else(|| py.None().into_bound(py), |value| value.to_py(py)),
+                        )?;
+                    }
+                    list.into_any()
+                };
+                if context.has_changed(py, *id, comparison)? {
+                    match output {
+                        Some(output) if !output.is_empty() => Cow::Owned(output),
+                        _ => truthy.render(py, template, context)?,
+                    }
+                } else {
+                    falsey.render(py, template, context)?
+                }
+            }
             Self::ResetCycle(id) => {
                 context.reset_cycle(*id);
                 Cow::Borrowed("")
@@ -827,6 +906,26 @@ impl Render for Tag {
             Self::For(for_tag) => for_tag.render(py, template, context)?,
             Self::Include(include_tag) => include_tag.render(py, template, context)?,
             Self::Load => Cow::Borrowed(""),
+            Self::QueryString(tag) => {
+                let mut args = build_args(py, template, context, &tag.args)?;
+                let kwargs = build_kwargs(py, template, context, &tag.kwargs)?;
+                let python_context = context.django_context(py)?;
+                if let Some(request) = &context.request {
+                    python_context.setattr("request", request.bind(py))?;
+                }
+                args.push_front(python_context);
+                let output = tag
+                    .func
+                    .bind(py)
+                    .call(PyTuple::new(py, args)?, Some(&kwargs))?;
+                if let Some(target) = &tag.target_var {
+                    context.insert(target.clone(), output);
+                    Cow::Borrowed("")
+                } else {
+                    Content::Py(output).render(context)?
+                }
+            }
+            Self::InclusionTag(tag) => tag.render(py, template, context)?,
             Self::SimpleTag(simple_tag) => simple_tag.render(py, template, context)?,
             Self::SimpleBlockTag(simple_tag) => simple_tag.render(py, template, context)?,
             Self::Url(url) => url.render(py, template, context)?,
@@ -1049,7 +1148,7 @@ impl Include {
             Content::String(content) => {
                 let key = IncludeTemplateKey::String(content.content().to_string());
                 context
-                    .get_or_insert_include(py, &self.engine, &key)
+                    .get_or_insert_include(py, &self.engine, &key, self.id)
                     .map(IncludeTemplate::Template)
             }
             Content::Py(content) => {
@@ -1073,7 +1172,7 @@ impl Include {
                     };
                     let key = IncludeTemplateKey::String(template_path);
                     context
-                        .get_or_insert_include(py, &self.engine, &key)
+                        .get_or_insert_include(py, &self.engine, &key, self.id)
                         .map(IncludeTemplate::Template)
                 } else {
                     let promise = PROMISE.import(py, "django.utils.functional", "Promise")?;
@@ -1098,7 +1197,7 @@ impl Include {
                     };
                     let key = IncludeTemplateKey::Vec(templates);
                     context
-                        .get_or_insert_include(py, &self.engine, &key)
+                        .get_or_insert_include(py, &self.engine, &key, self.id)
                         .map(IncludeTemplate::Template)
                 }
             }
@@ -1292,6 +1391,83 @@ fn store_target_var<'t>(
             context.insert(target_var.clone(), content);
             Cow::Borrowed("")
         }
+    }
+}
+
+impl Render for InclusionTag {
+    fn render<'t>(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> RenderResult<'t> {
+        let mut args = build_args(py, template, context, &self.call.args)?;
+        let kwargs = build_kwargs(py, template, context, &self.call.kwargs)?;
+        if self.call.takes_context {
+            let python_context = context.django_context(py)?;
+            if let Some(request) = &context.request {
+                python_context.setattr("request", request.bind(py))?;
+            }
+            args.push_front(python_context);
+        }
+        let values = self
+            .call
+            .func
+            .bind(py)
+            .call(PyTuple::new(py, args)?, Some(&kwargs))?;
+        let mut values: HashMap<String, Py<PyAny>> = values.extract()?;
+        if let Some(csrf) = context.get("csrf_token")
+            && !csrf.is_none(py)
+        {
+            values.insert("csrf_token".to_string(), csrf.clone_ref(py));
+        }
+        // Context.new() restores builtins and preserves formatting flags, while
+        // excluding the caller's variables, loop state and context processors.
+        for (name, value) in [
+            ("True", PyBool::new(py, true).to_owned().into_any()),
+            ("False", PyBool::new(py, false).to_owned().into_any()),
+            ("None", py.None().into_bound(py)),
+        ] {
+            values
+                .entry(name.to_string())
+                .or_insert_with(|| value.unbind());
+        }
+        let mut child = Context::new(
+            values,
+            context
+                .request
+                .as_ref()
+                .map(|request| request.clone_ref(py)),
+            context.autoescape,
+        );
+        child.use_l10n = context.use_l10n;
+        child.use_tz = context.use_tz;
+        child.format_values = context.format_values;
+        let filename = self.filename.bind(py);
+        let filename = filename
+            .getattr("template")
+            .unwrap_or_else(|_| filename.clone());
+        if let Ok(loaded) = filename.extract::<PyRef<'_, Template>>() {
+            return loaded
+                .render(py, &mut child)
+                .map(|output| Cow::Owned(output.into_owned()));
+        }
+        if filename.hasattr("render")? {
+            return Ok(Cow::Owned(
+                filename
+                    .call_method1("render", (child.django_context(py)?,))?
+                    .extract()?,
+            ));
+        }
+        let key = if let Ok(name) = filename.extract::<String>() {
+            IncludeTemplateKey::String(name)
+        } else {
+            IncludeTemplateKey::Vec(filename.extract()?)
+        };
+        let loaded = context.get_or_insert_include(py, &self.engine, &key, self.id)?;
+        loaded
+            .render(py, &mut child)
+            .map(|output| Cow::Owned(output.into_owned()))
     }
 }
 

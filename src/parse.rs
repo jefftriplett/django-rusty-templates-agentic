@@ -60,7 +60,8 @@ use dtl_lexer::tag::templatetag::{TemplateTag, TemplateTagError, lex_templatetag
 use dtl_lexer::tag::{TagLexerError, TagParts, lex_tag};
 use dtl_lexer::types::{At, TemplateString};
 use dtl_lexer::variable::{
-    Argument as ArgumentToken, VariableLexerError, VariableToken, lex_variable_or_filter,
+    Argument as ArgumentToken, FilterLexer, VariableLexerError, VariableToken,
+    lex_variable_or_filter,
 };
 use dtl_lexer::{START_TAG_LEN, TemplateContent};
 
@@ -125,6 +126,37 @@ impl Parse<Argument> for ArgumentToken {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct InclusionTag {
+    pub id: CycleId,
+    pub call: SimpleTag,
+    pub filename: Arc<Py<PyAny>>,
+    pub engine: Arc<Engine>,
+}
+
+impl PartialEq for InclusionTag {
+    fn eq(&self, other: &Self) -> bool {
+        self.call == other.call
+            && Arc::ptr_eq(&self.filename, &other.filename)
+            && Arc::ptr_eq(&self.engine, &other.engine)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Regroup {
+    pub target: TagElement,
+    pub expression: Arc<Py<PyAny>>,
+    pub asvar: String,
+}
+
+impl PartialEq for Regroup {
+    fn eq(&self, other: &Self) -> bool {
+        self.target == other.target
+            && self.asvar == other.asvar
+            && Arc::ptr_eq(&self.expression, &other.expression)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum TagElement {
     Int(BigInt),
@@ -169,6 +201,8 @@ impl Filter {
             "truncatechars" => Some(("truncatechars", true, true)),
             "truncatewords" => Some(("truncatewords", true, true)),
             "time" => Some(("time", false, true)),
+            "timesince" => Some(("timesince", false, true)),
+            "timeuntil" => Some(("timeuntil", false, true)),
             "urlencode" => Some(("urlencode", false, true)),
             "json_script" => Some(("json_script", false, true)),
             "floatformat" => Some(("floatformat", false, true)),
@@ -684,6 +718,7 @@ pub enum IncludeTemplateName {
 
 #[derive(Clone, Debug)]
 pub struct Include {
+    pub id: CycleId,
     pub template_name: IncludeTemplateName,
     pub origin: Option<String>,
     pub engine: Arc<Engine>,
@@ -813,6 +848,13 @@ pub enum Tag {
         truthy: Vec<TokenTree>,
         falsey: Option<Vec<TokenTree>>,
     },
+    IfChanged {
+        id: CycleId,
+        values: Vec<TagElement>,
+        truthy: Vec<TokenTree>,
+        falsey: Vec<TokenTree>,
+    },
+    Regroup(Regroup),
     For(For),
     Include(Include),
     Load,
@@ -828,6 +870,8 @@ pub enum Tag {
     Spaceless(Vec<TokenTree>),
     Verbatim(Vec<TokenTree>),
     Debug,
+    QueryString(SimpleTag),
+    InclusionTag(InclusionTag),
     SimpleTag(SimpleTag),
     SimpleBlockTag(SimpleBlockTag),
     Url(Url),
@@ -1297,6 +1341,10 @@ struct SimpleTagContext<'py> {
 enum TagContext<'py> {
     Unloaded(Bound<'py, PyAny>),
     Simple(SimpleTagContext<'py>),
+    Inclusion {
+        context: SimpleTagContext<'py>,
+        filename: Bound<'py, PyAny>,
+    },
     SimpleBlock {
         end_tag_name: String,
         context: SimpleTagContext<'py>,
@@ -1486,14 +1534,28 @@ impl<'t, 'py> Parser<'t, 'py> {
         at: At,
         start: usize,
     ) -> Result<TagElement, ParseError> {
-        let Some((variable_token, at, filter_lexer)) = lex_variable_or_filter(variable, start)?
-        else {
-            return Err(ParseError::EmptyVariable { at: at.into() });
-        };
-        let mut var = match variable_token {
-            VariableToken::Variable => self.parse_for_variable(at).into(),
-            VariableToken::Int(n) => TagElement::Int(n),
-            VariableToken::Float(f) => TagElement::Float(f),
+        let trimmed = variable.trim_start();
+        let start = start + variable.len() - trimmed.len();
+        let (mut var, at, filter_lexer) = if let Some(quote @ ('"' | '\'')) = trimmed.chars().next()
+        {
+            let mut chars = trimmed.chars();
+            chars.next();
+            let (at, byte, rest) = dtl_lexer::common::lex_text(start, trimmed, &mut chars, quote)?;
+            (
+                TagElement::Text(Text::new(text_content_at(at))),
+                at,
+                FilterLexer::new(rest, byte)?,
+            )
+        } else {
+            let Some((token, at, filters)) = lex_variable_or_filter(trimmed, start)? else {
+                return Err(ParseError::EmptyVariable { at: at.into() });
+            };
+            let value = match token {
+                VariableToken::Variable => self.parse_for_variable(at).into(),
+                VariableToken::Int(n) => TagElement::Int(n),
+                VariableToken::Float(f) => TagElement::Float(f),
+            };
+            (value, at, filters)
         };
         for filter_token in filter_lexer {
             let filter_token = filter_token?;
@@ -1652,6 +1714,82 @@ impl<'t, 'py> Parser<'t, 'py> {
             }
         };
         Ok(TokenTree::Tag(Tag::ResetCycle(id)))
+    }
+
+    fn parse_regroup(&self, parts: TagParts) -> Result<TokenTree, PyParseError> {
+        let tokens = TagElementKwargLexer::new(self.template, parts)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ParseError::from)?;
+        let error = crate::template::django_rusty_templates::TemplateSyntaxError::new_err;
+        if tokens.len() != 5 {
+            return Err(error("'regroup' tag takes five arguments").into());
+        }
+        if self.template.content(tokens[1].at) != "by" {
+            return Err(error("second argument to 'regroup' tag must be 'by'").into());
+        }
+        if self.template.content(tokens[3].at) != "as" {
+            return Err(error("next-to-last argument to 'regroup' tag must be 'as'").into());
+        }
+        let target = tokens[0].parse(self)?;
+        let asvar = self.template.content(tokens[4].at).to_string();
+        let expression = format!("{asvar}.{}", self.template.content(tokens[2].at));
+        let builtins = pyo3::types::PyList::empty(self.py);
+        for module in [
+            "django.template.defaulttags",
+            "django.template.defaultfilters",
+            "django.template.loader_tags",
+        ] {
+            builtins.append(self.py.import(module)?.getattr("register")?)?;
+        }
+        let parser = self
+            .py
+            .import("django.template.base")?
+            .getattr("Parser")?
+            .call1((
+                pyo3::types::PyList::empty(self.py),
+                self.py.None(),
+                builtins,
+            ))?;
+        let filters = parser.getattr("filters")?;
+        for (name, filter) in &self.external_filters {
+            filters.set_item(name, filter)?;
+        }
+        let expression = Arc::new(
+            parser
+                .call_method1("compile_filter", (expression,))?
+                .unbind(),
+        );
+        Ok(TokenTree::Tag(Tag::Regroup(Regroup {
+            target,
+            expression,
+            asvar,
+        })))
+    }
+
+    fn parse_ifchanged(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
+        let values = TagElementKwargLexer::new(self.template, parts)
+            .map(|token| token.map_err(ParseError::from)?.parse(self))
+            .collect::<Result<Vec<_>, _>>()?;
+        let end = EndTagType::Custom("endifchanged".to_string());
+        let (truthy, stop) = self.parse_until(
+            vec![
+                EndTagType::Else,
+                EndTagType::Custom("endifchanged".to_string()),
+            ],
+            "ifchanged".into(),
+            at,
+        )?;
+        let falsey = if stop.end == EndTagType::Else {
+            self.parse_until(vec![end], "else".into(), stop.at)?.0
+        } else {
+            Vec::new()
+        };
+        Ok(TokenTree::Tag(Tag::IfChanged {
+            id: CycleId(NEXT_CYCLE_ID.fetch_add(1, Ordering::Relaxed)),
+            values,
+            truthy,
+            falsey,
+        }))
     }
 
     fn parse_with(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
@@ -1914,6 +2052,32 @@ impl<'t, 'py> Parser<'t, 'py> {
                 at,
                 parts: None,
             }),
+            "querystring" => {
+                let compile = self
+                    .py
+                    .import("django.template.defaulttags")?
+                    .getattr("register")?
+                    .getattr("tags")?
+                    .get_item("querystring")?;
+                self.load_tag(at, "querystring", &compile)?;
+                let Some(TagContext::Simple(context)) = self.external_tags.get("querystring")
+                else {
+                    unreachable!("querystring is a simple tag")
+                };
+                let TokenTree::Tag(Tag::SimpleTag(simple)) =
+                    self.parse_simple_tag(context, at, tag.parts)?
+                else {
+                    unreachable!("querystring parser returns a simple tag")
+                };
+                Either::Left(TokenTree::Tag(Tag::QueryString(simple)))
+            }
+            "regroup" => Either::Left(self.parse_regroup(tag.parts)?),
+            "ifchanged" => Either::Left(self.parse_ifchanged(at, tag.parts)?),
+            "endifchanged" => Either::Right(EndTag {
+                end: EndTagType::Custom("endifchanged".to_string()),
+                at,
+                parts: None,
+            }),
             "widthratio" => Either::Left(self.parse_widthratio(tag.parts)?),
             "url" => Either::Left(self.parse_url(at, tag.parts)?),
             "firstof" => Either::Left(self.parse_firstof(tag.parts)?),
@@ -1974,6 +2138,22 @@ impl<'t, 'py> Parser<'t, 'py> {
                 match self.external_tags.get(tag_name) {
                     Some(TagContext::Simple(context)) => {
                         Either::Left(self.parse_simple_tag(context, at, tag.parts)?)
+                    }
+                    Some(TagContext::Inclusion { context, filename }) => {
+                        let TokenTree::Tag(Tag::SimpleTag(call)) =
+                            self.parse_simple_tag(context, at, tag.parts)?
+                        else {
+                            unreachable!("helper parser returns a simple tag")
+                        };
+                        if call.target_var.is_some() {
+                            return Err(crate::template::django_rusty_templates::TemplateSyntaxError::new_err(format!("'{tag_name}' received too many positional arguments")).into());
+                        }
+                        Either::Left(TokenTree::Tag(Tag::InclusionTag(InclusionTag {
+                            id: CycleId(NEXT_CYCLE_ID.fetch_add(1, Ordering::Relaxed)),
+                            call,
+                            filename: Arc::new(filename.clone().unbind()),
+                            engine: self.engine.clone(),
+                        })))
                     }
                     Some(TagContext::SimpleBlock {
                         context,
@@ -2211,7 +2391,44 @@ impl<'t, 'py> Parser<'t, 'py> {
                 .collect::<Result<Vec<_>, _>>()?;
 
             if closure_names.contains(&"filename".to_string()) {
-                todo!("Inclusion tag")
+                let cell = |name: &str| -> PyResult<&Bound<'py, PyAny>> {
+                    let index = closure_names
+                        .iter()
+                        .position(|key| key == name)
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "Missing inclusion tag closure cell: {name}"
+                            ))
+                        })?;
+                    Ok(&closure_values[index])
+                };
+                let takes_context = cell("takes_context")?.is_truthy()?;
+                let function_name: String = cell("function_name")?.extract()?;
+                let mut params: Vec<String> = cell("params")?.extract()?;
+                if takes_context {
+                    if params.first().is_none_or(|name| name != "context") {
+                        return Err(ParseError::RequiresContext {
+                            name: function_name,
+                            at: at.into(),
+                        }
+                        .into());
+                    }
+                    params.remove(0);
+                }
+                TagContext::Inclusion {
+                    filename: cell("filename")?.clone(),
+                    context: SimpleTagContext {
+                        func: cell("func")?.clone(),
+                        function_name,
+                        takes_context,
+                        params,
+                        defaults_count: get_defaults_count(cell("defaults")?)?,
+                        varargs: !cell("varargs")?.is_none(),
+                        kwonly: cell("kwonly")?.extract()?,
+                        kwonly_defaults: get_kwonly_defaults(cell("kwonly_defaults")?)?,
+                        varkw: !cell("varkw")?.is_none(),
+                    },
+                }
             } else if closure_names.contains(&"end_name".to_string()) {
                 let defaults_count = get_defaults_count(&closure_values[0])?;
                 let end_tag_name: String = closure_values[1].extract()?;
@@ -2428,6 +2645,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             }
         }
         let include = Include {
+            id: CycleId(NEXT_CYCLE_ID.fetch_add(1, Ordering::Relaxed)),
             template_name,
             origin: self.origin.map(ToString::to_string),
             engine: self.engine.clone(),
@@ -3465,6 +3683,7 @@ mod tests {
             let template_name = IncludeTemplateName::Variable(TagElement::Float(1.1));
             assert_eq!(
                 Include {
+                    id: CycleId(0),
                     template_name: template_name.clone(),
                     origin: None,
                     only: false,
@@ -3472,6 +3691,7 @@ mod tests {
                     engine: engine.clone(),
                 },
                 Include {
+                    id: CycleId(0),
                     template_name,
                     origin: None,
                     only: false,

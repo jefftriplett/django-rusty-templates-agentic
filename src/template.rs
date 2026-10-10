@@ -859,6 +859,14 @@ pub mod django_rusty_templates {
         }
     }
 
+    struct InspectionNodes(PyOnceLock<Py<PyAny>>);
+
+    impl std::fmt::Debug for InspectionNodes {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("InspectionNodes")
+        }
+    }
+
     #[derive(Debug, Clone)]
     #[pyclass(skip_from_py_object)]
     pub struct Template {
@@ -868,6 +876,7 @@ pub mod django_rusty_templates {
         pub engine: Arc<Engine>,
         pub template_name: Option<String>,
         pub loader_path: Vec<usize>,
+        inspection_nodes: Arc<InspectionNodes>,
     }
 
     impl Template {
@@ -898,6 +907,7 @@ pub mod django_rusty_templates {
                 filename: Some(filename),
                 template_name: Some(template_name.to_string()),
                 loader_path: Vec::new(),
+                inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
                 nodes,
                 engine,
             })
@@ -921,6 +931,7 @@ pub mod django_rusty_templates {
                 filename: None,
                 template_name: None,
                 loader_path: Vec::new(),
+                inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
                 nodes,
                 engine,
             })
@@ -1002,26 +1013,33 @@ pub mod django_rusty_templates {
         fn nodelist<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
             // This Python tree is for Django tooling and inspection only;
             // rendering always uses the compiled Rust nodes above.
-            let base = py.import("django.template.base")?;
-            let tokens = base
-                .getattr("Lexer")?
-                .call1((&self.template,))?
-                .call_method0("tokenize")?;
-            let libraries = PyDict::new(py);
-            for (name, library) in &self.engine.libraries {
-                libraries.set_item(name, library)?;
-            }
-            let builtins = PyList::empty(py);
-            for module in [
-                "django.template.defaulttags",
-                "django.template.defaultfilters",
-                "django.template.loader_tags",
-            ] {
-                builtins.append(py.import(module)?.getattr("register")?)?;
-            }
-            base.getattr("Parser")?
-                .call1((tokens, libraries, builtins, self.origin()))?
-                .call_method0("parse")
+            self.inspection_nodes
+                .0
+                .get_or_try_init(py, || {
+                    let base = py.import("django.template.base")?;
+                    let tokens = base
+                        .getattr("Lexer")?
+                        .call1((&self.template,))?
+                        .call_method0("tokenize")?;
+                    let libraries = PyDict::new(py);
+                    for (name, library) in &self.engine.libraries {
+                        libraries.set_item(name, library)?;
+                    }
+                    let builtins = PyList::empty(py);
+                    for module in [
+                        "django.template.defaulttags",
+                        "django.template.defaultfilters",
+                        "django.template.loader_tags",
+                    ] {
+                        builtins.append(py.import(module)?.getattr("register")?)?;
+                    }
+                    Ok(base
+                        .getattr("Parser")?
+                        .call1((tokens, libraries, builtins, self.origin()))?
+                        .call_method0("parse")?
+                        .unbind())
+                })
+                .map(|nodes| nodes.bind(py).clone())
         }
 
         fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
