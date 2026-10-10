@@ -38,31 +38,43 @@ impl Resolve for Filter {
         failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
         let left = self.left.resolve(py, template, context, failures)?;
-        match &self.filter {
-            FilterType::Add(filter) => filter.resolve(left, py, template, context),
-            FilterType::AddSlashes(filter) => filter.resolve(left, py, template, context),
-            FilterType::Capfirst(filter) => filter.resolve(left, py, template, context),
-            FilterType::Center(filter) => filter.resolve(left, py, template, context),
-            FilterType::Cut(filter) => filter.resolve(left, py, template, context),
-            FilterType::Default(filter) => filter.resolve(left, py, template, context),
-            FilterType::DefaultIfNone(filter) => filter.resolve(left, py, template, context),
-            FilterType::DivisibleBy(filter) => filter.resolve(left, py, template, context),
-            FilterType::Date(filter) => filter.resolve(left, py, template, context),
-            FilterType::Django(filter) => filter.resolve(left, py, template, context),
-            FilterType::Escape(filter) => filter.resolve(left, py, template, context),
-            FilterType::Escapejs(filter) => filter.resolve(left, py, template, context),
-            FilterType::External(filter) => filter.resolve(left, py, template, context),
-            FilterType::ForceEscape(filter) => filter.resolve(left, py, template, context),
-            FilterType::Last(filter) => filter.resolve(left, py, template, context),
-            FilterType::Lower(filter) => filter.resolve(left, py, template, context),
-            FilterType::Length(filter) => filter.resolve(left, py, template, context),
-            FilterType::Safe(filter) => filter.resolve(left, py, template, context),
-            FilterType::Slugify(filter) => filter.resolve(left, py, template, context),
-            FilterType::Title(filter) => filter.resolve(left, py, template, context),
-            FilterType::Upper(filter) => filter.resolve(left, py, template, context),
-            FilterType::Wordcount(filter) => filter.resolve(left, py, template, context),
-            FilterType::Wordwrap(filter) => filter.resolve(left, py, template, context),
-            FilterType::Yesno(filter) => filter.resolve(left, py, template, context),
+        self.filter.resolve(left, py, template, context)
+    }
+}
+
+impl ResolveFilter for FilterType {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        match self {
+            FilterType::Add(filter) => filter.resolve(variable, py, template, context),
+            FilterType::AddSlashes(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Capfirst(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Center(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Cut(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Default(filter) => filter.resolve(variable, py, template, context),
+            FilterType::DefaultIfNone(filter) => filter.resolve(variable, py, template, context),
+            FilterType::DivisibleBy(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Date(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Django(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Escape(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Escapejs(filter) => filter.resolve(variable, py, template, context),
+            FilterType::External(filter) => filter.resolve(variable, py, template, context),
+            FilterType::ForceEscape(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Last(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Lower(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Length(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Safe(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Slugify(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Title(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Upper(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Wordcount(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Wordwrap(filter) => filter.resolve(variable, py, template, context),
+            FilterType::Yesno(filter) => filter.resolve(variable, py, template, context),
         }
     }
 }

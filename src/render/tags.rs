@@ -13,6 +13,7 @@ use pyo3::sync::{MutexExt, PyOnceLock};
 use pyo3::types::{PyBool, PyDict, PyList, PyNone, PyString, PyTuple};
 
 use crate::parse::Now;
+use crate::render::filters::ResolveFilter;
 use crate::render::lorem::{COMMON_WORDS, paragraphs, words};
 use dtl_lexer::tag::lorem::LoremMethod;
 use dtl_lexer::types::{At, TemplateString};
@@ -31,6 +32,10 @@ use crate::template::django_rusty_templates::{
     NoReverseMatch, Template, TemplateDoesNotExist, TemplateSyntaxError,
 };
 use crate::utils::PyResultMethods;
+
+static STRIP_SPACES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static DEBUG_NODE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static MARK_BLOCK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static BUILTINS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -717,6 +722,75 @@ impl Render for Tag {
         context: &mut Context,
     ) -> RenderResult<'t> {
         Ok(match self {
+            Self::ResetCycle(id) => {
+                context.reset_cycle(*id);
+                Cow::Borrowed("")
+            }
+            Self::With { assignments, nodes } => {
+                let values = assignments
+                    .iter()
+                    .map(|(name, value)| {
+                        value
+                            .resolve(
+                                py,
+                                template,
+                                context,
+                                ResolveFailures::IgnoreVariableDoesNotExist,
+                            )
+                            .map(|value| (name, value.unwrap_or_else(|| "".as_content()).to_py(py)))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut scoped = context.clone_ref(py);
+                for (name, value) in values {
+                    scoped.insert(name.clone(), value);
+                }
+                let rendered = nodes.render(py, template, &mut scoped);
+                context.merge_render_state(scoped);
+                rendered?
+            }
+            Self::FilterBlock { filters, nodes } => {
+                let output = nodes.render(py, template, context)?;
+                let safe = MARK_BLOCK_SAFE
+                    .import(py, "django.utils.safestring", "mark_safe")?
+                    .call1((output.as_ref(),))?;
+                let mut value = Some(Content::Py(safe));
+                for filter in filters {
+                    value = filter.resolve(value, py, template, context)?;
+                }
+                match value {
+                    Some(value) => value.render(context)?,
+                    None => Cow::Borrowed(""),
+                }
+            }
+            Self::Spaceless(nodes) => {
+                let output = nodes.render(py, template, context)?;
+                Cow::Owned(
+                    STRIP_SPACES
+                        .import(py, "django.utils.html", "strip_spaces_between_tags")?
+                        .call1((output.trim(),))?
+                        .extract()?,
+                )
+            }
+            Self::Verbatim(nodes) => nodes.render(py, template, context)?,
+            Self::Debug => {
+                let values = context.as_dict(py)?;
+                for name in ["True", "False", "None"] {
+                    if values.contains(name)? {
+                        values.del_item(name)?;
+                    }
+                }
+                let ctx = py
+                    .import("django.template.context")?
+                    .getattr("Context")?
+                    .call1((values,))?;
+                Cow::Owned(
+                    DEBUG_NODE
+                        .import(py, "django.template.defaulttags", "DebugNode")?
+                        .call0()?
+                        .call_method1("render", (ctx,))?
+                        .extract()?,
+                )
+            }
             Self::WidthRatio { args, asvar } => {
                 let result = render_widthratio(args, py, template, context)?;
                 if let Some(name) = asvar {

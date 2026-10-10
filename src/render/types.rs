@@ -331,6 +331,15 @@ impl Context {
         }
     }
 
+    pub fn reset_cycle(&mut self, id: CycleId) {
+        self.cycle_indices.remove(&id);
+    }
+
+    pub fn merge_render_state(&mut self, scoped: Self) {
+        self.cycle_indices = scoped.cycle_indices;
+        self.include_cache = scoped.include_cache;
+    }
+
     pub fn next_cycle_index(&mut self, id: CycleId, length: usize) -> usize {
         *self
             .cycle_indices
