@@ -77,6 +77,7 @@ pub struct Context {
     names: Vec<HashSet<String>>,
     include_cache: HashMap<IncludeTemplateKey, Arc<Template>>,
     cycle_indices: HashMap<CycleId, usize>,
+    changed_states: Vec<HashMap<CycleId, Py<PyAny>>>,
 }
 
 impl Context {
@@ -97,6 +98,7 @@ impl Context {
             names: Vec::new(),
             include_cache: HashMap::new(),
             cycle_indices: HashMap::new(),
+            changed_states: vec![HashMap::new()],
         }
     }
 
@@ -116,6 +118,16 @@ impl Context {
             names: self.names.clone(),
             include_cache: self.include_cache.clone(),
             cycle_indices: self.cycle_indices.clone(),
+            changed_states: self
+                .changed_states
+                .iter()
+                .map(|frame| {
+                    frame
+                        .iter()
+                        .map(|(key, value)| (*key, value.clone_ref(py)))
+                        .collect()
+                })
+                .collect(),
         }
     }
 
@@ -261,6 +273,7 @@ impl Context {
 
     pub fn push_for_loop(&mut self, len: usize) {
         self.loops.push(ForLoop { count: 0, len });
+        self.changed_states.push(HashMap::new());
     }
 
     pub fn increment_for_loop(&mut self) {
@@ -272,6 +285,7 @@ impl Context {
     }
 
     pub fn pop_for_loop(&mut self) {
+        self.changed_states.pop();
         self.loops
             .pop()
             .expect("Called when exiting an active for loop");
@@ -331,12 +345,33 @@ impl Context {
         }
     }
 
+    pub fn has_changed(
+        &mut self,
+        py: Python<'_>,
+        id: CycleId,
+        value: Bound<'_, PyAny>,
+    ) -> PyResult<bool> {
+        let frame = self
+            .changed_states
+            .last_mut()
+            .expect("render has a state frame");
+        let changed = match frame.get(&id) {
+            Some(previous) => value.ne(previous.bind(py))?,
+            None => value.ne(py.None())?,
+        };
+        if changed {
+            frame.insert(id, value.unbind());
+        }
+        Ok(changed)
+    }
+
     pub fn reset_cycle(&mut self, id: CycleId) {
         self.cycle_indices.remove(&id);
     }
 
     pub fn merge_render_state(&mut self, scoped: Self) {
         self.cycle_indices = scoped.cycle_indices;
+        self.changed_states = scoped.changed_states;
         self.include_cache = scoped.include_cache;
     }
 

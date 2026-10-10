@@ -815,6 +815,12 @@ pub enum Tag {
         truthy: Vec<TokenTree>,
         falsey: Option<Vec<TokenTree>>,
     },
+    IfChanged {
+        id: CycleId,
+        values: Vec<TagElement>,
+        truthy: Vec<TokenTree>,
+        falsey: Vec<TokenTree>,
+    },
     For(For),
     Include(Include),
     Load,
@@ -1656,6 +1662,32 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(TokenTree::Tag(Tag::ResetCycle(id)))
     }
 
+    fn parse_ifchanged(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
+        let values = TagElementKwargLexer::new(self.template, parts)
+            .map(|token| token.map_err(ParseError::from)?.parse(self))
+            .collect::<Result<Vec<_>, _>>()?;
+        let end = EndTagType::Custom("endifchanged".to_string());
+        let (truthy, stop) = self.parse_until(
+            vec![
+                EndTagType::Else,
+                EndTagType::Custom("endifchanged".to_string()),
+            ],
+            "ifchanged".into(),
+            at,
+        )?;
+        let falsey = if stop.end == EndTagType::Else {
+            self.parse_until(vec![end], "else".into(), stop.at)?.0
+        } else {
+            Vec::new()
+        };
+        Ok(TokenTree::Tag(Tag::IfChanged {
+            id: CycleId(NEXT_CYCLE_ID.fetch_add(1, Ordering::Relaxed)),
+            values,
+            truthy,
+            falsey,
+        }))
+    }
+
     fn parse_with(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
         let tokens = TagElementKwargLexer::new(self.template, parts)
             .collect::<Result<Vec<_>, _>>()
@@ -1913,6 +1945,12 @@ impl<'t, 'py> Parser<'t, 'py> {
             }
             name @ ("endwith" | "endfilter" | "endspaceless") => Either::Right(EndTag {
                 end: EndTagType::Custom(name.to_string()),
+                at,
+                parts: None,
+            }),
+            "ifchanged" => Either::Left(self.parse_ifchanged(at, tag.parts)?),
+            "endifchanged" => Either::Right(EndTag {
+                end: EndTagType::Custom("endifchanged".to_string()),
                 at,
                 parts: None,
             }),

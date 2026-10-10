@@ -722,6 +722,42 @@ impl Render for Tag {
         context: &mut Context,
     ) -> RenderResult<'t> {
         Ok(match self {
+            Self::IfChanged {
+                id,
+                values,
+                truthy,
+                falsey,
+            } => {
+                let mut output = None;
+                let comparison = if values.is_empty() {
+                    let rendered = truthy.render(py, template, context)?.into_owned();
+                    let value = PyString::new(py, &rendered).into_any();
+                    output = Some(rendered);
+                    value
+                } else {
+                    let list = PyList::empty(py);
+                    for value in values {
+                        let value = value.resolve(
+                            py,
+                            template,
+                            context,
+                            ResolveFailures::IgnoreVariableDoesNotExist,
+                        )?;
+                        list.append(
+                            value.map_or_else(|| py.None().into_bound(py), |value| value.to_py(py)),
+                        )?;
+                    }
+                    list.into_any()
+                };
+                if context.has_changed(py, *id, comparison)? {
+                    match output {
+                        Some(output) if !output.is_empty() => Cow::Owned(output),
+                        _ => truthy.render(py, template, context)?,
+                    }
+                } else {
+                    falsey.render(py, template, context)?
+                }
+            }
             Self::ResetCycle(id) => {
                 context.reset_cycle(*id);
                 Cow::Borrowed("")
