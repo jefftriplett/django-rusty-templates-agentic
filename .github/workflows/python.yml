@@ -101,11 +101,17 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: ${{ !startsWith(matrix.python-version, '3.15.') }}
         with:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
+      - name: Install final Python 3.15 with uv
+        if: startsWith(matrix.python-version, '3.15.')
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: uv python install "$PYTHON_VERSION"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: python-${{ matrix.python-version }}
