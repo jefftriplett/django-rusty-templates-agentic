@@ -366,6 +366,50 @@ impl Context {
         self.loops.get(index)
     }
 
+    /// Expose native loop scopes to Python callbacks on the live Django context.
+    pub fn sync_loop_context(&self, py: Python<'_>, first: bool) -> PyResult<()> {
+        let Some(context) = &self.formatting_context else {
+            return Ok(());
+        };
+        let context = context.bind(py);
+        if let Some(names) = self.names.last() {
+            for key in names {
+                if let Some(value) = self.get(key) {
+                    context.set_item(key, value)?;
+                }
+            }
+        }
+        let dict = if first {
+            let parent = context
+                .get_item("forloop")
+                .unwrap_or_else(|_| PyDict::new(py).into_any());
+            let dict = PyDict::new(py);
+            dict.set_item("parentloop", parent)?;
+            context.set_item("forloop", &dict)?;
+            dict.into_any()
+        } else {
+            context.get_item("forloop")?
+        };
+        let for_loop = self.loops.last().expect("inside native loop");
+        dict.set_item("counter", for_loop.counter())?;
+        dict.set_item("counter0", for_loop.counter0())?;
+        dict.set_item("revcounter", for_loop.rev_counter())?;
+        dict.set_item("revcounter0", for_loop.rev_counter0())?;
+        dict.set_item("first", for_loop.first())?;
+        dict.set_item("last", for_loop.last())?;
+        if first
+            && py
+                .import("django")?
+                .getattr("VERSION")?
+                .get_item(0)?
+                .extract::<u8>()?
+                >= 6
+        {
+            dict.set_item("length", for_loop.length())?;
+        }
+        Ok(())
+    }
+
     pub fn render_for_loop(&self, py: Python<'_>, depth: usize) -> String {
         let mut forloop_dict = PyDict::new(py);
         for forloop in self.loops.iter().rev().take(self.loops.len() - depth) {
@@ -675,6 +719,23 @@ fn render_value_in_context<'t>(value: ContentString<'t>, context: &Context) -> C
 impl<'t, 'py> Content<'t, 'py> {
     pub fn render(self, context: &Context) -> PyResult<Cow<'t, str>> {
         let output = match self {
+            Self::Py(content)
+                if context.format_values
+                    && context.formatting_context.is_some()
+                    && content.is_exact_instance_of::<PyString>() =>
+            {
+                let py = content.py();
+                let autoescape: bool = context
+                    .django_context(py)?
+                    .getattr("autoescape")?
+                    .extract()?;
+                let value: String = content.extract()?;
+                return Ok(Cow::Owned(if autoescape {
+                    encode_quoted_attribute(&value).into_owned()
+                } else {
+                    value
+                }));
+            }
             Self::Py(content)
                 if context.format_values
                     && context.formatting_context.is_some()

@@ -54,3 +54,142 @@ def test_regions_read_context_changes_between_variables(debug):
     assert expected == "<mutated> / <new> / <new>"
     template = compile_template(source, Engine(debug=debug))
     assert template.render(context()) == expected
+
+
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("rows", [[], [("<a>", [1, 2]), ("&", [])]])
+def test_structural_regions_preserve_nested_scopes_and_empty_branches(debug, rows):
+    source = (
+        "{{ name }}:{% for row in rows reversed %}"
+        "{{ forloop.counter }}={{ row.0 }}:"
+        "{% if row.1 %}{% for number in row.1 %}{{ number }};{% endfor %}"
+        "{% else %}empty{% endif %}/{% empty %}no rows{% endfor %}/{{ name }}"
+    )
+    values = {"name": "outside", "rows": rows}
+    expected = DjangoEngine(debug=debug).from_string(source).render(Context(values))
+    template = compile_template(source, Engine(debug=debug))
+    assert template.render(Context(values)) == expected
+    if not debug:
+        assert len(template.nodelist) == 1
+        region = template.nodelist[0]
+        assert isinstance(region, NativeRegionNode)
+        assert region._native is not None
+        assert all(
+            node._native is None
+            for node in region.nodelist.get_nodes_by_type(VariableNode)
+        )
+
+
+def test_structural_region_callbacks_see_and_modify_live_loop_scope():
+    source = "{% for row in rows %}{{ mutate }}:{{ row }}:{{ value }};{% endfor %}{{ row }}:{{ value }}"
+
+    def context():
+        result = Context({"rows": [1, 2], "row": "outside", "value": "before"})
+
+        def mutate():
+            counter = result["forloop"]["counter"]
+            result["row"] = f"changed-{result['row']}"
+            result["value"] = counter
+            return counter
+
+        result["mutate"] = mutate
+        return result
+
+    expected = DjangoEngine().from_string(source).render(context())
+    assert expected == "1:changed-1:1;2:changed-2:2;outside:before"
+    assert compile_template(source, Engine()).render(context()) == expected
+
+
+def test_structural_region_restores_context_after_callback_error():
+    source = "{% for row in rows %}{{ fail }}:{{ row }}{% endfor %}"
+    context = Context({"rows": [1], "row": "outside"})
+
+    def fail():
+        assert context["row"] == 1
+        raise RuntimeError("callback failed")
+
+    context["fail"] = fail
+    depth = len(context.dicts)
+    with pytest.raises(RuntimeError, match="callback failed"):
+        compile_template(source, Engine()).render(context)
+    assert len(context.dicts) == depth
+    assert context["row"] == "outside"
+    assert "forloop" not in context
+
+
+def test_regions_keep_django_parent_loops_across_unsupported_nodes():
+    source = (
+        "{% for row in rows %}{% autoescape off %}{{ row }}{% endautoescape %}"
+        "{% for value in row %}{{ forloop.parentloop.counter }}:{{ value }};{% endfor %}"
+        "{% endfor %}"
+    )
+    values = {"rows": [[1, 2], [3]]}
+    expected = DjangoEngine().from_string(source).render(Context(values))
+    assert compile_template(source, Engine()).render(Context(values)) == expected
+
+
+def test_structural_region_preserves_live_counter_changes_and_dictionary_identity():
+    source = "{% for row in rows %}{{ mutate }}:{{ forloop.counter }};{% endfor %}"
+
+    def context():
+        result = Context({"rows": [1, 2]})
+        previous = []
+
+        def mutate():
+            current = result["forloop"]
+            if previous:
+                assert current is previous[0]
+                del current["counter"]
+            else:
+                previous.append(current)
+                current["counter"] = 10
+            return "mutated"
+
+        result["mutate"] = mutate
+        return result
+
+    expected = DjangoEngine().from_string(source).render(context())
+    assert expected == "mutated:10;mutated:;"
+    assert compile_template(source, Engine()).render(context()) == expected
+
+
+def test_structural_regions_keep_unpacking_scopes_in_django():
+    source = "{% for first, second in rows %}{{ mutate }}:{{ value }};{% endfor %}{{ value }}"
+
+    def context():
+        result = Context({"rows": [(1, 2), (3, 4)], "value": "outside"})
+
+        def mutate():
+            before = result["value"]
+            result["value"] = result["first"]
+            return before
+
+        result["mutate"] = mutate
+        return result
+
+    expected = DjangoEngine().from_string(source).render(context())
+    assert compile_template(source, Engine()).render(context()) == expected
+
+
+@pytest.mark.parametrize("autoescape", [True, False])
+def test_region_string_fast_path_preserves_subclass_hooks(autoescape):
+    class CustomString(str):
+        def __str__(self):
+            return "<str>"
+
+        def __html__(self):
+            return "<html>"
+
+    source = "{% for value in values %}{{ value }};{% endfor %}"
+    values = {"values": ["<>&\"'é", CustomString("ignored")]}
+    expected = (
+        DjangoEngine()
+        .from_string(source)
+        .render(Context(values, autoescape=autoescape))
+    )
+    assert (
+        compile_template(source, Engine()).render(
+            Context(values, autoescape=autoescape)
+        )
+        == expected
+    )

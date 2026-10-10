@@ -213,6 +213,36 @@ impl Resolve for ForVariable {
         context: &mut Context,
         _failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
+        if context.formatting_context.is_some() {
+            let Some(mut value) = context.resolve_root(py, "forloop")? else {
+                return Ok(None);
+            };
+            for _ in 0..self.parent_count {
+                let Some(parent) = lookup_part(value, "parentloop")? else {
+                    return Ok(None);
+                };
+                value = parent;
+            }
+            let key = match self.variant {
+                ForVariableName::Length => Some("length"),
+                ForVariableName::Counter => Some("counter"),
+                ForVariableName::Counter0 => Some("counter0"),
+                ForVariableName::RevCounter => Some("revcounter"),
+                ForVariableName::RevCounter0 => Some("revcounter0"),
+                ForVariableName::First => Some("first"),
+                ForVariableName::Last => Some("last"),
+                ForVariableName::Object => None,
+            };
+            if let Some(key) = key {
+                let Some(part) = lookup_part(value, key)? else {
+                    return Ok(None);
+                };
+                value = part;
+            }
+            let result = resolve_callable(value)?.map(Content::Py);
+            context.refresh_formatting_flags(py)?;
+            return Ok(result);
+        }
         let Some(for_loop) = context.get_for_loop(self.parent_count) else {
             return Ok(Some("{}".as_content()));
         };

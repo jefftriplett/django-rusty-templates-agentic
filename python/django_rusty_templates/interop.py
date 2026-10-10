@@ -13,12 +13,21 @@ from django.template.base import (
     VariableNode,
 )
 from django.template.loader_tags import ExtendsNode
+from django.template.defaulttags import ForNode, IfNode
 
 
 class NativeVariableNode(VariableNode):
-    def __init__(self, node, native):
+    def __init__(self, node, engine, source):
         super().__init__(node.filter_expression)
-        self.native = native
+        self.engine = engine
+        self.source = source
+        self._native = None
+
+    @property
+    def native(self):
+        if self._native is None:
+            self._native = self.engine.from_string(self.source)
+        return self._native
 
     def render(self, context):
         try:
@@ -32,16 +41,21 @@ class NativeVariableNode(VariableNode):
 
 
 class NativeRegionNode(Node):
-    """Render adjacent native variables and text in one extension call."""
+    """Render supported native control flow, variables and text in one call."""
 
     child_nodelists = ("nodelist",)
     render = NativeVariableNode.render
+    native = NativeVariableNode.native
 
-    def __init__(self, nodes, native):
+    def __init__(self, nodes, engine, source):
         self.nodelist = NodeList(nodes)
-        self.native = native
+        self.engine = engine
+        self.source = source
+        self._native = None
         self.token = nodes[0].token
         self.origin = nodes[0].origin
+        self.load_prefix = nodes[0].load_prefix
+        self._native_end = nodes[-1]._native_end
 
 
 class NativeParser(Parser):
@@ -60,11 +74,42 @@ class NativeParser(Parser):
         self.native_engine = engine
         self.source = source
         self.load_prefix = ""
+        self.parse_depth = 0
+
+    def next_token(self):
+        token = super().next_token()
+        self.last_token = token
+        return token
+
+    @staticmethod
+    def native_node(node):
+        if isinstance(node, (NativeVariableNode, NativeRegionNode)):
+            return True
+        if type(node) is TextNode:
+            return node.token.token_type.value == 0
+        if type(node) in (ForNode, IfNode):
+            if type(node) is ForNode and (
+                len(node.loopvars) != 1 or node.loopvars[0] == "forloop"
+            ):
+                return False
+            return all(
+                NativeParser.native_node(child)
+                for name in node.child_nodelists
+                for child in getattr(node, name)
+            )
+        return False
 
     def parse(self, parse_until=None):
-        nodes = super().parse(parse_until)
-        if self.native_engine.debug:
+        self.parse_depth += 1
+        try:
+            nodes = super().parse(parse_until)
+        finally:
+            self.parse_depth -= 1
+        if self.native_engine.debug or self.parse_depth:
             return nodes
+        return self.group_nodes(nodes)
+
+    def group_nodes(self, nodes):
         grouped = NodeList()
         grouped.contains_nontext = nodes.contains_nontext
         region = []
@@ -73,36 +118,57 @@ class NativeParser(Parser):
             variables = [
                 node for node in region if isinstance(node, NativeVariableNode)
             ]
-            if len(variables) >= 2:
+            structural = any(type(node) in (ForNode, IfNode) for node in region)
+            if len(variables) >= 2 or structural:
                 start = region[0].token._native_position[0]
-                end = region[-1].token._native_position[1]
-                source = variables[0].load_prefix + self.source[start:end]
-                grouped.append(
-                    NativeRegionNode(region[:], self.native_engine.from_string(source))
-                )
+                end = region[-1]._native_end
+                source = region[0].load_prefix + self.source[start:end]
+                grouped.append(NativeRegionNode(region[:], self.native_engine, source))
             else:
                 grouped.extend(region)
             region.clear()
 
         for node in nodes:
-            eligible = getattr(node.token, "_native_position", None) is not None and (
-                isinstance(node, NativeVariableNode)
-                or (type(node) is TextNode and node.token.token_type.value == 0)
+            span = self.source[node.token._native_position[0] : node._native_end]
+            eligible = (
+                getattr(node.token, "_native_position", None) is not None
+                and self.native_node(node)
+                # A parent loop may be owned by Django outside this region.
+                and "forloop.parentloop" not in span
+                # These expressions require the version-specific Django parser.
+                and not (VERSION >= (6, 1) and ".." in span)
+                and not (
+                    VERSION >= (6, 0)
+                    and any(exponent in span for exponent in ("e+", "E+", "e-", "E-"))
+                )
             )
             if not eligible:
                 flush()
+                for name in node.child_nodelists:
+                    children = getattr(node, name, None)
+                    if children is not None:
+                        # IfNode.nodelist is an inspection property, not its
+                        # actual branch lists.
+                        if type(node) is IfNode:
+                            for _, branch in node.conditions_nodelists:
+                                branch[:] = self.group_nodes(branch)
+                            break
+                        children[:] = self.group_nodes(children)
                 grouped.append(node)
                 continue
             # Do not join spans separated by discarded comments or tags.
-            if region and (
-                region[-1].token._native_position[1] != node.token._native_position[0]
-            ):
+            if region and (region[-1]._native_end != node.token._native_position[0]):
                 flush()
             region.append(node)
         flush()
         return grouped
 
     def extend_nodelist(self, nodelist, node, token):
+        end = (
+            self.last_token._native_position[1]
+            if type(node) in (ForNode, IfNode)
+            else token._native_position[1]
+        )
         if token.contents.startswith("load ") and token.token_type.value == 2:
             self.load_prefix += "{% " + token.contents + " %}"
         if isinstance(node, ExtendsNode):
@@ -117,17 +183,31 @@ class NativeParser(Parser):
             )
         ):
             fragment = self.load_prefix + "{{ " + token.contents + " }}"
-            node = NativeVariableNode(node, self.native_engine.from_string(fragment))
-            node.load_prefix = self.load_prefix
+            node = NativeVariableNode(node, self.native_engine, fragment)
+        node.load_prefix = self.load_prefix
+        node._native_end = end
         super().extend_nodelist(nodelist, node, token)
 
 
 class InteropTemplate(Template):
+    @staticmethod
+    def compile_native_nodes(nodes):
+        for node in nodes:
+            if isinstance(node, (NativeVariableNode, NativeRegionNode)):
+                # Compile only the maximal regions, not their inspection nodes.
+                node.native
+            else:
+                for name in node.child_nodelists:
+                    InteropTemplate.compile_native_nodes(getattr(node, name, ()))
+
     def compile_nodelist(self):
         parser = NativeParser(self.source, self.engine, self.origin)
         try:
             nodes = parser.parse()
             self.extra_data = parser.extra_data
+            self.compile_native_nodes(nodes)
+            for partial in self.extra_data.get("partials", {}).values():
+                self.compile_native_nodes(partial.nodelist)
             return nodes
         except Exception as error:
             diagnostic = self.engine._syntax_diagnostic(
