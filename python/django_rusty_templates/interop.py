@@ -119,6 +119,7 @@ def find_template(engine, name, skip=None):
     # the same filename from an earlier directory in the loader search order.
     from django.template import TemplateDoesNotExist
     from django.template.backends.django import copy_exception
+    from .django_rusty_templates import Template as NativeTemplate
 
     tried = []
     for loader in engine.template_loaders:
@@ -132,7 +133,7 @@ def find_template(engine, name, skip=None):
                     raise cached(name)
                 if isinstance(cached, TemplateDoesNotExist):
                     raise copy_exception(cached)
-                if cached is not None and hasattr(cached, "_django_template"):
+                if isinstance(cached, NativeTemplate):
                     template = cached if cached._is_native else cached._django_template
                     return template, cached.origin
             loader_tried = []
