@@ -876,8 +876,20 @@ pub mod django_rusty_templates {
         /// handling template inheritance recursively.
         ///
         /// See <https://docs.djangoproject.com/en/stable/ref/templates/api/#django.template.Engine.get_template>
-        pub fn get_template(&self, py: Python<'_>, template_name: String) -> PyResult<Template> {
-            get_template(self.engine.clone(), py, Cow::Owned(template_name))
+        #[pyo3(signature = (template_name))]
+        pub fn get_template(
+            &self,
+            py: Python<'_>,
+            template_name: Option<Bound<'_, PyAny>>,
+        ) -> PyResult<Template> {
+            let template_name = template_name.unwrap_or_else(|| py.None().into_bound(py));
+            let name = template_name.extract::<String>().ok();
+            let Some(name) =
+                name.filter(|name| !name.split('#').next().unwrap_or_default().is_empty())
+            else {
+                return Err(TemplateDoesNotExist::new_err((template_name.unbind(),)));
+            };
+            get_template(self.engine.clone(), py, Cow::Owned(name))
         }
 
         #[pyo3(signature = (name, dirs=None, skip=None))]
@@ -934,7 +946,11 @@ pub mod django_rusty_templates {
             {
                 self.select_template(py, template_name.extract()?)?
             } else {
-                self.get_template(py, template_name.extract()?)?
+                get_template(
+                    self.engine.clone(),
+                    py,
+                    Cow::Owned(template_name.extract::<String>()?),
+                )?
             };
 
             template.py_render(py, context, None)
@@ -1890,7 +1906,7 @@ user = User(["Lily"])
             )
             .unwrap();
             let template = engine
-                .get_template(py, "full_example.html".to_string())
+                .get_template(py, Some(PyString::new(py, "full_example.html").into_any()))
                 .unwrap();
             let cloned = template.clone();
             assert_eq!(cloned.filename, template.filename);

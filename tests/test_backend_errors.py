@@ -24,3 +24,12 @@ def test_backend_in_loader_chain(loader, args):
         loader(args)
     assert caught.value.chain
     assert all(error.backend is not None for error in caught.value.chain)
+
+
+@pytest.mark.parametrize("template_name", [123, None, "", "#", "#name"])
+def test_invalid_template_name(template_name):
+    backend = engines["rusty"]
+    with pytest.raises(TemplateDoesNotExist) as caught:
+        backend.get_template(template_name)
+    assert caught.value.args[0] == template_name
+    assert caught.value.backend is backend
