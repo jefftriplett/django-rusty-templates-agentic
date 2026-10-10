@@ -1,7 +1,7 @@
 # Browser WebAssembly prototype
 
-An experiment on `prototype/shared-template-inheritance`, building on the first
-Wasm prototype. The Python-free `dtl-core` crate now owns the portable parser and
+An experiment on `prototype/browser-wasm`, consolidating the browser prototype
+and shared-core inheritance work. The Python-free `dtl-core` crate now owns the portable parser and
 renderer, including inheritance. Thin Python `PortableEngine` and browser
 `BrowserEngine` adapters use that exact same core. The existing production
 `Engine` / `RustyTemplates` backend keeps its full Django implementation. This is a feasibility prototype,
