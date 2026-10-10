@@ -1,3 +1,5 @@
+from django import VERSION
+import pytest
 from inline_snapshot import snapshot
 from django.template.base import VariableDoesNotExist
 
@@ -18,6 +20,10 @@ def test_with_block(assert_render):
     assert_render(template=template, context=context, expected="lily")
 
 
+@pytest.mark.skipif(
+    VERSION >= (6, 1),
+    reason="Invalid tag signatures are rejected at registration since Django 6.1",
+)
 def test_simple_block_tag_missing_context(assert_parse_error):
     template = "{% load missing_context_block from invalid_tags %}{% missing_context_block %}{% end_missing_context_block %}"
     django_message = snapshot(
@@ -37,6 +43,10 @@ def test_simple_block_tag_missing_context(assert_parse_error):
     )
 
 
+@pytest.mark.skipif(
+    VERSION >= (6, 1),
+    reason="Invalid tag signatures are rejected at registration since Django 6.1",
+)
 def test_simple_block_tag_missing_content(assert_parse_error):
     template = "{% load missing_content_block from invalid_tags %}{% missing_content_block %}{% end_missing_content_block %}"
     django_message = snapshot(
@@ -55,6 +65,10 @@ def test_simple_block_tag_missing_content(assert_parse_error):
     )
 
 
+@pytest.mark.skipif(
+    VERSION >= (6, 1),
+    reason="Invalid tag signatures are rejected at registration since Django 6.1",
+)
 def test_simple_block_tag_missing_content_takes_context(assert_parse_error):
     template = "{% load missing_content_block_with_context from invalid_tags %}{% missing_content_block_with_context %}{% end_missing_content_block_with_context %}"
     django_message = snapshot(

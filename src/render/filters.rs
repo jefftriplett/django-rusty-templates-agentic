@@ -211,6 +211,21 @@ impl ResolveFilter for CenterFilter {
             .resolve(py, template, context, ResolveFailures::Raise)?
             .expect("missing argument in context should already have raised");
 
+        if py
+            .import("django")?
+            .getattr("VERSION")?
+            .get_item(0)?
+            .extract::<u8>()?
+            >= 6
+        {
+            let centered = py
+                .import("django.template.defaultfilters")?
+                .getattr("center")?
+                .call1((content.as_raw(), arg.to_py(py)))?
+                .extract::<String>()?;
+            return Ok(Some(content.map_content(|_| Cow::Owned(centered))));
+        }
+
         let size = arg.resolve_usize(self.argument.at)?;
 
         if size <= length {
@@ -467,7 +482,7 @@ impl ResolveFilter for EscapeFilter {
 }
 
 /// Hex encode characters for use in JavaScript strings.
-fn escapejs(value: &str) -> String {
+fn escapejs(value: &str, escape_del: bool) -> String {
     let mut result = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
@@ -490,6 +505,7 @@ fn escapejs(value: &str) -> String {
             c if matches!(c, '\0'..='\x1f') => {
                 result.push_str(&format!(r"\u{:04X}", c as u32));
             }
+            '\x7f' if escape_del => result.push_str(r"\u007F"),
             c => result.push(c),
         }
     }
@@ -500,14 +516,19 @@ impl ResolveFilter for EscapejsFilter {
     fn resolve<'t, 'py>(
         &self,
         variable: Option<Content<'t, 'py>>,
-        _py: Python<'py>,
+        py: Python<'py>,
         _template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
+        let version = py.import("django")?.getattr("VERSION")?;
+        let series = (
+            version.get_item(0)?.extract::<u8>()?,
+            version.get_item(1)?.extract::<u8>()?,
+        );
         let content = match variable {
             Some(content) => content
                 .resolve_string(context)?
-                .map_content(|content| Cow::Owned(escapejs(&content))),
+                .map_content(|content| Cow::Owned(escapejs(&content, series >= (6, 1)))),
             None => "".as_content(),
         };
         Ok(Some(content))

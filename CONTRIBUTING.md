@@ -52,6 +52,22 @@ $ pytest
 
 Running `just python-test` combines these two commands for you.
 
+### Django template conformance
+
+Build the extension with `uv run maturin develop`, then run a Django version locally:
+
+```bash
+uv run scripts/run_django_test_suite.py --django-version 5.2 --parsed-output /tmp/django-5.2.txt --json-output /tmp/django-5.2.json
+uv run scripts/run_django_test_suite.py --django-version 6.0 --parsed-output /tmp/django-6.0.txt --json-output /tmp/django-6.0.json
+uv run scripts/run_django_test_suite.py --django-version 6.1 --parsed-output /tmp/django-6.1.txt --json-output /tmp/django-6.1.json
+```
+
+Django 6 requires Python 3.12+. Development dependencies and the single Ubuntu/Python 3.13 CI sanity job continue to use Django 5.2; additional versions run locally without expanding CI.
+
+The runner clones each series into its own ignored `scripts/.django-{version}` checkout. It substitutes Engine and the backend at runtime without changing Django's assertions, fixtures, or source files. Existing caches retain their reference until `--django-ref stable/6.1.x` (or a tag/commit) is supplied. JSON output records the Django/Python versions, reference commit, skipped tests, and failure tracebacks. The pass percentage counts runnable test methods once, including methods with multiple failing subtests, and excludes skips. A failing suite returns a nonzero exit code.
+
+Use `--django-checkout /path/to/django` for an existing pristine checkout; the runner leaves it unchanged and rejects tracked source/test edits. An optional `--django-ref` must match that checkout's HEAD. Add test labels to narrow a run, for example `template_tests.test_partials`. `--raw-output` saves the complete test log.
+
 ### Rust tests with cargo
 You can also run the Rust tests:
 

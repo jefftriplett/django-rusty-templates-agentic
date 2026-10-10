@@ -11,6 +11,7 @@ __all__ = ["RustyTemplates", "Template"]
 
 # Preserve Django's implementation when conformance runners replace Engine.
 _django_get_template = DjangoEngine.get_template
+_django_select_template = DjangoEngine.select_template
 
 
 class RustyTemplates(DjangoTemplates):

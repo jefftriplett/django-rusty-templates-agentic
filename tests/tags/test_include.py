@@ -1,3 +1,4 @@
+from django import VERSION
 import os
 from pathlib import Path
 
@@ -526,7 +527,9 @@ def test_relative_outside_file_hierarchy(template_engine):
         % absolute_template
     )
 
-    if template_engine.name == "django":
+    if VERSION >= (6, 0) and template_engine.name == "django":
+        django_message = f"Template: {absolute_template}, " + django_message
+    if template_engine.name == "django" or VERSION >= (6, 0):
         assert str(exc_info.value) == django_message
     else:
         assert str(exc_info.value) == django_message
@@ -552,7 +555,7 @@ def test_relative_outside_file_hierarchy_variable(template_engine):
    ╰────
 """
 
-    if template_engine.name == "django":
+    if template_engine.name == "django" or VERSION >= (6, 0):
         assert str(exc_info.value) == django_message
     else:
         assert str(exc_info.value) == rusty_message
@@ -577,7 +580,7 @@ def test_relative_outside_top_level(template_engine):
    ╰────
 """
 
-    if template_engine.name == "django":
+    if template_engine.name == "django" or VERSION >= (6, 0):
         assert str(exc_info.value) == django_message
     else:
         assert str(exc_info.value) == rusty_message

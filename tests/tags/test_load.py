@@ -1,3 +1,4 @@
+from django import VERSION
 from inline_snapshot import snapshot
 import pytest
 
@@ -22,7 +23,7 @@ no_filters
 no_tags
 static
 tz""")
-    rusty_message = snapshot("""\
+    rusty_message = """\
   × 'missing_filters' is not a registered tag library.
    ╭────
  1 │ {% load missing_filters %}
@@ -41,7 +42,11 @@ tz""")
         no_tags
         static
         tz
-""")
+"""
+    if VERSION >= (6, 0):
+        rusty_message = rusty_message.replace(
+            "        cache\n", "        auth\n        cache\n"
+        )
     assert_parse_error(
         template=template, django_message=django_message, rusty_message=rusty_message
     )
@@ -103,6 +108,10 @@ def test_load_unused_tags(assert_render, library):
     )
 
 
+@pytest.mark.skipif(
+    VERSION >= (6, 1),
+    reason="Invalid tag signatures are rejected at registration since Django 6.1",
+)
 def test_load_unused_invalid_tag_from_library(assert_render):
     assert_render(
         template="{% load missing_context from invalid_tags %}Hello",

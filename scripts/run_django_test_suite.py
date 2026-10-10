@@ -1,130 +1,204 @@
-"""Run Django's template test suite against django-rusty-templates."""
+"""Run unmodified Django template tests with the Rusty engine substituted."""
 
 import argparse
+import json
 import os
-import re
 import subprocess
 import sys
-from collections import Counter
+import tempfile
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).parent
-DJANGO_REPO_CACHE = SCRIPT_DIR / ".django"
-PATCH_FILE = SCRIPT_DIR / "django_tests_use_rusty_templates.patch"
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = SCRIPT_DIR.parent
 
 
-def log(header: str):
-    print(f"\033[1;32m==> {header}\033[0m\n", flush=True)
+def log(message):
+    print(f"==> {message}", flush=True)
 
 
-def patch_django_test_suite():
-    # Check if patch is already applied
-    result = subprocess.run(
-        ["git", "apply", "--check", str(PATCH_FILE)],
-        cwd=DJANGO_REPO_CACHE,
-        capture_output=True,
-    )
-    if result.returncode == 0:
-        log("Applying patches to Django repository...")
-        subprocess.run(
-            ["git", "apply", str(PATCH_FILE)],
-            cwd=DJANGO_REPO_CACHE,
-            check=True,
+def summarize_results(results):
+    """Count methods once, including methods with several failing subtests."""
+    errors = set(results["errors"])
+    failures = set(results["failures"])
+    for subtest in results["subtests"]:
+        target = failures if subtest["outcome"] == "failures" else errors
+        target.add(subtest["parent"])
+    failures -= errors
+    passed = set(results["passed"]) - errors - failures
+    skipped = set(results["skipped"]) - errors - failures - passed
+    runnable = len(passed | errors | failures)
+    summary = {
+        "passed": len(passed),
+        "failures": len(failures),
+        "errors": len(errors),
+        "skipped": len(skipped),
+        "runnable": runnable,
+        "total": runnable + len(skipped),
+        "pass_percentage": 100 * len(passed) / runnable if runnable else 0,
+    }
+    lines = [
+        f"Django test suite passing: {summary['pass_percentage']:.2f}%",
+        f"{len(passed)} OK / {len(failures)} FAIL / {len(errors)} ERROR / {len(skipped)} SKIP",
+    ]
+    outcomes = {"OK": passed, "FAIL": failures, "ERROR": errors, "SKIP": skipped}
+    lines.extend(
+        sorted(
+            f"{test} ... {outcome}"
+            for outcome, tests in outcomes.items()
+            for test in tests
         )
-    else:
-        log("Patches already applied or not applicable.")
-
-
-def _format_summary(summary: Counter[str]) -> str:
-    return " / ".join([f"{count} {test}" for test, count in sorted(summary.items())])
-
-
-def _format_passing_test_pct(summary: Counter[str]) -> str:
-    return f"Django test suite passing: {summary.get('OK', 0) / summary.total() * 100:.2f}%"
-
-
-def parse_test_output(output: str) -> tuple[Counter[str], str]:
-    """Keep individual test outcome lines and normalize them."""
-    lines = []
-    summary = Counter()
-    for line in output.splitlines():
-        line = line.strip()
-        if line.endswith(("ERROR", "FAIL", "ok")):
-            line = re.sub(r"<lambda> at 0x.*>", "<lambda> at ..>", line)
-            parts = line.split("... ", maxsplit=1)
-            if len(parts) == 2:
-                summary[parts[1].upper()] += 1
-                lines.append(line.strip())
-            else:
-                print(parts)
-
-    return summary, "\n".join(
-        [_format_passing_test_pct(summary), _format_summary(summary), *sorted(lines)]
-    ) + "\n"
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Run Django's template test suite against django-rusty-templates"
     )
-    parser.add_argument(
-        "--parsed-output",
-        type=Path,
-        help="The file to write parsed output to",
-    )
-    parser.add_argument(
-        "tests",
-        nargs="*",
-        default=["template_tests", "template_loader"],
-    )
-    args = parser.parse_args()
-    if not DJANGO_REPO_CACHE.exists():
-        log(f"Cloning Django repository at {DJANGO_REPO_CACHE}...")
+    return summary, "\n".join(lines) + "\n"
+
+
+def prepare_checkout(args):
+    checkout = (
+        args.django_checkout or SCRIPT_DIR / f".django-{args.django_version}"
+    ).resolve()
+    if not checkout.exists():
+        if args.django_checkout:
+            raise ValueError(f"Django checkout does not exist: {checkout}")
+        log(f"Cloning stable/{args.django_version}.x into {checkout}")
         subprocess.run(
             [
                 "git",
                 "clone",
-                "--config",
-                "advice.detachedHead=false",
                 "--quiet",
                 "--depth",
                 "1",
                 "--no-tags",
                 "--branch",
-                "stable/5.2.x",
+                f"stable/{args.django_version}.x",
                 "https://github.com/django/django.git",
-                str(DJANGO_REPO_CACHE),
+                str(checkout),
             ],
             check=True,
-            cwd=SCRIPT_DIR,
         )
-    else:
-        log(f"Using existing Django repository at {DJANGO_REPO_CACHE}")
+    if args.django_ref:
+        if args.django_checkout:
+            ref = subprocess.check_output(
+                ["git", "rev-parse", args.django_ref], cwd=checkout, text=True
+            ).strip()
+            head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
+            ).strip()
+            if ref != head:
+                raise ValueError(
+                    "Explicit checkout HEAD does not match --django-ref; refusing to change it"
+                )
+        else:
+            subprocess.run(
+                ["git", "fetch", "--depth", "1", "origin", args.django_ref],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "checkout", "--detach", "FETCH_HEAD"], cwd=checkout, check=True
+            )
+    if subprocess.run(
+        [
+            "git",
+            "diff",
+            "--quiet",
+            "HEAD",
+            "--",
+            "django",
+            "tests/template_tests",
+            "tests/template_loader",
+            "tests/runtests.py",
+        ],
+        cwd=checkout,
+    ).returncode:
+        raise ValueError(
+            "Django sources or template tests have tracked modifications; use a pristine checkout"
+        )
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
+    ).strip()
+    return checkout, commit
 
-    patch_django_test_suite()
 
-    log("Running Django's template test suite...")
-
-    result = subprocess.run(
-        ["python", "runtests.py", "--parallel=1", "-v=2", *args.tests],
-        cwd=DJANGO_REPO_CACHE / "tests",
-        # Ensure the cloned Django repo takes precedence over installed Django
-        env={**os.environ, "PYTHONPATH": str(DJANGO_REPO_CACHE)},
-        capture_output=bool(args.parsed_output),
-        text=True,
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--django-version", choices=["5.2", "6.0", "6.1"], default="5.2"
     )
-    print(result.stderr, end="", file=sys.stderr)
-
+    parser.add_argument(
+        "--django-ref", help="Branch, tag, or commit to fetch into the version's cache"
+    )
+    parser.add_argument(
+        "--django-checkout",
+        type=Path,
+        help="Use an existing pristine checkout without modifying it",
+    )
+    parser.add_argument("--parsed-output", type=Path)
+    parser.add_argument(
+        "--json-output",
+        type=Path,
+        help="Save outcomes, tracebacks, skips, versions, and reference commit",
+    )
+    parser.add_argument("--raw-output", type=Path)
+    parser.add_argument(
+        "tests", nargs="*", default=["template_tests", "template_loader"]
+    )
+    args = parser.parse_args()
+    try:
+        checkout, commit = prepare_checkout(args)
+    except (ValueError, subprocess.CalledProcessError) as error:
+        parser.error(str(error))
+    log(f"Django {args.django_version} reference: {commit}")
+    with tempfile.TemporaryDirectory(prefix="rusty-django-results-") as directory:
+        results_path = Path(directory) / "results.json"
+        pythonpath = [str(PROJECT_DIR / "python"), str(checkout), str(PROJECT_DIR)]
+        if os.environ.get("PYTHONPATH"):
+            pythonpath.append(os.environ["PYTHONPATH"])
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "django_test_bootstrap.py"),
+                str(checkout),
+                "--parallel=1",
+                "-v=2",
+                *args.tests,
+            ],
+            cwd=checkout / "tests",
+            env={
+                **os.environ,
+                "PYTHONPATH": os.pathsep.join(pythonpath),
+                "RUSTY_AUDIT_JSON": str(results_path),
+            },
+            capture_output=True,
+            text=True,
+        )
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        if args.raw_output:
+            args.raw_output.write_text(result.stdout + result.stderr)
+        if not results_path.exists():
+            return result.returncode or 1
+        results = json.loads(results_path.read_text())
+    results.update(
+        reference_commit=commit,
+        checkout=str(checkout),
+        tests=args.tests,
+        returncode=result.returncode,
+    )
+    summary, formatted = summarize_results(results)
+    results["summary"] = summary
+    if args.json_output:
+        args.json_output.write_text(json.dumps(results, indent=2) + "\n")
     if args.parsed_output:
-        summary, formatted_test_output = parse_test_output(result.stderr)
-        log(_format_passing_test_pct(summary))
-        log(_format_summary(summary))
-
-        Path(args.parsed_output).write_text(formatted_test_output)
-        log(f"Parsed output written to {args.parsed_output}")
-
-    log("Done !")
-    return 0
+        args.parsed_output.write_text(formatted)
+    log(formatted.splitlines()[0])
+    log(formatted.splitlines()[1])
+    expected_series = [int(value) for value in args.django_version.split(".")]
+    if results["django_series"] != expected_series:
+        log(f"Unexpected Django series: {results['django_series']}")
+        return 1
+    if not summary["runnable"]:
+        log("No runnable tests recorded")
+        return result.returncode or 1
+    return result.returncode or (1 if summary["errors"] or summary["failures"] else 0)
 
 
 if __name__ == "__main__":

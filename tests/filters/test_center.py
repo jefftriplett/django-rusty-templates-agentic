@@ -1,3 +1,4 @@
+from django import VERSION
 from inline_snapshot import snapshot
 import pytest
 
@@ -13,7 +14,7 @@ def test_center(assert_render):
 def test_center_with_odd_width_as_django_test_it(assert_render):
     template = "{{ var|center:15 }}"
     context = {"var": "Django"}
-    expected = "     Django    "
+    expected = "    Django     " if VERSION >= (6, 0) else "     Django    "
 
     assert_render(template, context, expected)
 
@@ -29,7 +30,7 @@ def test_center_with_even_width(assert_render):
 def test_center_with_odd_width(assert_render):
     template = "{{ var|center:7 }}"
     context = {"var": "even"}
-    expected = "  even "
+    expected = " even  " if VERSION >= (6, 0) else "  even "
 
     assert_render(template, context, expected)
 

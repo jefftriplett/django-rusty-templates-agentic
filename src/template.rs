@@ -978,15 +978,82 @@ pub mod django_rusty_templates {
                 .call1((slf, name, skip))
         }
 
+        fn select_template<'py>(
+            slf: Bound<'py, Self>,
+            names: Bound<'py, PyAny>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let py = slf.py();
+            if py
+                .import("django")?
+                .getattr("VERSION")?
+                .get_item(0)?
+                .extract::<u8>()?
+                >= 6
+            {
+                let template = py
+                    .import("django_rusty_templates")?
+                    .getattr("_django_select_template")?
+                    .call1((slf, names))?;
+                if let Ok(native) = template.extract::<PyRef<'_, Template>>() {
+                    return native._django_template(py);
+                }
+                return Ok(template);
+            }
+            slf.borrow()
+                .select_template_native(py, names.extract()?)?
+                .into_pyobject(py)
+                .map(Bound::into_any)
+        }
+
         /// Given a list of template names, return the first that can be loaded.
         ///
         /// See <https://docs.djangoproject.com/en/stable/ref/templates/api/#django.template.Engine.select_template>
-        pub fn select_template(
-            &mut self,
+        #[pyo3(name = "_select_template_native")]
+        pub fn select_template_native(
+            &self,
             py: Python<'_>,
             template_name_list: Vec<String>,
         ) -> PyResult<Template> {
             select_template(self.engine.clone(), py, template_name_list)
+        }
+
+        fn _syntax_diagnostic(
+            &self,
+            py: Python<'_>,
+            source: &str,
+            filename: Option<PathBuf>,
+            template_name: Option<String>,
+        ) -> PyResult<Option<String>> {
+            let parsed = Parser::new(
+                py,
+                TemplateString(source),
+                self.engine.clone(),
+                template_name.as_deref(),
+            )
+            .parse();
+            match parsed {
+                Ok(_) => Ok(None),
+                Err(crate::parse::PyParseError::PyErr(error))
+                    if error.is_instance_of::<PyNotImplementedError>(py) =>
+                {
+                    Ok(None)
+                }
+                Err(error) => {
+                    let error = canonical_parse_error(
+                        py,
+                        error,
+                        self.engine.clone(),
+                        source,
+                        filename.as_deref(),
+                        template_name.as_deref(),
+                    );
+                    Ok(error
+                        .value(py)
+                        .getattr("rusty_diagnostic")
+                        .ok()
+                        .and_then(|value| value.extract().ok()))
+                }
+            }
         }
 
         #[allow(clippy::wrong_self_convention)] // We're implementing a Django interface
@@ -1002,7 +1069,7 @@ pub mod django_rusty_templates {
         /// For use in Django's test suite.
         #[pyo3(signature = (template_name, context=None))]
         pub fn render_to_string(
-            &mut self,
+            &self,
             py: Python<'_>,
             template_name: Bound<'_, PyAny>,
             context: Option<Bound<'_, PyAny>>,
@@ -1010,7 +1077,7 @@ pub mod django_rusty_templates {
             let template = if template_name.is_instance_of::<PyList>()
                 || template_name.is_instance_of::<PyTuple>()
             {
-                self.select_template(py, template_name.extract()?)?
+                self.select_template_native(py, template_name.extract()?)?
             } else {
                 get_template(
                     self.engine.clone(),
@@ -1292,6 +1359,28 @@ pub mod django_rusty_templates {
         }
     }
 
+    fn needs_python_variable_syntax(py: Python<'_>, source: &str) -> PyResult<bool> {
+        if !source.contains("..")
+            && !source.contains("e+")
+            && !source.contains("E+")
+            && !source.contains("e-")
+            && !source.contains("E-")
+        {
+            return Ok(false);
+        }
+        let version = py.import("django")?.getattr("VERSION")?;
+        let series = (
+            version.get_item(0)?.extract::<u8>()?,
+            version.get_item(1)?.extract::<u8>()?,
+        );
+        Ok((series >= (6, 0)
+            && (source.contains("e+")
+                || source.contains("E+")
+                || source.contains("e-")
+                || source.contains("E-")))
+            || (series >= (6, 1) && source.contains("..")))
+    }
+
     impl Template {
         pub fn new(
             py: Python<'_>,
@@ -1307,20 +1396,7 @@ pub mod django_rusty_templates {
                 Some(template_name),
             );
             let mut python_renderer = None;
-            let parsed = if template.contains("..")
-                && py
-                    .import("django")?
-                    .getattr("VERSION")?
-                    .get_item(0)?
-                    .extract::<u8>()?
-                    >= 6
-                && py
-                    .import("django")?
-                    .getattr("VERSION")?
-                    .get_item(1)?
-                    .extract::<u8>()?
-                    >= 1
-            {
+            let parsed = if needs_python_variable_syntax(py, template)? {
                 Err(crate::parse::PyParseError::PyErr(
                     PyNotImplementedError::new_err(
                         "not yet implemented: Django 6.1 variable lookup",
@@ -1391,20 +1467,7 @@ pub mod django_rusty_templates {
         ) -> PyResult<Self> {
             let mut parser = Parser::new(py, TemplateString(&template), engine.clone(), None);
             let mut python_renderer = None;
-            let parsed = if template.contains("..")
-                && py
-                    .import("django")?
-                    .getattr("VERSION")?
-                    .get_item(0)?
-                    .extract::<u8>()?
-                    >= 6
-                && py
-                    .import("django")?
-                    .getattr("VERSION")?
-                    .get_item(1)?
-                    .extract::<u8>()?
-                    >= 1
-            {
+            let parsed = if needs_python_variable_syntax(py, &template)? {
                 Err(crate::parse::PyParseError::PyErr(
                     PyNotImplementedError::new_err(
                         "not yet implemented: Django 6.1 variable lookup",
