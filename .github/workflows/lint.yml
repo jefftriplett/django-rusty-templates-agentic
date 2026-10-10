@@ -1,9 +1,8 @@
 name: Lint checks
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -14,13 +13,13 @@ env:
 
 # Cancel running jobs for the same workflow and branch.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: lint-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   cargo-shear:
-    if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
-    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

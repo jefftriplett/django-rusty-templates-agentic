@@ -4,24 +4,24 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: django-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   compare:
-    if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
     name: Django ${{ matrix.django }} / Python 3.13
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        django: ["5.2", "6.0", "6.1", "6.2"]
+        django: ${{ github.event_name == 'pull_request' && fromJSON('["5.2", "6.0", "6.1"]') || fromJSON('["5.2", "6.0", "6.1", "6.2"]') }}
     env:
       DJANGO_SERIES: ${{ matrix.django }}
     steps:
@@ -40,6 +40,7 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
+          cache-suffix: django-${{ matrix.django }}-py313
           cache-dependency-glob: "**/uv.lock"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -96,7 +97,7 @@ jobs:
       always() && github.event_name == 'pull_request' &&
       !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       actions: read
@@ -111,7 +112,7 @@ jobs:
         run: |
           echo '<!-- generated-comment ecosystem -->' > test-diff-result
           echo '## Django template conformance' >> test-diff-result
-          for series in 5.2 6.0 6.1 6.2; do
+          for series in 5.2 6.0 6.1; do
             if [[ -f "results/comment-$series.md" ]]; then
               cat "results/comment-$series.md" >> test-diff-result
             else

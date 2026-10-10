@@ -65,7 +65,7 @@ uv run scripts/run_django_test_suite.py --django-version 6.2 --django-ref dab0a5
 
 Django 6.2 is development support: its cache initially clones `main`, because `stable/6.2.x` does not yet exist. Pin `--django-ref` for reproducible results. The reference above is the audited checkout, not a claim of compatibility with future changes.
 
-Django 6 requires Python 3.12+. Development dependencies and the Ubuntu/Python 3.13 sanity job use Django 5.2. Draft PRs run only that sanity job; ready PRs add the Python 3.11–3.15 platform matrix (including 3.14t/3.15t), Rust OS coverage, cargo-shear, and Django 5.2–6.2 comparisons. Python 3.15 uses Django 6.1; Django 5.2/6.0 combinations remain excluded (#59).
+Django 6 requires Python 3.12+. Development dependencies and the default Ubuntu/Python 3.13 sanity job use Django 5.2. Every PR also checks unchanged upstream Django 5.2, 6.0, and 6.1 template tests on Python 3.13. Broader OS/Python matrices and Django 6.2 run by manual dispatch.
 
 The runner clones each series into its own ignored `scripts/.django-{version}` checkout. It substitutes Engine and the backend at runtime without changing Django's assertions, fixtures, or source files. Existing caches retain their reference until `--django-ref stable/6.1.x` (or a tag/commit) is supplied. JSON output records the Django/Python versions, reference commit, skipped tests, and failure tracebacks. The pass percentage counts runnable test methods once, including methods with multiple failing subtests, and excludes skips. A failing suite returns a nonzero exit code.
 
@@ -109,14 +109,22 @@ $ just rust-coverage-browser
 ```
 
 
-### Comprehensive CI controls
+### CI controls
 
-This restoration remains unmerged until approved. Ready PRs run the broader jobs so platform availability can be evaluated in CI; draft PRs defer them. Marking a PR ready for review does not merge it. Draft pushes run only `Ubuntu / Python 3.13 sanity`, preserving the existing check name. `ready_for_review` triggers the deferred matrices. Manual dispatch can run each workflow explicitly. Workflows do not duplicate PR runs on main pushes, and wheel builds remain tagged-release/manual only.
+Every PR runs the Ubuntu/Python 3.13 sanity job (local Python and serial Rust tests, Ruff, rustfmt, and Clippy), plus upstream template conformance against Django 5.2, 6.0, and 6.1. Same-repository, non-draft PRs receive a summary comment. These four test jobs protect stable-version compatibility without running the full OS matrix.
 
-Python covers Ubuntu, macOS, and Windows with 3.11, 3.12, 3.13, 3.14, 3.14t, and exact final versions 3.15.0/3.15.0t (the Ubuntu/3.13 matrix entry is covered by sanity). Python 3.15 entries install the exact final runtime with uv because GitHub's setup-python manifest initially lacks 3.15.0. They install Django 6.1 and use `uv run --no-sync` to preserve that version; all other Python matrix entries use Django 5.2. Build steps assert a final interpreter and the expected Django series. Python 3.10 is removed from CI, without changing the package minimum version. Rust coverage runs on all three operating systems with serial embedded-Python tests. Python coverage runs once on macOS/3.13. Coverage reports are retained as artifacts for seven days; **Codecov uploads remain disabled**.
+Once this PR is merged and the workflow is present on the default branch, open **Actions → Full CI → Run workflow** and select the branch for comprehensive coverage. This manually calls the Python, Rust, lint, Django, and optional CodSpeed workflows from that same revision. After these workflow definitions exist on the default branch, the CLI equivalent is:
 
-Django comparisons run both the PR and its exact base commit against the same pristine Django checkout for each series. Results include JSON, complete logs, and method outcomes; both baseline and PR failures retain a failing job status. Automatic comments run in a separate job with write permission only for PRs from this repository. Fork PRs still produce artifacts without a comment job; no privileged `pull_request_target` or `workflow_run` path executes PR code.
+```bash
+gh workflow run full.yml --ref YOUR_BRANCH --repo jefftriplett/django-rusty-templates-private
+```
 
-CodSpeed stays gated until the private repository is connected to CodSpeed and the repository variable `ENABLE_CODSPEED=true` is configured. No CodSpeed or Codecov credentials are added by this PR. Rust and uv caches, per-workflow cancellation, draft gating, and job timeouts limit repeated work. Ruff, rustfmt, and Clippy stay in sanity rather than running again in separate jobs; cargo-shear has its own job.
+Individual workflows remain dispatchable. `Full CI` runs the Python 3.11–3.14/3.14t and exact final 3.15.0/3.15.0t matrix across Ubuntu, macOS, and Windows, serial Rust OS coverage, cargo-shear, and Django 5.2–6.2 conformance. Python 3.15 entries use uv-managed final runtimes and Django 6.1 with `--no-sync`; Django 5.2/6.0 are excluded on 3.15. Python 3.10 stays outside CI without changing the package minimum version. CodSpeed runs only when the private repository is connected and `ENABLE_CODSPEED=true` is configured.
 
-The repository currently has no branch protection or rulesets. Before enabling comprehensive CI, configure required checks as appropriate; the sanity check name is preserved. Cross-platform jobs and private CodSpeed integration must be verified on GitHub when the draft is made ready. Local workflow linting does not prove those hosted environments pass.
+Coverage reports are retained as artifacts for seven days. **Codecov uploads remain disabled.** Wheel builds remain tag/manual only. No duplicate main-push test runs or schedules are added. The restoration PR remains unmerged until approved.
+
+Django base/PR comparisons use the exact same pristine upstream checkout. Structured summaries reject mismatched references and empty results; suite failures retain failing job status. Manual runs use the selected commit for both sides, and report results without posting a PR comment. PR comment permissions are confined to a separate job for same-repository PRs.
+
+uv cache keys include job/matrix-specific suffixes so concurrent jobs do not compete to save the same key. Rust caches, timeouts, and workflow-specific cancellation groups limit repeated work. Cancellation groups use explicit workflow prefixes so reusable workflows called by `Full CI` cannot cancel each other or their caller. Linux runners are pinned to `ubuntu-24.04` to avoid the October–November 2026 `ubuntu-latest` migration to Ubuntu 26.04; the image can be upgraded deliberately after validation.
+
+The repository currently has no branch protection or rulesets. Required checks can be selected after review; the existing sanity check name is preserved.
