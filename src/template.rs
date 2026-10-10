@@ -322,15 +322,21 @@ pub mod django_rusty_templates {
             let origin_loader = origin.getattr("loader")?;
             let native_loader = origin_loader.getattr("_native").unwrap_or(origin_loader);
             let loader = native_loader.extract::<PyRef<'_, LoaderView>>()?;
-            let template = Template {
-                filename: Some(PathBuf::from(origin.getattr("name")?.extract::<String>()?)),
-                template: renderer.getattr("source")?.extract()?,
-                nodes: Vec::new(),
-                engine: self.engine.clone(),
-                template_name: Some(renderer.getattr("name")?.extract()?),
-                loader_path: loader.path[self.path.len()..].to_vec(),
-                inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
-                python_renderer: Some(Arc::new(renderer.unbind())),
+            let template = if let Ok(native) = renderer.extract::<PyRef<'_, Template>>() {
+                let mut template = native.clone();
+                template.loader_path = loader.path[self.path.len()..].to_vec();
+                template
+            } else {
+                Template {
+                    filename: Some(PathBuf::from(origin.getattr("name")?.extract::<String>()?)),
+                    template: renderer.getattr("source")?.extract()?,
+                    nodes: Vec::new(),
+                    engine: self.engine.clone(),
+                    template_name: Some(renderer.getattr("name")?.extract()?),
+                    loader_path: loader.path[self.path.len()..].to_vec(),
+                    inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
+                    python_renderer: Some(Arc::new(renderer.unbind())),
+                }
             };
             self.with_loader(py, |loader| {
                 if let Loader::Cached(loader) = loader {
@@ -978,6 +984,29 @@ pub mod django_rusty_templates {
                 .call1((slf, name, skip))
         }
 
+        fn _compile_loaded_template<'py>(
+            &self,
+            py: Python<'py>,
+            source: &str,
+            origin: Bound<'py, PyAny>,
+            name: &str,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let mut template = Template::new(
+                py,
+                source,
+                PathBuf::from(origin.getattr("name")?.extract::<String>()?),
+                name,
+                self.engine.clone(),
+            )?;
+            let loader = origin.getattr("loader")?.getattr("_native")?;
+            template.loader_path = loader.extract::<PyRef<'_, LoaderView>>()?.path.clone();
+            if let Some(renderer) = &template.python_renderer {
+                renderer.bind(py).call_method1("bind_origin", (origin,))?;
+                return Ok(renderer.bind(py).clone());
+            }
+            template.into_pyobject(py).map(Bound::into_any)
+        }
+
         fn select_template<'py>(
             slf: Bound<'py, Self>,
             names: Bound<'py, PyAny>,
@@ -1615,6 +1644,11 @@ pub mod django_rusty_templates {
 
     #[pymethods]
     impl Template {
+        #[getter]
+        fn _is_native(&self) -> bool {
+            self.python_renderer.is_none()
+        }
+
         #[getter]
         fn _django_template<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
             if let Some(renderer) = &self.python_renderer {
