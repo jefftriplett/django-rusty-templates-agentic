@@ -1308,13 +1308,16 @@ pub mod django_rusty_templates {
             } else {
                 base_context.extend(processor_values);
             }
-            let mut context =
+            let mut rendering_context =
                 Context::new(base_context, request.map(pyo3::Bound::unbind), autoescape);
-            context.use_l10n = use_l10n;
-            context.use_tz = use_tz;
-            context.format_values = is_django_context;
-
-            self._render(py, &mut context)
+            rendering_context.use_l10n = use_l10n;
+            rendering_context.use_tz = use_tz;
+            rendering_context.format_values = is_django_context;
+            let result = self._render(py, &mut rendering_context);
+            if let Some(context) = context {
+                rendering_context.write_assignments(py, &context)?;
+            }
+            result
         }
     }
 }

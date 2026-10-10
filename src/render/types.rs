@@ -78,6 +78,7 @@ pub struct Context {
     include_cache: HashMap<(CycleId, IncludeTemplateKey), Arc<Template>>,
     cycle_indices: HashMap<CycleId, usize>,
     changed_states: Vec<HashMap<CycleId, Py<PyAny>>>,
+    assigned: HashSet<String>,
 }
 
 impl Context {
@@ -99,6 +100,7 @@ impl Context {
             include_cache: HashMap::new(),
             cycle_indices: HashMap::new(),
             changed_states: vec![HashMap::new()],
+            assigned: HashSet::new(),
         }
     }
 
@@ -118,6 +120,7 @@ impl Context {
             names: self.names.clone(),
             include_cache: self.include_cache.clone(),
             cycle_indices: self.cycle_indices.clone(),
+            assigned: self.assigned.clone(),
             changed_states: self
                 .changed_states
                 .iter()
@@ -139,6 +142,15 @@ impl Context {
             }
         }
         Ok(dict)
+    }
+
+    pub fn write_assignments(&self, py: Python<'_>, target: &Bound<'_, PyAny>) -> PyResult<()> {
+        for key in &self.assigned {
+            if let Some(value) = self.get(key) {
+                target.set_item(key, value.bind(py))?;
+            }
+        }
+        Ok(())
     }
 
     pub fn django_context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -185,6 +197,7 @@ impl Context {
     }
 
     pub fn insert(&mut self, key: String, value: Bound<'_, PyAny>) {
+        self.assigned.insert(key.clone());
         self._insert(key, value, true);
     }
 
