@@ -204,6 +204,8 @@ impl Filter {
             "timesince" => Some(("timesince", false, true)),
             "timeuntil" => Some(("timeuntil", false, true)),
             "urlencode" => Some(("urlencode", false, true)),
+            "urlize" => Some(("urlize", false, false)),
+            "urlizetrunc" => Some(("urlizetrunc", true, true)),
             "json_script" => Some(("json_script", false, true)),
             "floatformat" => Some(("floatformat", false, true)),
             "unordered_list" => Some(("unordered_list", false, false)),
