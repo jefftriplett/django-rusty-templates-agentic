@@ -517,8 +517,8 @@ def test_simple_tag_missing_context(assert_parse_error):
   │ first argument of 'context'
    ╭────
  1 │ {% load missing_context from invalid_tags %}{% missing_context %}
-   ·         ───────┬───────
-   ·                ╰── loaded here
+   ·                                             ──────────┬──────────
+   ·                                                       ╰── used here
    ╰────
 """)
     assert_parse_error(

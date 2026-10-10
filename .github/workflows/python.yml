@@ -1,174 +1,50 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
-
+# Temporary low-minute CI; restore comprehensive checks via the cleanup issue.
 name: Python
 
 on:
-  push:
-    branches: main
   pull_request:
+  workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
-# Cancel running jobs for the same workflow and branch.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
-
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ["macos-latest", "ubuntu-latest", "windows-latest"]
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"]
-
-    steps:
-    # on Windows, make sure line-endings are consistent for test suite
-    - if: runner.os == 'Windows'
-      run: |
-        git config --global core.autocrlf false
-        git config --global core.eol lf
-
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      with:
-        persist-credentials: false
-
-    - name: Install gettext for translation testing (Ubuntu)
-      if: runner.os == 'Linux'
-      run: sudo apt-get install gettext
-
-    - name: Install gettext for translation testing (macOS)
-      if: runner.os == 'macOS'
-      run: brew install gettext
-
-    - name: Install gettext for translation testing (Windows)
-      if: runner.os == 'Windows'
-      run: |
-        choco install gettext
-        echo "C:/Program Files/gettext-iconv/bin" >> $GITHUB_PATH
-
-    - name: Set up Python
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-      with:
-        python-version: ${{ matrix.python-version }}
-
-    - name: Install uv
-      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-
-    - name: Install cargo-binstall
-      uses: cargo-bins/cargo-binstall@c06f6a0003f7c6165a00c89d1697731c9e8a5c72  # v1.25.2
-
-    - name: Install cargo-llvm-cov
-      run: cargo binstall cargo-llvm-cov
-
-    - name: Install Django Rusty Templates
-      run: |
-        cargo llvm-cov show-env --sh > llvm-cov-env.sh
-        source llvm-cov-env.sh
-        uv run maturin develop
-
-    - name: Build translation files
-      run: |
-        uv run -m django compilemessages
-
-    - name: Test with pytest
-      run: |
-        cargo llvm-cov show-env --sh > llvm-cov-env.sh
-        source llvm-cov-env.sh
-        uv run pytest --cov --cov-report=xml
-
-    - name: Get rust coverage report
-      run: |
-        cargo llvm-cov show-env --sh > llvm-cov-env.sh
-        source llvm-cov-env.sh
-        cargo llvm-cov report --workspace --codecov --output-path codecov.json
-
-    - name: Upload to codecov
-      uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-      with:
-        files: coverage.xml,codecov.json
-        fail_ci_if_error: true
-
-  django-test-suite:
+  sanity:
+    name: Ubuntu / Python 3.13 sanity
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' }}
-    permissions:
-      pull-requests: write
-      contents: read
+    timeout-minutes: 15
+    env:
+      RUST_TEST_THREADS: "1"
     steps:
-    - name: Set up Python
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-
-    - name: Install uv
-      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-
-    - name: Checkout main
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      with:
-        ref: main
-        persist-credentials: false
-
-    - name: Run Django test suite (main)
-      run: uv run scripts/run_django_test_suite.py --parsed-output main_test_output
-
-    - name: Checkout current branch
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      with:
-        clean: false
-        persist-credentials: false
-
-    - name: Re-build django-rusty-templates (current branch)
-      run: uv run maturin develop
-
-    - name: Run Django test suite (current branch)
-      run: uv run scripts/run_django_test_suite.py --parsed-output branch_test_output
-
-    - name: Compare test suites & generate comment
-      id: generate-comment
-      run: |
-        echo '<!-- generated-comment ecosystem -->' >> test-diff-result
-        echo "### Django test suite conformance" >> test-diff-result
-
-        diff --unified main_test_output branch_test_output >> diff_result || true
-        if [ "$(cat diff_result | wc -l)" -gt 0 ]; then
-          {
-            echo "<details><summary>"
-            echo "ℹ️ Test pass rate changed from <code>$(cat diff_result | grep "^-" | grep -oP '\d+\.\d+%')</code> to <code>$(cat diff_result | grep "^+" | grep -oP '\d+\.\d+%')</code>."
-            echo "</summary>"
-            printf '\n```diff\n'
-            cat diff_result
-            printf '```\n'
-            echo "</details>"
-          } >> test-diff-result
-        else
-          {
-            echo "✅ no changes detected running Django test suite."
-            printf '\n```diff\n'
-            head -n2 branch_test_output
-            printf '```\n'
-          } >> test-diff-result
-        fi
-        cat test-diff-result > "$GITHUB_STEP_SUMMARY"
-        cat test-diff-result
-
-    - name: Upload test diff result
-      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-      with:
-        name: test-diff-result
-        path: test-diff-result
-
-    - name: Store pr-number
-      run: |
-        echo ${{ github.event.number }} > pr-number
-
-    - name: Upload pr-number
-      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-      with:
-        name: pr-number
-        path: pr-number
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - name: Install gettext
+        run: sudo apt-get install -y gettext
+      - name: Build extension and translations
+        run: |
+          uv sync --python 3.13
+          uv run maturin develop
+          uv run -m django compilemessages
+      - name: Python tests and lint
+        run: |
+          uv run pytest -q
+          uv run ruff check
+          uv run ruff format --check
+      - name: Rust tests and lint
+        run: |
+          export PYO3_PYTHON="$PWD/.venv/bin/python"
+          export PYTHONPATH="$PWD:$PWD/.venv/lib/python3.13/site-packages"
+          cargo test --workspace -- --test-threads=1
+          cargo fmt --check
+          cargo clippy --all-targets --all-features -- -D warnings

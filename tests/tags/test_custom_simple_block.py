@@ -28,8 +28,8 @@ def test_simple_block_tag_missing_context(assert_parse_error):
   │ have a first argument of 'context' and a second argument of 'content'
    ╭────
  1 │ {% load missing_context_block from invalid_tags %}{% missing_context_block %}{% end_missing_context_block %}
-   ·         ──────────┬──────────
-   ·                   ╰── loaded here
+   ·                                                   ─────────────┬─────────────
+   ·                                                                ╰── used here
    ╰────
 """)
     assert_parse_error(
@@ -46,8 +46,8 @@ def test_simple_block_tag_missing_content(assert_parse_error):
   × 'missing_content_block' must have a first argument of 'content'
    ╭────
  1 │ {% load missing_content_block from invalid_tags %}{% missing_content_block %}{% end_missing_content_block %}
-   ·         ──────────┬──────────
-   ·                   ╰── loaded here
+   ·                                                   ─────────────┬─────────────
+   ·                                                                ╰── used here
    ╰────
 """)
     assert_parse_error(
@@ -66,8 +66,8 @@ def test_simple_block_tag_missing_content_takes_context(assert_parse_error):
   │ 'content'
    ╭────
  1 │ {% load missing_content_block_with_context from invalid_tags %}{% missing_content_block_with_context %}{% end_missing_content_block_with_context %}
-   ·         ─────────────────┬────────────────
-   ·                          ╰── loaded here
+   ·                                                                ────────────────────┬───────────────────
+   ·                                                                                    ╰── used here
    ╰────
 """)
     assert_parse_error(

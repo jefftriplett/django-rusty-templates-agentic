@@ -4,9 +4,6 @@
 name: Django Test Suite PR comment
 
 on: # zizmor: ignore[dangerous-triggers] # We mitigate potential issues in `Skip symlinks` step
-  workflow_run:
-    workflows: [Python]
-    types: [completed]
   workflow_dispatch:
     inputs:
       workflow_run_id:

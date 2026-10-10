@@ -2,13 +2,8 @@
 # See https://codspeed.io/docs/guides/how-to-benchmark-rust-code
 name: CodSpeed Benchmarks
 
+# Comprehensive checks are manual while the private fork uses minimal CI.
 on:
-  push:
-    branches:
-      - "main"
-  pull_request:
-  # `workflow_dispatch` allows CodSpeed to trigger backtest
-  # performance analysis in order to generate initial data.
   workflow_dispatch:
 
 permissions: # optional for public repositories

@@ -1,11 +1,11 @@
 name: Rust
 
+# Comprehensive checks are manual while the private fork uses minimal CI.
 on:
-  push:
-    branches: main
-  pull_request:
+  workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,9 +44,7 @@ jobs:
     - name: Install cargo-llvm-cov
       run: cargo binstall cargo-llvm-cov
     - name: Run tests
+      env:
+        # Embedded Python imports can deadlock across Rust test threads.
+        RUST_TEST_THREADS: "1"
       run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-      with:
-        files: lcov.info
-        fail_ci_if_error: true

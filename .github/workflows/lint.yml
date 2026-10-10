@@ -1,11 +1,11 @@
 name: Lint checks
 
+# Comprehensive checks are manual while the private fork uses minimal CI.
 on:
-  push:
-    branches: main
-  pull_request:
+  workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 # Make sure CI fails on all warnings, including Clippy lints
 env:

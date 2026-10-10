@@ -12,19 +12,6 @@ SCRIPT_DIR = Path(__file__).parent
 DJANGO_REPO_CACHE = SCRIPT_DIR / ".django"
 PATCH_FILE = SCRIPT_DIR / "django_tests_use_rusty_templates.patch"
 
-# These are skipped because they are flaky when ran with django-rusty-templates
-_SKIPPED_TESTS = (
-    "test_simple_block_tag_missing_content",
-    "test_simple_block_tag_missing_context",
-    "test_simple_block_tag_missing_context_no_params",
-    "test_simple_block_tag_with_context_missing_content",
-    "test_simple_block_tag_errors",
-    "test_simple_tag_missing_context",
-    "test_simple_tag_missing_context_no_params",
-    "test_simple_tag_errors",
-    "test_simpletag_renamed03",
-)
-
 
 def log(header: str):
     print(f"\033[1;32m==> {header}\033[0m\n", flush=True)
@@ -62,8 +49,6 @@ def parse_test_output(output: str) -> tuple[Counter[str], str]:
     summary = Counter()
     for line in output.splitlines():
         line = line.strip()
-        if line.startswith(_SKIPPED_TESTS):
-            continue
         if line.endswith(("ERROR", "FAIL", "ok")):
             line = re.sub(r"<lambda> at 0x.*>", "<lambda> at ..>", line)
             parts = line.split("... ", maxsplit=1)

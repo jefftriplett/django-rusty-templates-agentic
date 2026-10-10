@@ -94,3 +94,31 @@ def test_load_no_tags(template_engine):
 
     with pytest.raises(AttributeError):
         template_engine.from_string(template)
+
+
+@pytest.mark.parametrize("library", ["invalid_tags", "i18n", "static", "cache"])
+def test_load_unused_tags(assert_render, library):
+    assert_render(
+        template="{% load " + library + " %}Hello", context={}, expected="Hello"
+    )
+
+
+def test_load_unused_invalid_tag_from_library(assert_render):
+    assert_render(
+        template="{% load missing_context from invalid_tags %}Hello",
+        context={},
+        expected="Hello",
+    )
+
+
+def test_load_valid_tag_from_library_with_invalid_tags(assert_render, monkeypatch):
+    from tests.templatetags import custom_tags, invalid_tags
+
+    monkeypatch.setitem(
+        invalid_tags.register.tags, "double", custom_tags.register.tags["double"]
+    )
+    assert_render(
+        template="{% load invalid_tags %}{% double 3 %}",
+        context={},
+        expected="6",
+    )
