@@ -35,7 +35,7 @@ jobs:
         run: |
           uv sync --python 3.13
           uv run maturin develop
-          uv run just bootstrap
+          uv run -m django compilemessages
       - name: Python tests and lint
         run: |
           uv run pytest -q
