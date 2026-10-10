@@ -37,7 +37,13 @@ impl Resolve for Filter {
         context: &mut Context,
         failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
-        let mut left = match self.left.resolve(py, template, context, failures) {
+        let resolved = match &self.left {
+            crate::parse::TagElement::Variable(variable) => {
+                variable.resolve(py, template, context, failures)
+            }
+            left => left.resolve(py, template, context, failures),
+        };
+        let mut left = match resolved {
             Err(PyRenderError::RenderError(RenderError::VariableDoesNotExist { .. }))
                 if matches!(self.left, crate::parse::TagElement::Variable(_)) =>
             {
@@ -45,6 +51,15 @@ impl Resolve for Filter {
             }
             result => result?,
         };
+        if left.is_none()
+            && failures == ResolveFailures::Raise
+            && !context.string_if_invalid.is_empty()
+            && let crate::parse::TagElement::Variable(variable) = &self.left
+        {
+            return Ok(Some(Content::Py(
+                context.invalid_value(py, Some(template.content(variable.at)))?,
+            )));
+        }
         if left.is_none()
             && matches!(failures, ResolveFailures::IgnoreVariableDoesNotExist)
             && matches!(self.filter, FilterType::DefaultIfNone(_))

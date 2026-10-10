@@ -1096,13 +1096,20 @@ pub mod django_rusty_templates {
         }
 
         pub fn render(&self, py: Python<'_>, context: &mut Context) -> RenderResult<'_> {
-            let mut rendered = String::with_capacity(self.template.len());
-            let template = TemplateString(&self.template);
-            for node in &self.nodes {
-                let content = node.render(py, template, context)?;
-                rendered.push_str(&content);
-            }
-            Ok(Cow::Owned(rendered))
+            let previous_invalid = std::mem::replace(
+                &mut context.string_if_invalid,
+                self.engine.string_if_invalid.clone(),
+            );
+            let result = (|| {
+                let mut rendered = String::with_capacity(self.template.len());
+                let template = TemplateString(&self.template);
+                for node in &self.nodes {
+                    rendered.push_str(&node.render(py, template, context)?);
+                }
+                Ok(Cow::Owned(rendered))
+            })();
+            context.string_if_invalid = previous_invalid;
+            result
         }
 
         fn _render(&self, py: Python<'_>, context: &mut Context) -> PyResult<String> {

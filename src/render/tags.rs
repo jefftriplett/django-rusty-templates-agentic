@@ -113,9 +113,11 @@ impl Resolve for Url {
         match &self.asvar {
             None => Ok(Some(Content::Py(url?))),
             Some(variable) => {
-                if let Ok(url) = url.ok_or_isinstance_of::<NoReverseMatch>(py)? {
-                    context.insert(variable.clone(), url);
-                }
+                let value = match url.ok_or_isinstance_of::<NoReverseMatch>(py)? {
+                    Ok(url) => url,
+                    Err(_) => PyString::new(py, "").into_any(),
+                };
+                context.insert(variable.clone(), value);
                 Ok(None)
             }
         }
@@ -810,12 +812,7 @@ impl Render for Tag {
                     .iter()
                     .map(|(name, value)| {
                         value
-                            .resolve(
-                                py,
-                                template,
-                                context,
-                                ResolveFailures::IgnoreVariableDoesNotExist,
-                            )
+                            .resolve(py, template, context, ResolveFailures::Raise)
                             .map(|value| (name, value.unwrap_or_else(|| "".as_content()).to_py(py)))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1037,10 +1034,12 @@ impl Render for For {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> RenderResult<'t> {
-        let Some(iterable) =
-            self.iterable
-                .iterable
-                .resolve(py, template, context, ResolveFailures::Raise)?
+        let Some(iterable) = self.iterable.iterable.resolve(
+            py,
+            template,
+            context,
+            ResolveFailures::IgnoreVariableDoesNotExist,
+        )?
         else {
             return self.empty.render(py, template, context);
         };
@@ -1156,6 +1155,16 @@ impl Include {
                     .map(IncludeTemplate::Template)
             }
             Content::Py(content) => {
+                if !content.is_truthy()? {
+                    return Err(TemplateDoesNotExist::new_err("No template names provided")
+                        .annotate(
+                            py,
+                            self.template_at(),
+                            "This variable is not in the context",
+                            template,
+                        )
+                        .into());
+                }
                 if let Some(render) = content.getattr_opt(intern!(py, "render"))?
                     && render.is_callable()
                 {

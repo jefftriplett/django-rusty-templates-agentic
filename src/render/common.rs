@@ -151,8 +151,10 @@ impl Resolve for Variable {
         };
         let mut variable = match resolve_callable(variable.bind(py).clone()) {
             Ok(Some(variable)) => variable,
-            Ok(None) => return Ok(None),
-            Err(error) if silent_failure(&error, py) => return Ok(None),
+            Ok(None) => return Ok(Some(Content::Py(context.invalid_value(py, None)?))),
+            Err(error) if silent_failure(&error, py) => {
+                return Ok(Some(Content::Py(context.invalid_value(py, None)?)));
+            }
             Err(error) => return Err(error.annotate(py, self.at, "here", template).into()),
         };
         for (part, key_at) in parts {
@@ -174,12 +176,31 @@ impl Resolve for Variable {
                         ResolveFailures::IgnoreVariableDoesNotExist => Ok(None),
                     };
                 }
-                Err(error) if silent_failure(&error, py) => return Ok(None),
+                Err(error) if silent_failure(&error, py) => {
+                    return Ok(Some(Content::Py(context.invalid_value(py, None)?)));
+                }
                 Err(error) => return Err(error.annotate(py, self.at, "here", template).into()),
             };
             object_at.1 += key_at.1 + 1;
         }
         Ok(Some(Content::Py(variable)))
+    }
+}
+
+fn resolve_output_variable<'t, 'py>(
+    variable: &Variable,
+    py: Python<'py>,
+    template: TemplateString<'t>,
+    context: &mut Context,
+) -> ResolveResult<'t, 'py> {
+    match variable.resolve(py, template, context, ResolveFailures::Raise) {
+        Ok(None)
+        | Err(crate::error::PyRenderError::RenderError(RenderError::VariableDoesNotExist {
+            ..
+        })) => Ok(Some(Content::Py(
+            context.invalid_value(py, Some(template.content(variable.at)))?,
+        ))),
+        result => result,
     }
 }
 
@@ -313,7 +334,13 @@ impl Resolve for TagElement {
             Self::TranslatedText(text) => {
                 TranslatedText::new(text.at).resolve(py, template, context, failures)
             }
-            Self::Variable(variable) => variable.resolve(py, template, context, failures),
+            Self::Variable(variable) => {
+                if failures == ResolveFailures::Raise {
+                    resolve_output_variable(variable, py, template, context)
+                } else {
+                    variable.resolve(py, template, context, failures)
+                }
+            }
             Self::ForVariable(variable) => variable.resolve(py, template, context, failures),
             Self::Filter(filter) => filter.resolve(py, template, context, failures),
             Self::Int(int) => Ok(Some(Content::Int(int.clone()))),
@@ -356,15 +383,12 @@ impl Render for TokenTree {
             Self::Int(n) => Ok(n.to_string().into()),
             Self::Float(f) => Ok(f.to_string().into()),
             Self::Tag(tag) => tag.render(py, template, context),
-            Self::Variable(variable) => match variable.resolve(
-                py,
-                template,
-                context,
-                ResolveFailures::IgnoreVariableDoesNotExist,
-            )? {
-                Some(value) => value.render(context).map_err(Into::into),
-                None => Ok(Cow::Borrowed("")),
-            },
+            Self::Variable(variable) => {
+                match resolve_output_variable(variable, py, template, context)? {
+                    Some(value) => value.render(context).map_err(Into::into),
+                    None => Ok(Cow::Borrowed("")),
+                }
+            }
             Self::ForVariable(variable) => variable.render(py, template, context),
             Self::Filter(filter) => filter.render(py, template, context),
         }

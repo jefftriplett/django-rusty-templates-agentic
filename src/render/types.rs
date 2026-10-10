@@ -74,6 +74,7 @@ pub struct Context {
     pub use_l10n: Option<bool>,
     pub use_tz: Option<bool>,
     pub format_values: bool,
+    pub string_if_invalid: String,
     names: Vec<HashSet<String>>,
     include_cache: HashMap<(CycleId, IncludeTemplateKey), Arc<Template>>,
     cycle_indices: HashMap<CycleId, usize>,
@@ -96,6 +97,7 @@ impl Context {
             use_l10n: None,
             use_tz: None,
             format_values: false,
+            string_if_invalid: String::new(),
             loops: Vec::new(),
             names: Vec::new(),
             include_cache: HashMap::new(),
@@ -118,6 +120,7 @@ impl Context {
             use_l10n: self.use_l10n,
             use_tz: self.use_tz,
             format_values: self.format_values,
+            string_if_invalid: self.string_if_invalid.clone(),
             loops: self.loops.clone(),
             names: self.names.clone(),
             include_cache: self.include_cache.clone(),
@@ -134,6 +137,21 @@ impl Context {
                         .collect()
                 })
                 .collect(),
+        }
+    }
+
+    pub fn invalid_value<'py>(
+        &self,
+        py: Python<'py>,
+        variable: Option<&str>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let value = PyString::new(py, &self.string_if_invalid);
+        if let Some(variable) = variable
+            && self.string_if_invalid.contains("%s")
+        {
+            value.call_method1("__mod__", (variable,))
+        } else {
+            Ok(value.into_any())
         }
     }
 

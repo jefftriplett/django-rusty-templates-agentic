@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 
 import pytest
-from django.template.base import VariableDoesNotExist
 from django.template.exceptions import TemplateDoesNotExist, TemplateSyntaxError
 from django.utils.translation import gettext_lazy
 
@@ -607,19 +606,17 @@ def test_include_missing_attribute(assert_render_error):
     template = "{% include value.missing %}"
     django_message = "No template names provided"
     rusty_message = """\
-  × Failed lookup for key [missing] in {}
+  × No template names provided
    ╭────
  1 │ {% include value.missing %}
-   ·            ──┬── ───┬───
-   ·              │      ╰── key
-   ·              ╰── {}
+   ·            ──────┬──────
+   ·                  ╰── This variable is not in the context
    ╰────
 """
     assert_render_error(
         template=template,
         context={"value": {}},
         exception=TemplateDoesNotExist,
-        rusty_exception=VariableDoesNotExist,
         django_message=django_message,
         rusty_message=rusty_message,
     )
