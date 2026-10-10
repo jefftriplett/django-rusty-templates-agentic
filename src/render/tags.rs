@@ -1101,6 +1101,9 @@ impl Render for Include {
                     .as_ref()
                     .map(|request| request.clone_ref(py));
                 let mut new_context = Context::new(inner_context, request, context.autoescape);
+                new_context.use_l10n = context.use_l10n;
+                new_context.use_tz = context.use_tz;
+                new_context.format_values = context.format_values;
                 include
                     .render(py, &mut new_context, self.template_at(), template)
                     .map(|content| Cow::Owned(content.into_owned()))

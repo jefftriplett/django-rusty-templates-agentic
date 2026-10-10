@@ -32,6 +32,8 @@ pub mod django_rusty_templates {
     import_exception!(django.template.library, InvalidTemplateLibrary);
     import_exception!(django.urls, NoReverseMatch);
 
+    static DJANGO_CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
     static IMPORT_STRING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
     trait WithSourceCode {
@@ -626,44 +628,121 @@ pub mod django_rusty_templates {
                     PyBool::new(py, false).to_owned().into(),
                 ),
             ]);
-            let request = request.map(pyo3::Bound::unbind);
-            if let Some(ref request) = request {
-                for processor in &self.engine.loaded_context_processors {
-                    let processor = processor.bind(py);
-                    let processor_context = processor.call1((request,))?;
-                    let processor_context: HashMap<_, _> = match processor_context.extract() {
-                        Ok(processor_context) => processor_context,
-                        Err(_) => {
-                            let processor_module = processor.getattr("__module__")?;
-                            let processor_name = processor.getattr("__qualname__")?;
-                            let message = format!(
-                                "Context processor '{processor_module}.{processor_name}' didn't return a dictionary."
+            if let Some(ref py_context) = context
+                && py_context.is_instance_of::<PyContext>()
+            {
+                let extracted: PyContext = py_context.extract()?;
+                let mut context = extracted
+                    .context
+                    .lock_py_attached(py)
+                    .expect("Mutex should not be poisoned");
+                return self._render(py, &mut context);
+            }
+            let context_class = DJANGO_CONTEXT.import(py, "django.template.context", "Context")?;
+            let is_django_context = context
+                .as_ref()
+                .map(|context| context.is_instance(context_class))
+                .transpose()?
+                .unwrap_or(false);
+            let request = match request {
+                Some(request) => Some(request),
+                None if is_django_context => context
+                    .as_ref()
+                    .and_then(|context| context.getattr("request").ok()),
+                None => None,
+            };
+            let processor_index = if is_django_context {
+                context
+                    .as_ref()
+                    .and_then(|context| context.getattr("_processors_index").ok())
+                    .map(|index| index.extract::<usize>())
+                    .transpose()?
+            } else {
+                None
+            };
+            let already_bound = is_django_context
+                && context.as_ref().is_some_and(|context| {
+                    context
+                        .getattr("template")
+                        .is_ok_and(|template| !template.is_none())
+                });
+            let mut processor_values = HashMap::new();
+            if let Some(ref request) = request
+                && !already_bound
+                && (!is_django_context || processor_index.is_some())
+            {
+                let mut processors: Vec<_> = self
+                    .engine
+                    .loaded_context_processors
+                    .iter()
+                    .map(|processor| processor.bind(py).clone())
+                    .collect();
+                if is_django_context
+                    && let Some(ref context) = context
+                    && let Ok(extra) = context.getattr("_processors")
+                {
+                    processors.extend(extra.try_iter()?.collect::<PyResult<Vec<_>>>()?);
+                }
+                for processor in processors {
+                    let result = processor.call1((request,))?;
+                    let values: HashMap<String, Py<PyAny>> = result.extract().map_err(|_| {
+                        let name = processor
+                            .getattr("__qualname__")
+                            .map_or_else(|_| "unknown".to_string(), |name| name.to_string());
+                        let name = if is_django_context {
+                            name
+                        } else {
+                            let module = processor.getattr("__module__").map_or_else(
+                                |_| "unknown".to_string(),
+                                |module| module.to_string(),
                             );
-                            let error = PyTypeError::new_err(message);
-                            return Err(error);
-                        }
-                    };
-                    base_context.extend(processor_context);
+                            format!("{module}.{name}")
+                        };
+                        let message = if is_django_context {
+                            format!("Context processor {name} didn't return a dictionary.")
+                        } else {
+                            format!("Context processor '{name}' didn't return a dictionary.")
+                        };
+                        PyTypeError::new_err(message)
+                    })?;
+                    processor_values.extend(values);
                 }
             }
-            let mut context = match context {
-                Some(py_context) if py_context.is_instance_of::<PyContext>() => {
-                    let extracted: PyContext = py_context
-                        .extract()
-                        .expect("The type of py_context should be PyContext");
-                    let mut context = extracted
-                        .context
-                        .lock_py_attached(py)
-                        .expect("Mutex should not be poisoned");
-                    return self._render(py, &mut context);
+            let mut autoescape = self.engine.autoescape;
+            let mut use_l10n = None;
+            let mut use_tz = None;
+            if let Some(ref context) = context {
+                if is_django_context {
+                    autoescape = context.getattr("autoescape")?.extract()?;
+                    use_l10n = context.getattr("use_l10n")?.extract()?;
+                    use_tz = context.getattr("use_tz")?.extract()?;
+                    if let Some(index) = processor_index.filter(|_| !already_bound) {
+                        for (position, dict) in context.getattr("dicts")?.try_iter()?.enumerate() {
+                            if position == index {
+                                base_context.extend(processor_values.drain());
+                            } else {
+                                base_context.extend(dict?.extract::<HashMap<String, Py<PyAny>>>()?);
+                            }
+                        }
+                    } else {
+                        base_context.extend(context.call_method0("flatten")?.extract::<HashMap<
+                            String,
+                            Py<PyAny>,
+                        >>(
+                        )?);
+                    }
+                } else {
+                    base_context.extend(processor_values);
+                    base_context.extend(context.extract::<HashMap<String, Py<PyAny>>>()?);
                 }
-                Some(context) => {
-                    let new_context: HashMap<_, _> = context.extract()?;
-                    base_context.extend(new_context);
-                    Context::new(base_context, request, self.engine.autoescape)
-                }
-                None => Context::new(base_context, request, self.engine.autoescape),
-            };
+            } else {
+                base_context.extend(processor_values);
+            }
+            let mut context =
+                Context::new(base_context, request.map(pyo3::Bound::unbind), autoescape);
+            context.use_l10n = use_l10n;
+            context.use_tz = use_tz;
+            context.format_values = is_django_context;
 
             self._render(py, &mut context)
         }
