@@ -981,6 +981,7 @@ impl For {
                 index,
                 template,
             )?;
+            context.sync_loop_context(py, index == 0)?;
             parts.push(self.body.render(py, template, context)?);
             context.increment_for_loop();
         }
@@ -1019,6 +1020,7 @@ impl For {
         for (index, c) in chars.into_iter().enumerate() {
             let c = PyString::new(py, &c.to_string());
             context.push_variable(variable.clone(), c.into_any(), index);
+            context.sync_loop_context(py, index == 0)?;
             parts.push(self.body.render(py, template, context)?);
             context.increment_for_loop();
         }
@@ -1030,6 +1032,28 @@ impl For {
 
 impl Render for For {
     fn render<'t>(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> RenderResult<'t> {
+        let scope = if let Some(django_context) = &context.formatting_context {
+            let django_context = django_context.bind(py);
+            let scope = django_context.call_method0("push")?;
+            Some(scope)
+        } else {
+            None
+        };
+        let result = self.render_loop(py, template, context);
+        if let Some(scope) = scope {
+            scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+        }
+        result
+    }
+}
+
+impl For {
+    fn render_loop<'t>(
         &self,
         py: Python<'_>,
         template: TemplateString<'t>,
