@@ -1745,6 +1745,36 @@ pub mod django_rusty_templates {
             })
         }
 
+        /// Render a variable fragment inside an already-bound Django template.
+        /// Read only referenced roots, keeping formatting on the live context.
+        fn _render_fragment(
+            &self,
+            py: Python<'_>,
+            context: Bound<'_, PyAny>,
+            names: Vec<String>,
+        ) -> PyResult<String> {
+            let mut values = HashMap::with_capacity(names.len());
+            for name in names {
+                match context.get_item(&name) {
+                    Ok(value) => {
+                        values.insert(name, value.unbind());
+                    }
+                    Err(error) if error.is_instance_of::<pyo3::exceptions::PyKeyError>(py) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let mut rendering_context = Context::new(
+                values,
+                context.getattr("request").ok().map(Bound::unbind),
+                context.getattr("autoescape")?.extract()?,
+            );
+            rendering_context.use_l10n = context.getattr("use_l10n")?.extract()?;
+            rendering_context.use_tz = context.getattr("use_tz")?.extract()?;
+            rendering_context.format_values = true;
+            rendering_context.formatting_context = Some(context.unbind());
+            self._render(py, &mut rendering_context)
+        }
+
         #[pyo3(name = "render", signature = (context=None, request=None))]
         pub fn py_render(
             &self,
