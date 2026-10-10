@@ -1148,7 +1148,7 @@ impl Include {
             Content::String(content) => {
                 let key = IncludeTemplateKey::String(content.content().to_string());
                 context
-                    .get_or_insert_include(py, &self.engine, &key)
+                    .get_or_insert_include(py, &self.engine, &key, self.id)
                     .map(IncludeTemplate::Template)
             }
             Content::Py(content) => {
@@ -1172,7 +1172,7 @@ impl Include {
                     };
                     let key = IncludeTemplateKey::String(template_path);
                     context
-                        .get_or_insert_include(py, &self.engine, &key)
+                        .get_or_insert_include(py, &self.engine, &key, self.id)
                         .map(IncludeTemplate::Template)
                 } else {
                     let promise = PROMISE.import(py, "django.utils.functional", "Promise")?;
@@ -1197,7 +1197,7 @@ impl Include {
                     };
                     let key = IncludeTemplateKey::Vec(templates);
                     context
-                        .get_or_insert_include(py, &self.engine, &key)
+                        .get_or_insert_include(py, &self.engine, &key, self.id)
                         .map(IncludeTemplate::Template)
                 }
             }
@@ -1464,7 +1464,7 @@ impl Render for InclusionTag {
         } else {
             IncludeTemplateKey::Vec(filename.extract()?)
         };
-        let loaded = context.get_or_insert_include(py, &self.engine, &key)?;
+        let loaded = context.get_or_insert_include(py, &self.engine, &key, self.id)?;
         loaded
             .render(py, &mut child)
             .map(|output| Cow::Owned(output.into_owned()))

@@ -75,7 +75,7 @@ pub struct Context {
     pub use_tz: Option<bool>,
     pub format_values: bool,
     names: Vec<HashSet<String>>,
-    include_cache: HashMap<IncludeTemplateKey, Arc<Template>>,
+    include_cache: HashMap<(CycleId, IncludeTemplateKey), Arc<Template>>,
     cycle_indices: HashMap<CycleId, usize>,
     changed_states: Vec<HashMap<CycleId, Py<PyAny>>>,
 }
@@ -328,8 +328,9 @@ impl Context {
         py: Python,
         engine: &Arc<Engine>,
         key: &IncludeTemplateKey,
+        id: CycleId,
     ) -> Result<Arc<Template>, PyErr> {
-        match self.include_cache.entry(key.clone()) {
+        match self.include_cache.entry((id, key.clone())) {
             Entry::Occupied(entry) => Ok(entry.get().clone()),
             Entry::Vacant(entry) => {
                 let include = match key {

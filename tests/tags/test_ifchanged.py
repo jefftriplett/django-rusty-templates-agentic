@@ -45,3 +45,20 @@ def test_ifchanged(source, context, expected):
         template = engine.from_string(source)
         assert template.render(Context(context)) == expected
         assert template.render(Context(context)) == expected
+
+
+def test_separate_include_nodes_keep_separate_state():
+    for engine_class in (Engine, DjangoEngine):
+        engine = engine_class(
+            loaders=[
+                (
+                    "django.template.loaders.locmem.Loader",
+                    {
+                        "parent": '{% for x in values %}{% include "child" %}{% include "child" %}{% endfor %}',
+                        "child": "{% ifchanged %}{{ x }}{% endifchanged %}",
+                    },
+                )
+            ]
+        )
+        template = engine.get_template("parent")
+        assert template.render(Context({"values": [1, 1, 2, 2, 3, 3]})) == "112233"

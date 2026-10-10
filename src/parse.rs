@@ -128,6 +128,7 @@ impl Parse<Argument> for ArgumentToken {
 
 #[derive(Clone, Debug)]
 pub struct InclusionTag {
+    pub id: CycleId,
     pub call: SimpleTag,
     pub filename: Arc<Py<PyAny>>,
     pub engine: Arc<Engine>,
@@ -717,6 +718,7 @@ pub enum IncludeTemplateName {
 
 #[derive(Clone, Debug)]
 pub struct Include {
+    pub id: CycleId,
     pub template_name: IncludeTemplateName,
     pub origin: Option<String>,
     pub engine: Arc<Engine>,
@@ -2147,6 +2149,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                             return Err(crate::template::django_rusty_templates::TemplateSyntaxError::new_err(format!("'{tag_name}' received too many positional arguments")).into());
                         }
                         Either::Left(TokenTree::Tag(Tag::InclusionTag(InclusionTag {
+                            id: CycleId(NEXT_CYCLE_ID.fetch_add(1, Ordering::Relaxed)),
                             call,
                             filename: Arc::new(filename.clone().unbind()),
                             engine: self.engine.clone(),
@@ -2642,6 +2645,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             }
         }
         let include = Include {
+            id: CycleId(NEXT_CYCLE_ID.fetch_add(1, Ordering::Relaxed)),
             template_name,
             origin: self.origin.map(ToString::to_string),
             engine: self.engine.clone(),
@@ -3679,6 +3683,7 @@ mod tests {
             let template_name = IncludeTemplateName::Variable(TagElement::Float(1.1));
             assert_eq!(
                 Include {
+                    id: CycleId(0),
                     template_name: template_name.clone(),
                     origin: None,
                     only: false,
@@ -3686,6 +3691,7 @@ mod tests {
                     engine: engine.clone(),
                 },
                 Include {
+                    id: CycleId(0),
                     template_name,
                     origin: None,
                     only: false,
