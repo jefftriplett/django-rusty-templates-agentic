@@ -5,6 +5,7 @@ pub mod django_rusty_templates {
     use std::borrow::Cow;
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use encoding_rs::Encoding;
@@ -86,10 +87,290 @@ pub mod django_rusty_templates {
         }
     }
 
-    #[pyclass(frozen)]
+    #[derive(Clone)]
+    #[pyclass(frozen, skip_from_py_object)]
+    struct LoaderView {
+        engine: Arc<Engine>,
+        path: Vec<usize>,
+    }
+
+    impl PartialEq for LoaderView {
+        fn eq(&self, other: &Self) -> bool {
+            Arc::ptr_eq(&self.engine, &other.engine) && self.path == other.path
+        }
+    }
+
+    fn loader_at<'a>(loaders: &'a mut [Loader], path: &[usize]) -> &'a mut Loader {
+        let (index, rest) = path.split_first().expect("loader path is nonempty");
+        let loader = &mut loaders[*index];
+        if rest.is_empty() {
+            return loader;
+        }
+        let Loader::Cached(loader) = loader else {
+            unreachable!("only cached loaders have children")
+        };
+        loader_at(&mut loader.loaders, rest)
+    }
+
+    impl LoaderView {
+        fn with_loader<R>(&self, py: Python<'_>, operation: impl FnOnce(&mut Loader) -> R) -> R {
+            let mut loaders = self
+                .engine
+                .template_loaders
+                .lock_py_attached(py)
+                .expect("Mutex should not be poisoned");
+            operation(loader_at(&mut loaders, &self.path))
+        }
+
+        fn name(&self, py: Python<'_>) -> &'static str {
+            self.with_loader(py, |loader| match loader {
+                Loader::FileSystem(_) => "django.template.loaders.filesystem.Loader",
+                Loader::AppDirs(_) => "django.template.loaders.app_directories.Loader",
+                Loader::Cached(_) => "django.template.loaders.cached.Loader",
+                Loader::LocMem(_) => "django.template.loaders.locmem.Loader",
+                Loader::External(_) => "external.Loader",
+            })
+        }
+    }
+
+    #[pymethods]
+    impl LoaderView {
+        fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+            other
+                .extract::<PyRef<'_, Self>>()
+                .is_ok_and(|other| self == &*other)
+        }
+
+        #[getter]
+        fn loaders(&self, py: Python<'_>) -> Vec<Self> {
+            let count = self.with_loader(py, |loader| match loader {
+                Loader::Cached(loader) => loader.loaders.len(),
+                _ => 0,
+            });
+            (0..count)
+                .map(|index| {
+                    let mut path = self.path.clone();
+                    path.push(index);
+                    Self {
+                        engine: self.engine.clone(),
+                        path,
+                    }
+                })
+                .collect()
+        }
+
+        fn get_dirs(&self, py: Python<'_>) -> PyResult<Vec<PathBuf>> {
+            let own = self.with_loader(py, |loader| match loader {
+                Loader::FileSystem(loader) if !loader.uses_engine_dirs => Some(loader.dirs.clone()),
+                Loader::FileSystem(_) => Some(self.engine.dirs(py)),
+                _ => None,
+            });
+            if let Some(dirs) = own {
+                return Ok(dirs);
+            }
+            if self.name(py) == "django.template.loaders.app_directories.Loader" {
+                return crate::loaders::get_app_template_dirs(py, "templates");
+            }
+            let mut dirs = Vec::new();
+            for loader in self.loaders(py) {
+                dirs.extend(loader.get_dirs(py)?);
+            }
+            Ok(dirs)
+        }
+
+        fn reset(&self, py: Python<'_>) {
+            self.with_loader(py, |loader| {
+                if let Loader::Cached(loader) = loader {
+                    loader.cache.clear();
+                }
+            });
+            for loader in self.loaders(py) {
+                loader.reset(py);
+            }
+        }
+
+        #[getter(get_template_cache)]
+        fn get_template_cache<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+            let dict = PyDict::new(py);
+            self.with_loader(py, |loader| -> PyResult<()> {
+                if let Loader::Cached(loader) = loader {
+                    for (name, entry) in &loader.cache {
+                        match entry {
+                            Ok(template) => {
+                                let mut template = template.clone();
+                                let mut path = self.path.clone();
+                                path.extend(&template.loader_path);
+                                template.loader_path = path;
+                                dict.set_item(name, template)?;
+                            }
+                            Err(_) if self.engine.debug.load(Ordering::Relaxed) => {
+                                dict.set_item(
+                                    name,
+                                    TemplateDoesNotExist::new_err(name.clone()).value(py),
+                                )?;
+                            }
+                            Err(_) => {
+                                dict.set_item(name, py.get_type::<TemplateDoesNotExist>())?;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+            Ok(dict)
+        }
+
+        #[pyo3(signature = (template_name, skip=None))]
+        fn cache_key(
+            &self,
+            py: Python<'_>,
+            template_name: Bound<'_, PyAny>,
+            skip: Option<Bound<'_, PyAny>>,
+        ) -> PyResult<String> {
+            let name: String = template_name.str()?.extract()?;
+            let mut matching = Vec::<String>::new();
+            if let Some(skip) = skip {
+                for origin in skip.try_iter()? {
+                    let origin = origin?;
+                    if origin.getattr("template_name")?.eq(&template_name)? {
+                        matching.push(origin.getattr("name")?.extract()?);
+                    }
+                }
+            }
+            if matching.is_empty() {
+                return Ok(name);
+            }
+            let bytes = pyo3::types::PyBytes::new(py, matching.join("|").as_bytes());
+            let hash: String = py
+                .import("hashlib")?
+                .getattr("sha1")?
+                .call1((bytes,))?
+                .call_method0("hexdigest")?
+                .extract()?;
+            Ok(format!("{name}-{hash}"))
+        }
+
+        fn get_template(&self, py: Python<'_>, template_name: String) -> PyResult<Template> {
+            let result = self.with_loader(py, |loader| {
+                loader.get_template(py, &template_name, self.engine.clone())
+            });
+            match result {
+                Ok(template) => template.map(|mut template| {
+                    let mut path = self.path.clone();
+                    path.extend(&template.loader_path);
+                    template.loader_path = path;
+                    template
+                }),
+                Err(_) => Err(TemplateDoesNotExist::new_err(template_name)),
+            }
+        }
+
+        fn get_template_sources(
+            &self,
+            py: Python<'_>,
+            template_name: Bound<'_, PyAny>,
+        ) -> PyResult<Vec<Origin>> {
+            if template_name.is_instance_of::<pyo3::types::PyBytes>() {
+                return Err(PyTypeError::new_err(
+                    "Can't mix strings and bytes in path components",
+                ));
+            }
+            let name: String = template_name.str()?.extract()?;
+            let children = self.loaders(py);
+            if !children.is_empty() {
+                let mut sources = Vec::new();
+                for child in children {
+                    sources.extend(child.get_template_sources(py, template_name.clone())?);
+                }
+                return Ok(sources);
+            }
+            if self.name(py) == "django.template.loaders.locmem.Loader" {
+                return Ok(vec![Origin {
+                    name: name.clone(),
+                    template_name: Some(name),
+                    loader: Some(self.clone()),
+                }]);
+            }
+            let join = py.import("django.utils._os")?.getattr("safe_join")?;
+            let mut origins = Vec::new();
+            for directory in self.get_dirs(py)? {
+                match join.call1((directory, &name)) {
+                    Ok(path) => origins.push(Origin {
+                        name: path.extract()?,
+                        template_name: Some(name.clone()),
+                        loader: Some(self.clone()),
+                    }),
+                    Err(error)
+                        if error.is_instance(
+                            py,
+                            &py.import("django.core.exceptions")?
+                                .getattr("SuspiciousFileOperation")?,
+                        ) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(origins)
+        }
+
+        fn get_contents(&self, py: Python<'_>, origin: PyRef<'_, Origin>) -> PyResult<String> {
+            if let Some(contents) = self.with_loader(py, |loader| match loader {
+                Loader::LocMem(loader) => Some(loader.templates.get(&origin.name).cloned()),
+                _ => None,
+            }) {
+                return contents.ok_or_else(|| TemplateDoesNotExist::new_err(origin.name.clone()));
+            }
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("encoding", self.engine.encoding.name())?;
+            let file = py
+                .import("builtins")?
+                .getattr("open")?
+                .call((&origin.name,), Some(&kwargs))
+                .map_err(|error| {
+                    if error.is_instance_of::<pyo3::exceptions::PyFileNotFoundError>(py) {
+                        TemplateDoesNotExist::new_err(origin.name.clone())
+                    } else {
+                        error
+                    }
+                })?;
+            let result = file.call_method0("read");
+            file.call_method0("close")?;
+            result?.extract()
+        }
+    }
+
+    #[derive(Clone)]
+    #[pyclass(frozen, skip_from_py_object)]
     struct Origin {
         #[pyo3(get)]
-        template_name: String,
+        name: String,
+        #[pyo3(get)]
+        template_name: Option<String>,
+        #[pyo3(get)]
+        loader: Option<LoaderView>,
+    }
+
+    #[pymethods]
+    impl Origin {
+        fn __str__(&self) -> &str {
+            &self.name
+        }
+        fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+            Ok(format!(
+                "<Origin name={}>",
+                PyString::new(py, &self.name).repr()?
+            ))
+        }
+        fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+            other
+                .extract::<PyRef<'_, Self>>()
+                .is_ok_and(|other| self.name == other.name && self.loader == other.loader)
+        }
+        #[getter]
+        fn loader_name(&self, py: Python<'_>) -> Option<String> {
+            self.loader
+                .as_ref()
+                .map(|loader| loader.name(py).to_string())
+        }
     }
 
     fn import_libraries(libraries: Bound<'_, PyAny>) -> PyResult<HashMap<String, Py<PyAny>>> {
@@ -188,6 +469,7 @@ pub mod django_rusty_templates {
     ) -> PyResult<Loader> {
         match loader_path {
             "django.template.loaders.filesystem.Loader" => {
+                let uses_engine_dirs = args.is_none();
                 let paths = args
                     .map(|arg| {
                         arg.try_iter()?
@@ -197,7 +479,11 @@ pub mod django_rusty_templates {
                     .transpose()?
                     .unwrap_or(dirs.clone());
 
-                Ok(Loader::FileSystem(FileSystemLoader::new(paths, encoding)))
+                Ok(Loader::FileSystem(if uses_engine_dirs {
+                    FileSystemLoader::with_engine_dirs(paths, encoding)
+                } else {
+                    FileSystemLoader::new(paths, encoding)
+                }))
             }
             "django.template.loaders.app_directories.Loader" => {
                 Ok(Loader::AppDirs(AppDirsLoader::new(encoding)))
@@ -233,10 +519,10 @@ pub mod django_rusty_templates {
     #[derive(Debug)]
     pub struct Engine {
         #[allow(dead_code)]
-        dirs: Vec<PathBuf>,
+        dirs: Mutex<Vec<PathBuf>>,
         app_dirs: bool,
         context_processors: Vec<String>,
-        debug: bool,
+        debug: AtomicBool,
         template_loaders: Mutex<Vec<Loader>>,
         string_if_invalid: String,
         #[allow(dead_code)]
@@ -248,13 +534,20 @@ pub mod django_rusty_templates {
     }
 
     impl Engine {
+        pub fn dirs(&self, py: Python<'_>) -> Vec<PathBuf> {
+            self.dirs
+                .lock_py_attached(py)
+                .expect("Mutex should not be poisoned")
+                .clone()
+        }
+
         #[cfg(test)]
         pub fn empty() -> Self {
             Self {
-                dirs: Vec::new(),
+                dirs: Mutex::new(Vec::new()),
                 app_dirs: false,
                 context_processors: Vec::new(),
-                debug: false,
+                debug: AtomicBool::new(false),
                 template_loaders: Mutex::new(Vec::new()),
                 string_if_invalid: String::new(),
                 encoding: encoding_rs::UTF_8,
@@ -276,19 +569,34 @@ pub mod django_rusty_templates {
             .template_loaders
             .lock_py_attached(py)
             .expect("Mutex should not be poisoned");
-        for loader in loaders.iter_mut() {
+        for (index, loader) in loaders.iter_mut().enumerate() {
             match loader.get_template(py, &template_name, engine.clone()) {
-                Ok(template) => return template,
+                Ok(template) => {
+                    return template.map(|mut template| {
+                        template.loader_path.insert(0, index);
+                        template
+                    });
+                }
                 Err(mut e) if !e.tried.is_empty() => tried.append(&mut e.tried),
                 Err(_) => {}
             }
         }
         drop(loaders);
+        let requested_name = template_name.to_string();
         Err(TemplateDoesNotExist::new_err((
             template_name.into_owned(),
             tried
                 .into_iter()
-                .map(|(template_name, reason)| (Origin { template_name }, reason))
+                .map(|(name, reason)| {
+                    (
+                        Origin {
+                            name,
+                            template_name: Some(requested_name.clone()),
+                            loader: None,
+                        },
+                        reason,
+                    )
+                })
                 .collect::<Vec<_>>(),
         )))
     }
@@ -369,8 +677,10 @@ pub mod django_rusty_templates {
                 }
                 Some(loaders) => get_template_loaders(py, loaders.try_iter()?, encoding, &dirs)?,
                 None => {
-                    let filesystem_loader =
-                        Loader::FileSystem(FileSystemLoader::new(dirs.clone(), encoding));
+                    let filesystem_loader = Loader::FileSystem(FileSystemLoader::with_engine_dirs(
+                        dirs.clone(),
+                        encoding,
+                    ));
                     let appdirs_loader = Loader::AppDirs(AppDirsLoader::new(encoding));
                     let loaders = if app_dirs {
                         vec![filesystem_loader, appdirs_loader]
@@ -387,10 +697,10 @@ pub mod django_rusty_templates {
             };
             let builtins = vec![];
             let engine = Engine {
-                dirs,
+                dirs: Mutex::new(dirs),
                 app_dirs,
                 context_processors: processors,
-                debug,
+                debug: AtomicBool::new(debug),
                 template_loaders: template_loaders.into(),
                 string_if_invalid,
                 encoding,
@@ -453,12 +763,21 @@ pub mod django_rusty_templates {
         }
 
         #[getter]
-        pub fn dirs(&self) -> Vec<String> {
+        pub fn dirs(&self, py: Python<'_>) -> Vec<String> {
             self.engine
-                .dirs
+                .dirs(py)
                 .iter()
-                .map(|p| p.to_string_lossy().to_string())
+                .map(|path| path.to_string_lossy().to_string())
                 .collect()
+        }
+
+        #[setter]
+        pub fn set_dirs(&self, py: Python<'_>, dirs: Vec<PathBuf>) {
+            *self
+                .engine
+                .dirs
+                .lock_py_attached(py)
+                .expect("Mutex should not be poisoned") = dirs;
         }
 
         #[getter]
@@ -473,7 +792,41 @@ pub mod django_rusty_templates {
 
         #[getter]
         pub fn debug(&self) -> bool {
-            self.engine.debug
+            self.engine.debug.load(Ordering::Relaxed)
+        }
+
+        #[setter]
+        pub fn set_debug(&self, debug: bool) {
+            self.engine.debug.store(debug, Ordering::Relaxed);
+        }
+
+        #[getter]
+        fn template_loaders(&self, py: Python<'_>) -> Vec<LoaderView> {
+            let loaders = self
+                .engine
+                .template_loaders
+                .lock_py_attached(py)
+                .expect("Mutex should not be poisoned");
+            (0..loaders.len())
+                .map(|index| LoaderView {
+                    engine: self.engine.clone(),
+                    path: vec![index],
+                })
+                .collect()
+        }
+
+        #[getter]
+        pub fn template_context_processors<'py>(
+            &self,
+            py: Python<'py>,
+        ) -> PyResult<Bound<'py, PyTuple>> {
+            PyTuple::new(
+                py,
+                self.engine
+                    .loaded_context_processors
+                    .iter()
+                    .map(|processor| processor.bind(py)),
+            )
         }
 
         #[getter]
@@ -513,6 +866,8 @@ pub mod django_rusty_templates {
         pub template: String,
         pub nodes: Vec<TokenTree>,
         pub engine: Arc<Engine>,
+        pub template_name: Option<String>,
+        pub loader_path: Vec<usize>,
     }
 
     impl Template {
@@ -541,6 +896,8 @@ pub mod django_rusty_templates {
             Ok(Self {
                 template: template.to_string(),
                 filename: Some(filename),
+                template_name: Some(template_name.to_string()),
+                loader_path: Vec::new(),
                 nodes,
                 engine,
             })
@@ -562,6 +919,8 @@ pub mod django_rusty_templates {
             Ok(Self {
                 template,
                 filename: None,
+                template_name: None,
+                loader_path: Vec::new(),
                 nodes,
                 engine,
             })
@@ -613,6 +972,66 @@ pub mod django_rusty_templates {
 
     #[pymethods]
     impl Template {
+        #[getter]
+        fn origin(&self) -> Origin {
+            Origin {
+                name: self.filename.as_ref().map_or_else(
+                    || "<unknown source>".to_string(),
+                    |filename| filename.to_string_lossy().to_string(),
+                ),
+                template_name: self.template_name.clone(),
+                loader: if self.loader_path.is_empty() {
+                    None
+                } else {
+                    Some(LoaderView {
+                        engine: self.engine.clone(),
+                        path: self.loader_path.clone(),
+                    })
+                },
+            }
+        }
+
+        #[getter]
+        fn engine(&self) -> PyEngine {
+            PyEngine {
+                engine: self.engine.clone(),
+            }
+        }
+
+        #[getter]
+        fn nodelist<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+            // This Python tree is for Django tooling and inspection only;
+            // rendering always uses the compiled Rust nodes above.
+            let base = py.import("django.template.base")?;
+            let tokens = base
+                .getattr("Lexer")?
+                .call1((&self.template,))?
+                .call_method0("tokenize")?;
+            let libraries = PyDict::new(py);
+            for (name, library) in &self.engine.libraries {
+                libraries.set_item(name, library)?;
+            }
+            let builtins = PyList::empty(py);
+            for module in [
+                "django.template.defaulttags",
+                "django.template.defaultfilters",
+                "django.template.loader_tags",
+            ] {
+                builtins.append(py.import(module)?.getattr("register")?)?;
+            }
+            base.getattr("Parser")?
+                .call1((tokens, libraries, builtins, self.origin()))?
+                .call_method0("parse")
+        }
+
+        fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+            other.extract::<PyRef<'_, Self>>().is_ok_and(|other| {
+                self.template == other.template
+                    && self.filename == other.filename
+                    && Arc::ptr_eq(&self.engine, &other.engine)
+            })
+        }
+
         #[pyo3(name = "render", signature = (context=None, request=None))]
         pub fn py_render(
             &self,

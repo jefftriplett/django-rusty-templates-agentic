@@ -53,7 +53,7 @@ fn get_app_template_dir(path: Bound<'_, PyAny>, dirname: &str) -> PyResult<Optio
     key = "String",  // Use owned String as key
     convert = r#"{ dirname.to_string() }"#  // Convert &str to String
 )]
-fn get_app_template_dirs(py: Python<'_>, dirname: &str) -> Result<Vec<PathBuf>, PyErr> {
+pub(crate) fn get_app_template_dirs(py: Python<'_>, dirname: &str) -> Result<Vec<PathBuf>, PyErr> {
     let apps = APPS.import(py, "django.apps", "apps")?;
     let app_configs = apps.call_method0("get_app_configs")?;
 
@@ -69,17 +69,34 @@ fn get_app_template_dirs(py: Python<'_>, dirname: &str) -> Result<Vec<PathBuf>, 
 }
 #[derive(Debug)]
 pub struct FileSystemLoader {
-    dirs: Vec<PathBuf>,
+    pub dirs: Vec<PathBuf>,
+    pub uses_engine_dirs: bool,
     encoding: &'static Encoding,
 }
 
 impl FileSystemLoader {
     pub fn new(dirs: Vec<PathBuf>, encoding: &'static Encoding) -> Self {
-        Self { dirs, encoding }
+        Self {
+            dirs,
+            encoding,
+            uses_engine_dirs: false,
+        }
+    }
+
+    pub fn with_engine_dirs(dirs: Vec<PathBuf>, encoding: &'static Encoding) -> Self {
+        Self {
+            dirs,
+            encoding,
+            uses_engine_dirs: true,
+        }
     }
 
     pub fn from_pathbuf(dirs: Vec<PathBuf>, encoding: &'static Encoding) -> Self {
-        Self { dirs, encoding }
+        Self {
+            dirs,
+            encoding,
+            uses_engine_dirs: false,
+        }
     }
 
     fn get_template(
@@ -89,7 +106,12 @@ impl FileSystemLoader {
         engine: Arc<Engine>,
     ) -> Result<PyResult<Template>, LoaderError> {
         let mut tried = Vec::new();
-        for template_dir in &self.dirs {
+        let dirs = if self.uses_engine_dirs {
+            engine.dirs(py)
+        } else {
+            self.dirs.clone()
+        };
+        for template_dir in &dirs {
             let Some(path) = safe_join(template_dir, template_name) else {
                 continue;
             };
@@ -139,7 +161,7 @@ impl AppDirsLoader {
 }
 #[derive(Debug)]
 pub struct CachedLoader {
-    cache: HashMap<String, Result<Template, LoaderError>>,
+    pub cache: HashMap<String, Result<Template, LoaderError>>,
     pub loaders: Vec<Loader>,
 }
 
@@ -162,9 +184,10 @@ impl CachedLoader {
             Some(Err(e)) => Err(e.clone()),
             None => {
                 let mut tried = Vec::new();
-                for loader in &mut self.loaders {
+                for (index, loader) in self.loaders.iter_mut().enumerate() {
                     match loader.get_template(py, template_name, engine.clone()) {
-                        Ok(Ok(template)) => {
+                        Ok(Ok(mut template)) => {
+                            template.loader_path.insert(0, index);
                             self.cache
                                 .insert(template_name.to_string(), Ok(template.clone()));
                             return Ok(Ok(template));
@@ -183,7 +206,7 @@ impl CachedLoader {
 }
 #[derive(Debug)]
 pub struct LocMemLoader {
-    templates: HashMap<String, String>,
+    pub templates: HashMap<String, String>,
 }
 
 impl LocMemLoader {
