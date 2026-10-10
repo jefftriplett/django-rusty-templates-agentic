@@ -169,6 +169,8 @@ impl Filter {
             "truncatechars" => Some(("truncatechars", true, true)),
             "truncatewords" => Some(("truncatewords", true, true)),
             "time" => Some(("time", false, true)),
+            "timesince" => Some(("timesince", false, true)),
+            "timeuntil" => Some(("timeuntil", false, true)),
             "urlencode" => Some(("urlencode", false, true)),
             "json_script" => Some(("json_script", false, true)),
             "floatformat" => Some(("floatformat", false, true)),
