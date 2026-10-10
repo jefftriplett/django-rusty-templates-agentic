@@ -1,0 +1,16 @@
+[package]
+name = "dtl-browser"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+dtl-lexer = { path = "../dtl-lexer" }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.129"

@@ -1,0 +1,233 @@
+[
+  {
+    "name": "text",
+    "source": "  hello\n世界  ",
+    "context": {},
+    "expected": "  hello\n世界  "
+  },
+  {
+    "name": "escaping",
+    "source": "{{ name }}",
+    "context": {
+      "name": "<&>\"'"
+    },
+    "expected": "&lt;&amp;&gt;&quot;&#x27;"
+  },
+  {
+    "name": "lookup",
+    "source": "{{ user.profile.name }}:{{ items.1 }}:{{ missing }}",
+    "context": {
+      "user": {
+        "profile": {
+          "name": "Zoë"
+        }
+      },
+      "items": [
+        "a",
+        "b"
+      ]
+    },
+    "expected": "Zoë:b:"
+  },
+  {
+    "name": "booleans",
+    "source": "{{ yes }}/{{ no }}/{{ amount }}",
+    "context": {
+      "yes": true,
+      "no": false,
+      "amount": 12
+    },
+    "expected": "True/False/12"
+  },
+  {
+    "name": "literal_safe",
+    "source": "{{ '<b>yes</b>' }}",
+    "context": {},
+    "expected": "<b>yes</b>"
+  },
+  {
+    "name": "filters",
+    "source": "{{ name|upper }}:{{ name|lower }}:{{ name|length }}",
+    "context": {
+      "name": "Café &"
+    },
+    "expected": "CAFÉ &amp;:café &amp;:6"
+  },
+  {
+    "name": "defaults",
+    "source": "{{ empty|default:'<b>empty</b>' }}:{{ zero|default_if_none:'fallback' }}:{{ nil|default_if_none:name }}",
+    "context": {
+      "empty": "",
+      "zero": 0,
+      "nil": null,
+      "name": "<&"
+    },
+    "expected": "<b>empty</b>:0:&lt;&amp;"
+  },
+  {
+    "name": "escape_safe",
+    "source": "{{ name|escape|escape }}:{{ name|safe }}",
+    "context": {
+      "name": "<b>&</b>"
+    },
+    "expected": "&lt;b&gt;&amp;&lt;/b&gt;:<b>&</b>"
+  },
+  {
+    "name": "join",
+    "source": "{{ items|join:', ' }}",
+    "context": {
+      "items": [
+        "a&b",
+        "<c>"
+      ]
+    },
+    "expected": "a&amp;b, &lt;c&gt;"
+  },
+  {
+    "name": "quoted_argument",
+    "source": "{{ missing|default:'a | b:c' }}",
+    "context": {},
+    "expected": "a | b:c"
+  },
+  {
+    "name": "if",
+    "source": "{% if count > 2 and enabled %}yes{% elif name == 'Zoë' %}maybe{% else %}no{% endif %}",
+    "context": {
+      "count": 1,
+      "enabled": true,
+      "name": "Zoë"
+    },
+    "expected": "maybe"
+  },
+  {
+    "name": "precedence",
+    "source": "{% if True or False and False %}yes{% endif %}:{% if not False and 2 >= 1 %}yes{% endif %}",
+    "context": {},
+    "expected": "yes:yes"
+  },
+  {
+    "name": "membership",
+    "source": "{% if name in items %}yes{% endif %}:{% if 'absent' not in mapping %}yes{% endif %}",
+    "context": {
+      "name": "a",
+      "items": [
+        "a",
+        "b"
+      ],
+      "mapping": {
+        "a": 1
+      }
+    },
+    "expected": "yes:yes"
+  },
+  {
+    "name": "literal_filter_if",
+    "source": "{% if 'abc'|length == 3 %}yes{% endif %}",
+    "context": {},
+    "expected": "yes"
+  },
+  {
+    "name": "loop",
+    "source": "{% for row in rows %}{{ forloop.counter }}:{{ row.name }}:{{ forloop.first }}:{{ forloop.last }};{% empty %}empty{% endfor %}",
+    "context": {
+      "rows": [
+        {
+          "name": "a&b"
+        },
+        {
+          "name": "c"
+        }
+      ]
+    },
+    "expected": "1:a&amp;b:True:False;2:c:False:True;"
+  },
+  {
+    "name": "reversed",
+    "source": "{% for item in items reversed %}{{ forloop.revcounter }}={{ item }};{% endfor %}",
+    "context": {
+      "items": [
+        1,
+        2
+      ]
+    },
+    "expected": "2=2;1=1;"
+  },
+  {
+    "name": "empty",
+    "source": "{% for item in items %}{{ item }}{% empty %}empty{% endfor %}",
+    "context": {
+      "items": []
+    },
+    "expected": "empty"
+  },
+  {
+    "name": "nested_loop",
+    "source": "{% for outer in items %}{% for inner in items %}{{ forloop.parentloop.counter }}.{{ forloop.counter }};{% endfor %}{% endfor %}",
+    "context": {
+      "items": [
+        1,
+        2
+      ]
+    },
+    "expected": "1.1;1.2;2.1;2.2;"
+  },
+  {
+    "name": "scope",
+    "source": "{% for name in items %}{{ name }}{% endfor %}:{{ name }}",
+    "context": {
+      "items": [
+        "a",
+        "b"
+      ],
+      "name": "parent"
+    },
+    "expected": "ab:parent"
+  },
+  {
+    "name": "string_loop",
+    "source": "{% for letter in 'é🌍' %}{{ letter }};{% endfor %}",
+    "context": {},
+    "expected": "é;🌍;"
+  },
+  {
+    "name": "include",
+    "source": "{% for row in rows %}{% include template %}{% endfor %}",
+    "templates": {
+      "card": "<b>{{ row.name }}</b>"
+    },
+    "context": {
+      "template": "card",
+      "rows": [
+        {
+          "name": "<&"
+        }
+      ]
+    },
+    "expected": "<b>&lt;&amp;</b>"
+  },
+  {
+    "name": "comments",
+    "source": "a{# ignored {{ name }} #}b",
+    "context": {},
+    "expected": "ab"
+  },
+  {
+    "name": "null_and_missing",
+    "source": "{{ nil }}:{{ missing }}:{{ missing|upper }}",
+    "context": {
+      "nil": null
+    },
+    "expected": "None::"
+  },
+  {
+    "name": "object_order",
+    "source": "{% for key in data %}{{ key }};{% endfor %}",
+    "context": {
+      "data": {
+        "z": 1,
+        "a": 2
+      }
+    },
+    "expected": "z;a;"
+  }
+]
