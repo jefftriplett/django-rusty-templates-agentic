@@ -2,6 +2,7 @@ from django.conf import settings
 from django.template import Engine as DjangoEngine
 from django.template import TemplateDoesNotExist
 from django.template.backends.base import BaseEngine
+from django.template.backends.django import Template as BackendTemplate
 from django.template.backends.django import DjangoTemplates, get_installed_libraries
 
 from .django_rusty_templates import Engine, Template
@@ -31,7 +32,10 @@ class RustyTemplates(DjangoTemplates):
 
     def get_template(self, template_name):
         try:
-            return self.engine.get_template(template_name)
+            template = self.engine.get_template(template_name)
+            if isinstance(template, Template):
+                return template
+            return BackendTemplate(template, self)
         except TemplateDoesNotExist as error:
             error.backend = self
             raise

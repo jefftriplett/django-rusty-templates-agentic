@@ -302,6 +302,16 @@ pub mod django_rusty_templates {
             Ok(format!("{name}-{hash}"))
         }
 
+        fn _cache_missing(&self, py: Python<'_>, key: String, tried: Vec<(String, String)>) {
+            self.with_loader(py, |loader| {
+                if let Loader::Cached(loader) = loader {
+                    loader
+                        .cache
+                        .insert(key, Err(crate::loaders::LoaderError { tried }));
+                }
+            });
+        }
+
         fn _cache_template(
             &self,
             py: Python<'_>,
@@ -309,9 +319,9 @@ pub mod django_rusty_templates {
             renderer: Bound<'_, PyAny>,
         ) -> PyResult<()> {
             let origin = renderer.getattr("origin")?;
-            let loader = origin
-                .getattr("loader")?
-                .extract::<PyRef<'_, LoaderView>>()?;
+            let origin_loader = origin.getattr("loader")?;
+            let native_loader = origin_loader.getattr("_native").unwrap_or(origin_loader);
+            let loader = native_loader.extract::<PyRef<'_, LoaderView>>()?;
             let template = Template {
                 filename: Some(PathBuf::from(origin.getattr("name")?.extract::<String>()?)),
                 template: renderer.getattr("source")?.extract()?,
@@ -443,6 +453,9 @@ pub mod django_rusty_templates {
             ))
         }
         fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+            let other = other
+                .getattr("_native_origin")
+                .unwrap_or_else(|_| other.clone());
             other
                 .extract::<PyRef<'_, Self>>()
                 .is_ok_and(|other| self.name == other.name && self.loader == other.loader)
@@ -660,6 +673,39 @@ pub mod django_rusty_templates {
         py: Python<'_>,
         template_name: Cow<str>,
     ) -> PyResult<Template> {
+        if template_name.contains('#')
+            && py
+                .import("django")?
+                .getattr("VERSION")?
+                .get_item(0)?
+                .extract::<u8>()?
+                >= 6
+        {
+            let renderer = py
+                .import("django_rusty_templates.interop")?
+                .getattr("compile_partial")?
+                .call1((
+                    template_name.as_ref(),
+                    PyEngine {
+                        engine: engine.clone(),
+                    },
+                ))?;
+            return Ok(Template {
+                filename: Some(PathBuf::from(
+                    renderer
+                        .getattr("origin")?
+                        .getattr("name")?
+                        .extract::<String>()?,
+                )),
+                template: renderer.getattr("source")?.extract()?,
+                template_name: Some(template_name.into_owned()),
+                loader_path: Vec::new(),
+                inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
+                python_renderer: Some(Arc::new(renderer.unbind())),
+                nodes: Vec::new(),
+                engine,
+            });
+        }
         let mut tried = Vec::new();
         let mut loaders = engine
             .template_loaders
@@ -883,7 +929,14 @@ pub mod django_rusty_templates {
         ) -> PyResult<Bound<'py, PyAny>> {
             let py = slf.py();
             let template_name = template_name.unwrap_or_else(|| py.None().into_bound(py));
-            if slf.getattr("__dict__")?.contains("find_template")? {
+            if slf.getattr("__dict__")?.contains("find_template")?
+                || py
+                    .import("django")?
+                    .getattr("VERSION")?
+                    .get_item(0)?
+                    .extract::<u8>()?
+                    >= 6
+            {
                 return py
                     .import("django_rusty_templates")?
                     .getattr("_django_get_template")?
@@ -913,22 +966,16 @@ pub mod django_rusty_templates {
 
         #[pyo3(signature = (name, dirs=None, skip=None))]
         fn find_template<'py>(
-            &self,
-            py: Python<'py>,
+            slf: Bound<'py, Self>,
             name: Bound<'py, PyAny>,
             dirs: Option<Bound<'py, PyAny>>,
             skip: Option<Bound<'py, PyAny>>,
         ) -> PyResult<Bound<'py, PyAny>> {
             let _ = dirs;
-            py.import("django_rusty_templates.interop")?
+            slf.py()
+                .import("django_rusty_templates.interop")?
                 .getattr("find_template")?
-                .call1((
-                    Self {
-                        engine: self.engine.clone(),
-                    },
-                    name,
-                    skip,
-                ))
+                .call1((slf, name, skip))
         }
 
         /// Given a list of template names, return the first that can be loaded.
@@ -1084,9 +1131,14 @@ pub mod django_rusty_templates {
         }
 
         #[getter]
-        fn template_loaders<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-            let count = self
-                .engine
+        fn template_loaders(slf: Bound<'_, Self>) -> PyResult<Bound<'_, PyList>> {
+            let py = slf.py();
+            let dict = slf.getattr("__dict__")?;
+            if let Ok(loaders) = dict.get_item("_template_loaders") {
+                return Ok(loaders.cast_into::<PyList>()?);
+            }
+            let engine = slf.borrow().engine.clone();
+            let count = engine
                 .template_loaders
                 .lock_py_attached(py)
                 .expect("Mutex should not be poisoned")
@@ -1097,10 +1149,11 @@ pub mod django_rusty_templates {
             let loaders = PyList::empty(py);
             for index in 0..count {
                 loaders.append(wrap.call1((LoaderView {
-                    engine: self.engine.clone(),
+                    engine: engine.clone(),
                     path: vec![index],
                 },))?)?;
             }
+            dict.set_item("_template_loaders", &loaders)?;
             Ok(loaders)
         }
 
@@ -1284,6 +1337,8 @@ pub mod django_rusty_templates {
                             "block",
                             "extends",
                             "Fully custom tag",
+                            "partialdef",
+                            "partial",
                             "Django 6.1 variable lookup",
                         ]
                         .iter()
@@ -1366,6 +1421,8 @@ pub mod django_rusty_templates {
                             "block",
                             "extends",
                             "Fully custom tag",
+                            "partialdef",
+                            "partial",
                             "Django 6.1 variable lookup",
                         ]
                         .iter()
@@ -1532,6 +1589,16 @@ pub mod django_rusty_templates {
             } else {
                 self.py_render(py, Some(context), None)
             }
+        }
+
+        fn get_exception_info<'py>(
+            &self,
+            py: Python<'py>,
+            exception: Bound<'py, PyAny>,
+            token: Bound<'py, PyAny>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            self._django_template(py)?
+                .call_method1("get_exception_info", (exception, token))
         }
 
         #[getter]
