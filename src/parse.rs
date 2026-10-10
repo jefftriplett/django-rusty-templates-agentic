@@ -824,6 +824,10 @@ pub enum Tag {
     Comment(Comment),
     Now(Now),
     FirstOf(FirstOf),
+    WidthRatio {
+        args: Vec<TagElement>,
+        asvar: Option<String>,
+    },
     TemplateTag(TemplateTag),
     Cycle(Cycle),
 }
@@ -1611,6 +1615,31 @@ impl<'t, 'py> Parser<'t, 'py> {
         })
     }
 
+    fn parse_widthratio(&self, parts: TagParts) -> Result<TokenTree, PyParseError> {
+        let mut tokens = TagElementKwargLexer::new(self.template, parts)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ParseError::from)?;
+        let asvar =
+            if tokens.len() >= 2 && self.template.content(tokens[tokens.len() - 2].at) == "as" {
+                extract_as_variable(&mut tokens, &self.template)?
+            } else {
+                None
+            };
+        if tokens.len() != 3 || tokens.iter().any(|token| token.kwarg.is_some()) {
+            return Err(
+                crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
+                    "widthratio takes three arguments",
+                )
+                .into(),
+            );
+        }
+        let args = tokens
+            .iter()
+            .map(|token| token.parse(self))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(TokenTree::Tag(Tag::WidthRatio { args, asvar }))
+    }
+
     fn parse_firstof(&mut self, parts: TagParts) -> Result<TokenTree, PyParseError> {
         let mut tokens = TagElementKwargLexer::new(self.template, parts.clone())
             .collect::<Result<Vec<_>, _>>()
@@ -1731,6 +1760,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         let tag = lex_tag(tag, at.0 + START_TAG_LEN).map_err(ParseError::from)?;
 
         Ok(match tag.content(self.template) {
+            "widthratio" => Either::Left(self.parse_widthratio(tag.parts)?),
             "url" => Either::Left(self.parse_url(at, tag.parts)?),
             "firstof" => Either::Left(self.parse_firstof(tag.parts)?),
             "csrf_token" => Either::Left(TokenTree::Tag(Tag::CsrfToken(CsrfToken))),

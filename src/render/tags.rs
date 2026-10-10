@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use num_bigint::{BigInt, Sign};
 use num_traits::cast::ToPrimitive;
-use pyo3::exceptions::{PyAttributeError, PyTypeError};
+use pyo3::exceptions::{
+    PyAttributeError, PyOverflowError, PyTypeError, PyValueError, PyZeroDivisionError,
+};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
@@ -25,8 +27,12 @@ use crate::parse::{
     NamedCycle, SilentNamedCycle, SimpleBlockTag, SimpleCycle, SimpleTag, Tag, TagElement, Url,
 };
 use crate::path::construct_relative_path;
-use crate::template::django_rusty_templates::{NoReverseMatch, Template, TemplateDoesNotExist};
+use crate::template::django_rusty_templates::{
+    NoReverseMatch, Template, TemplateDoesNotExist, TemplateSyntaxError,
+};
 use crate::utils::PyResultMethods;
+
+static BUILTINS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static PROMISE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static REVERSE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -644,6 +650,65 @@ impl Evaluate for IfCondition {
     }
 }
 
+fn render_widthratio(
+    args: &[TagElement],
+    py: Python<'_>,
+    template: TemplateString<'_>,
+    context: &mut Context,
+) -> Result<String, PyRenderError> {
+    let values = args
+        .iter()
+        .map(|arg| {
+            arg.resolve(
+                py,
+                template,
+                context,
+                ResolveFailures::IgnoreVariableDoesNotExist,
+            )
+            .map(|value| value.unwrap_or_else(|| "".as_content()).to_py(py))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let builtins = BUILTINS
+        .get_or_try_init(py, || {
+            py.import("builtins")
+                .map(|module| module.into_any().unbind())
+        })?
+        .bind(py);
+    let width = match builtins.getattr("int")?.call1((&values[2],)) {
+        Ok(width) => width,
+        Err(error)
+            if error.is_instance_of::<PyValueError>(py)
+                || error.is_instance_of::<PyTypeError>(py) =>
+        {
+            return Err(
+                TemplateSyntaxError::new_err("widthratio final argument must be a number").into(),
+            );
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let compute = || -> PyResult<String> {
+        let float = builtins.getattr("float")?;
+        let value = float.call1((&values[0],))?;
+        let maximum = float.call1((&values[1],))?;
+        let ratio = value
+            .call_method1("__truediv__", (maximum,))?
+            .call_method1("__mul__", (width,))?;
+        builtins.getattr("round")?.call1((ratio,))?.str()?.extract()
+    };
+    match compute() {
+        Ok(value) => Ok(value),
+        Err(error) if error.is_instance_of::<PyZeroDivisionError>(py) => Ok("0".to_string()),
+        Err(error)
+            if error.is_instance_of::<PyValueError>(py)
+                || error.is_instance_of::<PyTypeError>(py)
+                || error.is_instance_of::<PyOverflowError>(py) =>
+        {
+            Ok(String::new())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 impl Render for Tag {
     fn render<'t>(
         &self,
@@ -652,6 +717,15 @@ impl Render for Tag {
         context: &mut Context,
     ) -> RenderResult<'t> {
         Ok(match self {
+            Self::WidthRatio { args, asvar } => {
+                let result = render_widthratio(args, py, template, context)?;
+                if let Some(name) = asvar {
+                    context.insert(name.clone(), PyString::new(py, &result).into_any());
+                    Cow::Borrowed("")
+                } else {
+                    Cow::Owned(result)
+                }
+            }
             Self::Cycle(cycle) => cycle.render(py, template, context)?,
             Self::Autoescape { enabled, nodes } => {
                 let autoescape = context.autoescape;
