@@ -15,7 +15,7 @@ The maintainers have a strict LLM policy. The parts that affect how you work her
 
 ## Commits and branches
 
-Work on a branch, never `main`. `origin` is still the upstream `LilyFirefly/django-rusty-templates` repo, and we plan to fork it. Don't push to `origin`; push only once a fork remote has been set up.
+Work on a branch, never `main`. `origin` is our private fork (`jefftriplett/-django-rusty-templates-private`): push branches there and merge via PR. `upstream` is `LilyFirefly/django-rusty-templates`: only fetch from it, never push or open PRs there.
 
 ## Commands
 
