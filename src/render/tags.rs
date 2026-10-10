@@ -905,6 +905,25 @@ impl Render for Tag {
             Self::For(for_tag) => for_tag.render(py, template, context)?,
             Self::Include(include_tag) => include_tag.render(py, template, context)?,
             Self::Load => Cow::Borrowed(""),
+            Self::QueryString(tag) => {
+                let mut args = build_args(py, template, context, &tag.args)?;
+                let kwargs = build_kwargs(py, template, context, &tag.kwargs)?;
+                let python_context = context.django_context(py)?;
+                if let Some(request) = &context.request {
+                    python_context.setattr("request", request.bind(py))?;
+                }
+                args.push_front(python_context);
+                let output = tag
+                    .func
+                    .bind(py)
+                    .call(PyTuple::new(py, args)?, Some(&kwargs))?;
+                if let Some(target) = &tag.target_var {
+                    context.insert(target.clone(), output);
+                    Cow::Borrowed("")
+                } else {
+                    Content::Py(output).render(context)?
+                }
+            }
             Self::SimpleTag(simple_tag) => simple_tag.render(py, template, context)?,
             Self::SimpleBlockTag(simple_tag) => simple_tag.render(py, template, context)?,
             Self::Url(url) => url.render(py, template, context)?,

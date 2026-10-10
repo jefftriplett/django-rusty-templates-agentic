@@ -852,6 +852,7 @@ pub enum Tag {
     Spaceless(Vec<TokenTree>),
     Verbatim(Vec<TokenTree>),
     Debug,
+    QueryString(SimpleTag),
     SimpleTag(SimpleTag),
     SimpleBlockTag(SimpleBlockTag),
     Url(Url),
@@ -2014,6 +2015,25 @@ impl<'t, 'py> Parser<'t, 'py> {
                 at,
                 parts: None,
             }),
+            "querystring" => {
+                let compile = self
+                    .py
+                    .import("django.template.defaulttags")?
+                    .getattr("register")?
+                    .getattr("tags")?
+                    .get_item("querystring")?;
+                self.load_tag(at, "querystring", &compile)?;
+                let Some(TagContext::Simple(context)) = self.external_tags.get("querystring")
+                else {
+                    unreachable!("querystring is a simple tag")
+                };
+                let TokenTree::Tag(Tag::SimpleTag(simple)) =
+                    self.parse_simple_tag(context, at, tag.parts)?
+                else {
+                    unreachable!("querystring parser returns a simple tag")
+                };
+                Either::Left(TokenTree::Tag(Tag::QueryString(simple)))
+            }
             "regroup" => Either::Left(self.parse_regroup(tag.parts)?),
             "ifchanged" => Either::Left(self.parse_ifchanged(at, tag.parts)?),
             "endifchanged" => Either::Right(EndTag {
