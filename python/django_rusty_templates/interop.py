@@ -3,7 +3,7 @@
 from django import VERSION
 from django.template import Context
 from django.template.context import make_context
-from django.template.base import DebugLexer, Node, Parser, Template, VariableNode
+from django.template.base import DebugLexer, Lexer, Node, Parser, Template, VariableNode
 from django.template.loader_tags import ExtendsNode
 
 
@@ -26,7 +26,7 @@ class NativeVariableNode(VariableNode):
 class NativeParser(Parser):
     def __init__(self, source, engine, origin):
         super().__init__(
-            DebugLexer(source).tokenize(),
+            (DebugLexer if engine.debug else Lexer)(source).tokenize(),
             engine.template_libraries,
             engine.template_builtins,
             origin,
@@ -87,6 +87,7 @@ def find_template(engine, name, skip=None):
     # Base loader implements Django's origin skip semantics, including extending
     # the same filename from an earlier directory in the loader search order.
     from django.template import TemplateDoesNotExist
+    from django.template.backends.django import copy_exception
 
     tried = []
     for loader in engine.template_loaders:
@@ -94,8 +95,15 @@ def find_template(engine, name, skip=None):
             key = loader.cache_key(name, skip) if loader.is_cached else None
             if key is not None:
                 cached = loader.get_template_cache.get(key)
+                if isinstance(cached, type) and issubclass(
+                    cached, TemplateDoesNotExist
+                ):
+                    raise cached(name)
+                if isinstance(cached, TemplateDoesNotExist):
+                    raise copy_exception(cached)
                 if cached is not None and hasattr(cached, "_django_template"):
-                    return cached._django_template, cached.origin
+                    return cached, cached.origin
+            loader_tried = []
             for origin in loader.get_template_sources(name):
                 if skip is not None and origin in skip:
                     tried.append((origin, "Skipped to avoid recursion"))
@@ -104,11 +112,15 @@ def find_template(engine, name, skip=None):
                     contents = origin.loader.get_contents(origin)
                 except TemplateDoesNotExist:
                     tried.append((origin, "Source does not exist"))
+                    loader_tried.append((origin.name, "Source does not exist"))
                     continue
                 template = InteropTemplate(contents, origin, name, engine)
                 if key is not None:
                     loader._cache_template(key, template)
+                    return loader.get_template_cache[key], origin
                 return template, origin
+            if key is not None:
+                loader._cache_missing(key, loader_tried)
         except TemplateDoesNotExist as error:
             tried.extend(error.tried or ())
     raise TemplateDoesNotExist(name, tried=tried)
@@ -129,3 +141,34 @@ class ParentExpression:
         if isinstance(native, NativeTemplate):
             return native._django_template
         return parent
+
+
+class PartialRenderer:
+    """Expose a Django partial through the native template render protocol."""
+
+    def __init__(self, partial, source):
+        self.partial = partial
+        self.source = source
+        self.extra_data = {}
+
+    def __getattr__(self, name):
+        return getattr(self.partial, name)
+
+    def bind_origin(self, origin):
+        # Partials keep the full template's origin for source/debug delegation.
+        pass
+
+    def render(self, context=None, request=None):
+        if not isinstance(context, Context):
+            context = make_context(
+                context, request, autoescape=self.partial.engine.autoescape
+            )
+        return self.partial.render(context)
+
+
+def compile_partial(name, engine):
+    from . import _django_get_template
+
+    partial = _django_get_template(engine, name)
+    parent = engine.get_template(name.partition("#")[0])
+    return PartialRenderer(partial, parent.source)
