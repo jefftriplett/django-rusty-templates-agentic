@@ -841,7 +841,7 @@ impl Render for Tag {
                     value = filter.resolve(value, py, template, context)?;
                 }
                 match value {
-                    Some(value) => value.render(context)?,
+                    Some(value) => Cow::Owned(value.to_py(py).str()?.extract::<String>()?),
                     None => Cow::Borrowed(""),
                 }
             }
@@ -1289,20 +1289,20 @@ impl Render for Include {
     }
 }
 
-fn call_tag<'t>(
-    py: Python<'_>,
+fn call_tag<'t, 'py>(
+    py: Python<'py>,
     func: &Arc<Py<PyAny>>,
     at: At,
     template: TemplateString<'t>,
-    args: VecDeque<Bound<'_, PyAny>>,
-    kwargs: Bound<'_, PyDict>,
-) -> RenderResult<'t> {
+    args: VecDeque<Bound<'py, PyAny>>,
+    kwargs: Bound<'py, PyDict>,
+) -> Result<Bound<'py, PyAny>, PyRenderError> {
     let func = func.bind(py);
     match func.call(
         PyTuple::new(py, args).expect("All arguments should be valid Python objects"),
         Some(&kwargs),
     ) {
-        Ok(content) => Ok(Cow::Owned(content.to_string())),
+        Ok(content) => Ok(content),
         Err(error) => Err(error.annotate(py, at, "here", template).into()),
     }
 }
@@ -1383,17 +1383,27 @@ fn build_kwargs<'py>(
 }
 
 fn store_target_var<'t>(
-    py: Python<'_>,
+    _py: Python<'_>,
     context: &mut Context,
-    content: Cow<'t, str>,
+    content: Bound<'_, PyAny>,
     target_var: Option<&String>,
-) -> Cow<'t, str> {
+) -> RenderResult<'t> {
     match target_var {
-        None => content,
+        None => {
+            let output = if context.autoescape {
+                content
+                    .py()
+                    .import("django.utils.html")?
+                    .getattr("conditional_escape")?
+                    .call1((content,))?
+            } else {
+                content
+            };
+            Ok(Cow::Owned(output.str()?.extract::<String>()?))
+        }
         Some(target_var) => {
-            let content = PyString::new(py, &content).into_any();
             context.insert(target_var.clone(), content);
-            Cow::Borrowed("")
+            Ok(Cow::Borrowed(""))
         }
     }
 }
@@ -1498,12 +1508,7 @@ impl Render for SimpleTag {
         } else {
             call_tag(py, &self.func, self.at, template, args, kwargs)?
         };
-        Ok(store_target_var(
-            py,
-            context,
-            content,
-            self.target_var.as_ref(),
-        ))
+        store_target_var(py, context, content, self.target_var.as_ref())
     }
 }
 
@@ -1518,7 +1523,10 @@ impl Render for SimpleBlockTag {
         let kwargs = build_kwargs(py, template, context, &self.kwargs)?;
 
         let content = self.nodes.render(py, template, context)?;
-        let content = PyString::new(py, &content).into_any();
+        let content = py
+            .import("django.utils.safestring")?
+            .getattr("mark_safe")?
+            .call1((&*content,))?;
         args.push_front(content);
 
         let content = if self.takes_context {
@@ -1535,12 +1543,7 @@ impl Render for SimpleBlockTag {
         } else {
             call_tag(py, &self.func, self.at, template, args, kwargs)?
         };
-        Ok(store_target_var(
-            py,
-            context,
-            content,
-            self.target_var.as_ref(),
-        ))
+        store_target_var(py, context, content, self.target_var.as_ref())
     }
 }
 

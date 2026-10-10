@@ -413,7 +413,7 @@ impl ResolveFilter for EscapeFilter {
     fn resolve<'t, 'py>(
         &self,
         variable: Option<Content<'t, 'py>>,
-        _py: Python<'py>,
+        py: Python<'py>,
         _template: TemplateString<'t>,
         _context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
@@ -429,10 +429,11 @@ impl ResolveFilter for EscapeFilter {
                     Content::Int(n) => Cow::Owned(n.to_string()),
                     Content::Float(n) => Cow::Owned(n.to_string()),
                     Content::Py(object) => {
-                        let content = object.str()?.extract::<String>()?;
-                        let mut encoded = String::new();
-                        encode_quoted_attribute_to_string(&content, &mut encoded);
-                        Cow::Owned(encoded)
+                        let escaped = py
+                            .import("django.utils.html")?
+                            .getattr("conditional_escape")?
+                            .call1((object,))?;
+                        Cow::Owned(escaped.extract::<String>()?)
                     }
                     Content::Bool(true) => Cow::Borrowed("True"),
                     Content::Bool(false) => Cow::Borrowed("False"),
@@ -567,6 +568,9 @@ impl ResolveFilter for ForceEscapeFilter {
             Some(Content::String(ContentString::HtmlSafe(c))) => {
                 Some(Content::String(ContentString::String(c)))
             }
+            Some(Content::Py(value)) => Some(Content::String(ContentString::String(Cow::Owned(
+                value.str()?.extract::<String>()?,
+            )))),
             other => other,
         };
         EscapeFilter.resolve(variable, py, template, context)
@@ -777,7 +781,12 @@ impl ResolveFilter for UpperFilter {
         let content = match variable {
             Some(content) => {
                 let content = content.resolve_string(context)?;
-                content.map_content(|content| Cow::Owned(content.to_uppercase()))
+                let uppercase = Cow::Owned(content.as_raw().to_uppercase());
+                Content::String(if context.autoescape {
+                    ContentString::HtmlUnsafe(uppercase)
+                } else {
+                    ContentString::String(uppercase)
+                })
             }
             None => "".as_content(),
         };
