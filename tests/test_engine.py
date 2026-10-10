@@ -1,3 +1,4 @@
+from django import VERSION
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,11 @@ def test_import_libraries_import_error():
 
 def test_import_libraries_no_register():
     params = {"libraries": {"no_register": "tests"}}
-    expected = "Module  tests does not have a variable named 'register'"
+    expected = (
+        "Module tests does not have a variable named 'register'"
+        if VERSION >= (6, 0)
+        else "Module  tests does not have a variable named 'register'"
+    )
 
     with pytest.raises(InvalidTemplateLibrary) as exc_info:
         Engine(**params)

@@ -40,7 +40,13 @@ class NativeParser(Parser):
         if isinstance(node, ExtendsNode):
             node.parent_name = ParentExpression(node.parent_name)
         if type(node) is VariableNode and not (
-            VERSION >= (6, 1) and ".." in token.contents
+            (VERSION >= (6, 1) and ".." in token.contents)
+            or (
+                VERSION >= (6, 0)
+                and any(
+                    exponent in token.contents for exponent in ("e+", "E+", "e-", "E-")
+                )
+            )
         ):
             fragment = self.load_prefix + "{{ " + token.contents + " }}"
             node = NativeVariableNode(node, self.native_engine.from_string(fragment))
@@ -55,6 +61,14 @@ class InteropTemplate(Template):
             self.extra_data = parser.extra_data
             return nodes
         except Exception as error:
+            diagnostic = self.engine._syntax_diagnostic(
+                self.source,
+                None if self.origin.name == "<unknown source>" else self.origin.name,
+                self.origin.template_name,
+            )
+            if diagnostic:
+                error.rusty_diagnostic = diagnostic
+                error.add_note(diagnostic)
             if self.engine.debug and hasattr(error, "token"):
                 error.template_debug = self.get_exception_info(error, error.token)
             raise

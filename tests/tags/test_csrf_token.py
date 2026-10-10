@@ -1,3 +1,5 @@
+from django import VERSION
+import pytest
 import re
 import warnings
 
@@ -34,7 +36,9 @@ def test_csrf_token_basic(assert_render):
     )
 
 
-def test_csrf_token_not_provided(assert_render):
+def test_csrf_token_not_provided(assert_render, template_engine):
+    if VERSION >= (6, 0) and not isinstance(template_engine, RustyTemplates):
+        pytest.xfail("Django's NOTPROVIDED branch calls format_html without arguments")
     assert_render(
         template="{% csrf_token %}",
         context={"csrf_token": "NOTPROVIDED"},
@@ -107,6 +111,8 @@ def test_csrf_token_missing_debug_warning(template_engine):
     else:
         expected = "A {% csrf_token %} was used in a template, but the context did not provide the value.  This is usually caused by not using RequestContext."
 
+    if VERSION >= (6, 0) and not isinstance(template_engine, RustyTemplates):
+        expected = expected.replace("value.  This", "value. This")
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         assert template.render({}) == ""

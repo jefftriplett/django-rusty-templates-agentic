@@ -1,3 +1,4 @@
+from django import VERSION
 import pytest
 from django.template import engines, TemplateSyntaxError
 from django.template.backends.django import DjangoTemplates
@@ -75,6 +76,21 @@ def assert_parse_error(request):
         rusty_exception=None,
     ):
         message = django_message if request.param == "django" else rusty_message
+        if VERSION >= (6, 0):
+            try:
+                reference = engines["django"].from_string(template)
+            except Exception as reference_error:
+                exception = type(reference_error)
+                rusty_exception = None
+                django_message = str(reference_error)
+                if request.param == "django":
+                    message = django_message
+            else:
+                # Expressions such as positive exponents became valid in 6.0.
+                assert engines[request.param].from_string(template).render(
+                    {}
+                ) == reference.render({})
+                return
         exception = (
             rusty_exception
             if request.param != "django" and rusty_exception
@@ -123,6 +139,24 @@ def assert_render_error(request):
             if request.param != "django" and rusty_exception
             else exception
         )
+        if VERSION >= (6, 0) and (request.param == "django" or "|center:" in template):
+            try:
+                expected_output = (
+                    engines["django"]
+                    .from_string(template)
+                    .render(context, request_factory)
+                )
+            except Exception as reference_error:
+                exception = type(reference_error)
+                message = str(reference_error)
+            else:
+                assert (
+                    engines[request.param]
+                    .from_string(template)
+                    .render(context, request_factory)
+                    == expected_output
+                )
+                return
         template = engines[request.param].from_string(template)
         with pytest.raises(exception) as exc_info:
             template.render(context, request_factory)

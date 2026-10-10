@@ -1,3 +1,4 @@
+from django import VERSION
 import pytest
 from django.template import TemplateSyntaxError
 from inline_snapshot import snapshot
@@ -24,8 +25,11 @@ def test_extends_locmem_loader(engine_class):
     with pytest.raises(TemplateSyntaxError) as exc_info:
         engine.get_template("template")
 
+    expected = "Empty variable tag on line 1"
+    if VERSION >= (6, 0) and engine_class != RustyTemplates:
+        expected = "Template: template, " + expected
     if engine_class == RustyTemplates:
-        assert str(exc_info.value) == "Empty variable tag on line 1"
+        assert str(exc_info.value) == expected
         assert exc_info.value.rusty_diagnostic == snapshot("""\
   × Empty variable tag
    ╭─[template:1:1]
@@ -35,4 +39,4 @@ def test_extends_locmem_loader(engine_class):
    ╰────
 """)
     else:
-        assert str(exc_info.value) == snapshot("Empty variable tag on line 1")
+        assert str(exc_info.value) == expected

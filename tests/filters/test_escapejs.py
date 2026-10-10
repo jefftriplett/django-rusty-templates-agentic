@@ -3,6 +3,7 @@ Test cases for the escapejs filter.
 The escapejs filter escapes characters for use in JavaScript strings.
 """
 
+from django import VERSION
 from inline_snapshot import snapshot
 
 import pytest
@@ -79,15 +80,23 @@ def test_escapejs_chained_with_lower(assert_render):
     assert_render(template, context, r"hello\u003Cworld\u003E")
 
 
-@pytest.mark.xfail(
-    reason="Django escapejs only escapes C0 controls, not C1 controls"
-    "See https://en.wikipedia.org/wiki/C0_and_C1_control_codes#C1_controls"
-)
 @pytest.mark.parametrize(
     "value,expected",
     [
-        pytest.param("\x7f", r"\u007F", id="c1_control_first_element"),
-        pytest.param("\x9f", r"\u009f", id="c1_control_last_element"),
+        pytest.param(
+            "\x7f",
+            r"\u007F",
+            id="c1_control_first_element",
+            marks=pytest.mark.xfail(
+                VERSION < (6, 1), reason="Django before 6.1 does not escape DEL"
+            ),
+        ),
+        pytest.param(
+            "\x9f",
+            r"\u009f",
+            id="c1_control_last_element",
+            marks=pytest.mark.xfail(reason="Django does not escape C1 controls"),
+        ),
     ],
 )
 def test_escapejs_c1_control_characters(assert_render, value, expected):

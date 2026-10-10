@@ -1,3 +1,4 @@
+from django import VERSION
 import pytest
 from django.http import QueryDict
 from django.template import Context, Engine as DjangoEngine, RequestContext
@@ -16,7 +17,11 @@ from django_rusty_templates import Engine
             {"params": QueryDict(""), "items": ["one", "two"]},
             "?a=one&amp;a=two",
         ),
-        ("{% querystring params %}", {"params": QueryDict("")}, ""),
+        (
+            "{% querystring params %}",
+            {"params": QueryDict("")},
+            "?" if VERSION >= (6, 0) else "",
+        ),
         ("{% querystring params a=None %}", {"params": QueryDict("a=1")}, "?"),
         (
             '{% querystring params b="a b" as result %}{{ result }}',

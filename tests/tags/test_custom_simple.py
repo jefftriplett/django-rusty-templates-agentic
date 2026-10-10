@@ -1,3 +1,5 @@
+from django import VERSION
+import pytest
 from inline_snapshot import snapshot
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -507,6 +509,10 @@ def test_simple_tag_missing_keyword_argument(assert_parse_error):
     )
 
 
+@pytest.mark.skipif(
+    VERSION >= (6, 1),
+    reason="Invalid tag signatures are rejected at registration since Django 6.1",
+)
 def test_simple_tag_missing_context(assert_parse_error):
     template = "{% load missing_context from invalid_tags %}{% missing_context %}"
     django_message = snapshot(

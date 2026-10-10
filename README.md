@@ -2,6 +2,8 @@
 
 Django Rusty Templates is an experimental reimplementation of Django's templating language in Rust.
 
+Template compatibility is tested against Django 5.2, 6.0, and 6.1. Django 6 requires Python 3.12 or newer. Partial templates, inheritance, and fully custom Python tags use Django's parser/node interoperability layer; compatible variables use the native renderer. See [CONTRIBUTING.md](CONTRIBUTING.md) for local conformance checks.
+
 ## Goals
 
 * 100% compatibility of rendered output.

@@ -1,3 +1,4 @@
+from django import VERSION
 from inline_snapshot import snapshot
 from textwrap import dedent
 
@@ -151,6 +152,12 @@ def test_render_for_loop_forloop_variable(assert_render):
     template = "{% autoescape off %}{% for x in y %}{{ forloop }}{% endfor %}{% endautoescape off %}"
     y = ["foo"]
     expected = "{'parentloop': {}, 'counter0': 0, 'counter': 1, 'revcounter': 1, 'revcounter0': 0, 'first': True, 'last': True}"
+    if VERSION >= (6, 0):
+        expected = expected.replace(
+            "'counter0': 0", "'length': 1, 'counter0': 0"
+        ).replace(
+            "&#x27;counter0&#x27;: 0", "&#x27;length&#x27;: 1, &#x27;counter0&#x27;: 0"
+        )
     assert_render(template=template, context={"y": y}, expected=expected)
 
 
@@ -160,6 +167,12 @@ def test_render_for_loop_forloop_variable_escaped(assert_render):
     expected = "{'parentloop': {}, 'counter0': 0, 'counter': 1, 'revcounter': 1, 'revcounter0': 0, 'first': True, 'last': True}".replace(
         "'", "&#x27;"
     )
+    if VERSION >= (6, 0):
+        expected = expected.replace(
+            "'counter0': 0", "'length': 1, 'counter0': 0"
+        ).replace(
+            "&#x27;counter0&#x27;: 0", "&#x27;length&#x27;: 1, &#x27;counter0&#x27;: 0"
+        )
     assert_render(template=template, context={"y": y}, expected=expected)
 
 
@@ -167,6 +180,12 @@ def test_render_for_loop_forloop_variable_nested(assert_render):
     template = "{% autoescape off %}{% for x in y %}{% for x in y %}{{ forloop }}{% endfor %}{% endfor %}{% endautoescape off %}"
     y = ["foo"]
     expected = "{'parentloop': {'parentloop': {}, 'counter0': 0, 'counter': 1, 'revcounter': 1, 'revcounter0': 0, 'first': True, 'last': True}, 'counter0': 0, 'counter': 1, 'revcounter': 1, 'revcounter0': 0, 'first': True, 'last': True}"
+    if VERSION >= (6, 0):
+        expected = expected.replace(
+            "'counter0': 0", "'length': 1, 'counter0': 0"
+        ).replace(
+            "&#x27;counter0&#x27;: 0", "&#x27;length&#x27;: 1, &#x27;counter0&#x27;: 0"
+        )
     assert_render(template=template, context={"y": y}, expected=expected)
 
 
@@ -174,6 +193,12 @@ def test_render_for_loop_parentloop_variable(assert_render):
     template = "{% autoescape off %}{% for x in y %}{% for x2 in y %}{{ forloop.parentloop }}{% endfor %}{% endfor %}{% endautoescape off %}"
     y = ["foo"]
     expected = "{'parentloop': {}, 'counter0': 0, 'counter': 1, 'revcounter': 1, 'revcounter0': 0, 'first': True, 'last': True}"
+    if VERSION >= (6, 0):
+        expected = expected.replace(
+            "'counter0': 0", "'length': 1, 'counter0': 0"
+        ).replace(
+            "&#x27;counter0&#x27;: 0", "&#x27;length&#x27;: 1, &#x27;counter0&#x27;: 0"
+        )
     assert_render(template=template, context={"y": y}, expected=expected)
 
 
