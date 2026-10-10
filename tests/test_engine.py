@@ -352,18 +352,19 @@ def test_valid_file_charset():
     )
 
 
-def test_invalid_file_charset():
-    with pytest.raises(ValueError) as exc_info:
-        RustyTemplates(
-            {
-                "OPTIONS": {"file_charset": "not-a-real-encoding"},
-                "NAME": "rust",
-                "DIRS": [],
-                "APP_DIRS": False,
-            }
-        )
-
-    assert "Unknown encoding: 'not-a-real-encoding'" == str(exc_info.value)
+def test_invalid_file_charset(tmp_path):
+    backend = RustyTemplates(
+        {
+            "OPTIONS": {"file_charset": "not-a-real-encoding"},
+            "NAME": "rust",
+            "DIRS": [tmp_path],
+            "APP_DIRS": False,
+        }
+    )
+    assert backend.engine.file_charset == "not-a-real-encoding"
+    (tmp_path / "test.html").write_text("Hello")
+    with pytest.raises(LookupError, match="unknown encoding: not-a-real-encoding"):
+        backend.get_template("test.html")
 
 
 def test_render_to_string_success():

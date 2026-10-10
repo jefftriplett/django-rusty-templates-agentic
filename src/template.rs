@@ -320,7 +320,7 @@ pub mod django_rusty_templates {
                 return contents.ok_or_else(|| TemplateDoesNotExist::new_err(origin.name.clone()));
             }
             let kwargs = PyDict::new(py);
-            kwargs.set_item("encoding", self.engine.encoding.name())?;
+            kwargs.set_item("encoding", &self.engine.file_charset)?;
             let file = py
                 .import("builtins")?
                 .getattr("open")?
@@ -527,6 +527,7 @@ pub mod django_rusty_templates {
         string_if_invalid: String,
         #[allow(dead_code)]
         encoding: &'static Encoding,
+        pub file_charset: String,
         builtins: Vec<String>,
         pub autoescape: bool,
         loaded_context_processors: Vec<Py<PyAny>>,
@@ -551,6 +552,7 @@ pub mod django_rusty_templates {
                 template_loaders: Mutex::new(Vec::new()),
                 string_if_invalid: String::new(),
                 encoding: encoding_rs::UTF_8,
+                file_charset: "utf-8".to_string(),
                 builtins: Vec::new(),
                 autoescape: false,
                 loaded_context_processors: Vec::new(),
@@ -663,11 +665,8 @@ pub mod django_rusty_templates {
                 .map(|name| import_string.call1((name,)).map(pyo3::Bound::unbind))
                 .collect::<PyResult<Vec<_>>>()?;
 
-            let Some(encoding) = Encoding::for_label(file_charset.as_bytes()) else {
-                return Err(PyValueError::new_err(format!(
-                    "Unknown encoding: '{file_charset}'"
-                )));
-            };
+            let encoding =
+                Encoding::for_label(file_charset.as_bytes()).unwrap_or(encoding_rs::UTF_8);
             let template_loaders = match loaders {
                 Some(_) if app_dirs => {
                     let err = ImproperlyConfigured::new_err(
@@ -704,6 +703,7 @@ pub mod django_rusty_templates {
                 template_loaders: template_loaders.into(),
                 string_if_invalid,
                 encoding,
+                file_charset,
                 builtins,
                 autoescape,
                 loaded_context_processors,
@@ -836,7 +836,7 @@ pub mod django_rusty_templates {
 
         #[getter]
         pub fn file_charset(&self) -> String {
-            self.engine.encoding.name().to_string()
+            self.engine.file_charset.clone()
         }
 
         #[getter]
@@ -1476,7 +1476,7 @@ user = User(["Lily"])
                 .unwrap()
                 .extract()
                 .unwrap();
-            assert_eq!(file_charset, "UTF-8");
+            assert_eq!(file_charset, "utf-8");
 
             // TODO: support this once #89 lands
             // let loaders: Vec<String> = py_engine.getattr("loaders").unwrap().extract().unwrap();

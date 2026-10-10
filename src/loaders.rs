@@ -122,6 +122,14 @@ impl FileSystemLoader {
                 ));
                 continue;
             };
+            if Encoding::for_label(engine.file_charset.as_bytes()).is_none() {
+                let contents = pyo3::types::PyBytes::new(py, &bytes)
+                    .call_method1("decode", (&engine.file_charset,))
+                    .and_then(|value| value.extract::<String>());
+                return Ok(contents.and_then(|contents| {
+                    Template::new(py, &contents, path, template_name, engine)
+                }));
+            }
             let (contents, encoding, malformed) = self.encoding.decode(&bytes);
             if malformed {
                 return Ok(Err(PyUnicodeError::new_err(format!(
