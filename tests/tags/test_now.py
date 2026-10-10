@@ -1,3 +1,5 @@
+from django import VERSION
+from django.template import TemplateSyntaxError
 import pytest
 import time_machine
 from datetime import datetime
@@ -211,6 +213,10 @@ def test_now_timezone_naive(assert_render):
 
 
 @time_machine.travel(FIXED_TIME)
+@pytest.mark.skipif(
+    VERSION >= (6, 2),
+    reason="Django 6.2 validates now arguments as expressions; covered by expression-error tests",
+)
 def test_now_single_quote_incomplete(assert_render):
     assert_render(
         template="{% now ' %}",
@@ -220,6 +226,10 @@ def test_now_single_quote_incomplete(assert_render):
 
 
 @time_machine.travel(FIXED_TIME)
+@pytest.mark.skipif(
+    VERSION >= (6, 2),
+    reason="Django 6.2 validates now arguments as expressions; covered by expression-error tests",
+)
 def test_now_double_quote_incomplete(assert_render):
     assert_render(
         template='{% now " %}',
@@ -233,7 +243,7 @@ def test_now_numeric_format(assert_render):
     assert_render(
         template="{% now 123 %}",
         context={},
-        expected=django_format(FIXED_TIME, "2"),
+        expected="123" if VERSION >= (6, 2) else django_format(FIXED_TIME, "2"),
     )
 
 
@@ -463,11 +473,17 @@ def test_now_format_from_context(assert_render):
     assert_render(
         template="{% now format_var %}",
         context={"format_var": "j n Y"},
-        expected="2026Thu, 08 Jan 2026 12:00:00 +000001p.m.31_vp.m.",
+        expected="8 1 2026"
+        if VERSION >= (6, 2)
+        else "2026Thu, 08 Jan 2026 12:00:00 +000001p.m.31_vp.m.",
     )
 
 
 @time_machine.travel(FIXED_TIME)
+@pytest.mark.skipif(
+    VERSION >= (6, 2),
+    reason="Django 6.2 validates now arguments as expressions; covered by expression-error tests",
+)
 def test_now_invalid_remainder(assert_render):
     template = '{% now "Y"invalid %}'
     assert_render(
@@ -483,6 +499,10 @@ def test_now_invalid_variable_name(assert_render):
 
 
 @time_machine.travel(FIXED_TIME)
+@pytest.mark.skipif(
+    VERSION >= (6, 2),
+    reason="Django 6.2 validates now arguments as expressions; covered by expression-error tests",
+)
 def test_now_invalid_variable_name_error(assert_render):
     template = "{% now invalid-name %}"
     assert_render(
@@ -493,6 +513,10 @@ def test_now_invalid_variable_name_error(assert_render):
 
 
 @time_machine.travel(FIXED_TIME)
+@pytest.mark.skipif(
+    VERSION >= (6, 2),
+    reason="Django 6.2 validates now arguments as expressions; covered by expression-error tests",
+)
 def test_now_incomplete_translated_string(template_engine, assert_render):
     template = '{% now _("j n Y %}'
     if template_engine.name != "django":
@@ -505,6 +529,10 @@ def test_now_incomplete_translated_string(template_engine, assert_render):
 
 
 @time_machine.travel(FIXED_TIME)
+@pytest.mark.skipif(
+    VERSION >= (6, 2),
+    reason="Django 6.2 validates now arguments as expressions; covered by expression-error tests",
+)
 def test_now_missing_translated_string(assert_render):
     template = "{% now _() %}"
     assert_render(
@@ -549,3 +577,57 @@ def test_now_with_pre_initialized_context(assert_render):
         context={"some_var": "some_val"},
         expected=str(FIXED_TIME.year),
     )
+
+
+@pytest.mark.skipif(
+    VERSION < (6, 2), reason="Dynamic now formats were added in Django 6.2"
+)
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{% now ' %}",
+        '{% now " %}',
+        '{% now "Y"invalid %}',
+        "{% now invalid-name %}",
+        '{% now _("j n Y %}',
+        "{% now _() %}",
+    ],
+)
+def test_now_invalid_format_expression(template_engine, source):
+    with pytest.raises(
+        StopIteration if source == '{% now _("j n Y %}' else TemplateSyntaxError
+    ):
+        template_engine.from_string(source)
+
+
+@pytest.mark.skipif(
+    VERSION < (6, 2), reason="Dynamic now formats were added in Django 6.2"
+)
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ("{% now fmt %}", "8 1 2026"),
+        ('{% now ""|add:fmt %}', "8 1 2026"),
+        ("{% now fmt as date %}-{{ date }}-", "-8 1 2026-"),
+    ],
+)
+@time_machine.travel(FIXED_TIME)
+def test_now_dynamic_format_expression(assert_render, source, expected):
+    assert_render(source, {"fmt": "j n Y"}, expected)
+
+
+@pytest.mark.skipif(
+    VERSION < (6, 2), reason="Dynamic now formats were added in Django 6.2"
+)
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ("{% now fmt %}", "&lt;b&gt;"),
+        ('{% now ""|add:fmt %}', "&lt;b&gt;"),
+        ("{% now fmt as date %}{{ date }}", "&lt;b&gt;"),
+        ("{% autoescape off %}{% now fmt %}{% endautoescape %}", "<b>"),
+    ],
+)
+@time_machine.travel(FIXED_TIME)
+def test_now_dynamic_format_escaping(assert_render, source, expected):
+    assert_render(source, {"fmt": r"\<\b\>"}, expected)

@@ -1416,6 +1416,7 @@ pub mod django_rusty_templates {
                             "partialdef",
                             "partial",
                             "Django 6.1 variable lookup",
+                            "Django 6.2 now expressions",
                         ]
                         .iter()
                         .any(|tag| {
@@ -1487,6 +1488,7 @@ pub mod django_rusty_templates {
                             "partialdef",
                             "partial",
                             "Django 6.1 variable lookup",
+                            "Django 6.2 now expressions",
                         ]
                         .iter()
                         .any(|tag| {
