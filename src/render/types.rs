@@ -24,6 +24,7 @@ use dtl_lexer::types::{At, TemplateString};
 
 static DJANGO_CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static RENDER_VALUE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static MARK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -196,6 +197,31 @@ impl Context {
 
     pub fn get(&self, key: &str) -> Option<&Py<PyAny>> {
         self.context.get(key)?.last()
+    }
+
+    pub fn resolve_root<'py>(
+        &self,
+        py: Python<'py>,
+        key: &str,
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
+        if let Some(context) = &self.formatting_context {
+            return match context.bind(py).get_item(key) {
+                Ok(value) => Ok(Some(value)),
+                Err(error) if error.is_instance_of::<PyKeyError>(py) => Ok(None),
+                Err(error) => Err(error),
+            };
+        }
+        Ok(self.get(key).map(|value| value.bind(py).clone()))
+    }
+
+    pub fn refresh_formatting_flags(&mut self, py: Python<'_>) -> PyResult<()> {
+        if let Some(context) = &self.formatting_context {
+            let context = context.bind(py);
+            self.autoescape = context.getattr("autoescape")?.extract()?;
+            self.use_l10n = context.getattr("use_l10n")?.extract()?;
+            self.use_tz = context.getattr("use_tz")?.extract()?;
+        }
+        Ok(())
     }
 
     pub fn display(&self, py: Python<'_>) -> String {
@@ -649,9 +675,32 @@ fn render_value_in_context<'t>(value: ContentString<'t>, context: &Context) -> C
 impl<'t, 'py> Content<'t, 'py> {
     pub fn render(self, context: &Context) -> PyResult<Cow<'t, str>> {
         let output = match self {
+            Self::Py(content)
+                if context.format_values
+                    && context.formatting_context.is_some()
+                    && content.is_instance_of::<PyString>() =>
+            {
+                let py = content.py();
+                let autoescape: bool = context
+                    .django_context(py)?
+                    .getattr("autoescape")?
+                    .extract()?;
+                let rendered = if autoescape {
+                    CONDITIONAL_ESCAPE
+                        .import(py, "django.utils.html", "conditional_escape")?
+                        .call1((content,))?
+                } else {
+                    content.str()?.into_any()
+                };
+                return Ok(Cow::Owned(rendered.extract()?));
+            }
             // Strings need escaping/safety handling, but neither localization
             // nor timezone conversion. Avoid building a Django context for them.
-            Self::Py(content) if context.format_values && !content.is_instance_of::<PyString>() => {
+            Self::Py(content)
+                if context.format_values
+                    && (context.formatting_context.is_some()
+                        || !content.is_instance_of::<PyString>()) =>
+            {
                 let py = content.py();
                 let rendered = RENDER_VALUE
                     .import(py, "django.template.base", "render_value_in_context")?

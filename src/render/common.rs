@@ -146,10 +146,10 @@ impl Resolve for Variable {
     ) -> ResolveResult<'t, 'py> {
         let mut parts = self.parts(template);
         let (first, mut object_at) = parts.next().expect("Variable names cannot be empty");
-        let Some(variable) = context.get(first) else {
+        let Some(variable) = context.resolve_root(py, first)? else {
             return Ok(None);
         };
-        let mut variable = match resolve_callable(variable.bind(py).clone()) {
+        let mut variable = match resolve_callable(variable) {
             Ok(Some(variable)) => variable,
             Ok(None) => return Ok(Some(Content::Py(context.invalid_value(py, None)?))),
             Err(error) if silent_failure(&error, py) => {
@@ -183,6 +183,7 @@ impl Resolve for Variable {
             };
             object_at.1 += key_at.1 + 1;
         }
+        context.refresh_formatting_flags(py)?;
         Ok(Some(Content::Py(variable)))
     }
 }

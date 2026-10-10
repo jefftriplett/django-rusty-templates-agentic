@@ -5,6 +5,7 @@ from django.utils.safestring import mark_safe
 from django.utils import translation
 
 from django_rusty_templates import Engine
+from django_rusty_templates.interop import compile_template
 
 
 class HtmlString(str):
@@ -28,7 +29,10 @@ class DisplayString(str):
     ],
 )
 @pytest.mark.parametrize("autoescape", [True, False])
-def test_string_rendering_matches_django_across_escape_scopes(value, autoescape):
+@pytest.mark.parametrize("interop", [False, True])
+def test_string_rendering_matches_django_across_escape_scopes(
+    value, autoescape, interop
+):
     source = (
         "{{ value }}|{% autoescape off %}{{ value }}{% endautoescape %}|"
         "{% autoescape on %}{{ value }}{% endautoescape %}|{{ value }}"
@@ -40,7 +44,9 @@ def test_string_rendering_matches_django_across_escape_scopes(value, autoescape)
             .from_string(source)
             .render(Context({"value": value}, **kwargs))
         )
-        assert (
-            Engine().from_string(source).render(Context({"value": value}, **kwargs))
-            == expected
+        template = (
+            compile_template(source, Engine())
+            if interop
+            else Engine().from_string(source)
         )
+        assert template.render(Context({"value": value}, **kwargs)) == expected
