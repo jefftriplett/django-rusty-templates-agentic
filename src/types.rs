@@ -42,6 +42,7 @@ pub struct Argument {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ForVariableName {
+    Length,
     Counter,
     Counter0,
     RevCounter,

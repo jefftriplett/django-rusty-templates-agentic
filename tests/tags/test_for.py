@@ -1252,3 +1252,14 @@ def test_invalid_variable_name_with_filter_arg_in_unpack(assert_parse_error):
     assert_parse_error(
         template=template, django_message=django_message, rusty_message=rusty_message
     )
+
+
+@pytest.mark.parametrize("values", [[1, 2, 3], (1, 2), "abc", []])
+@pytest.mark.parametrize("reverse", ["", " reversed"])
+def test_native_forloop_length(values, reverse):
+    from django_rusty_templates import Engine
+
+    template = Engine().from_string(
+        "{% for item in values" + reverse + " %}{{ forloop.length }}{% endfor %}"
+    )
+    assert template.render({"values": values}) == str(len(values)) * len(values)
