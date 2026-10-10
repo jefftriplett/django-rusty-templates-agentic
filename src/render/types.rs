@@ -649,7 +649,9 @@ fn render_value_in_context<'t>(value: ContentString<'t>, context: &Context) -> C
 impl<'t, 'py> Content<'t, 'py> {
     pub fn render(self, context: &Context) -> PyResult<Cow<'t, str>> {
         let output = match self {
-            Self::Py(content) if context.format_values => {
+            // Strings need escaping/safety handling, but neither localization
+            // nor timezone conversion. Avoid building a Django context for them.
+            Self::Py(content) if context.format_values && !content.is_instance_of::<PyString>() => {
                 let py = content.py();
                 let rendered = RENDER_VALUE
                     .import(py, "django.template.base", "render_value_in_context")?
