@@ -18,16 +18,26 @@ Releases use calendar versioning: `YYYY.MM.INCR`, with the increment starting at
 
 ## Installation
 
-Install this fork from its GitHub repository or a local checkout. These instructions do not require a PyPI release.
+Install the published package from [PyPI](https://pypi.org/project/django-rusty-templates-agentic/):
+
+```sh
+pip install django-rusty-templates-agentic
+```
 
 Because both distributions provide the same Python package, uninstall the original before installing this fork in an existing environment:
 
 ```sh
 pip uninstall django-rusty-templates
+pip install django-rusty-templates-agentic
+```
+
+For a source installation from GitHub:
+
+```sh
 pip install git+https://github.com/jefftriplett/django-rusty-templates-agentic.git
 ```
 
-For a local installation:
+Or install from a local checkout:
 
 ```sh
 git clone https://github.com/jefftriplett/django-rusty-templates-agentic.git
@@ -35,7 +45,7 @@ cd django-rusty-templates-agentic
 pip install .
 ```
 
-Source installations require a [Rust compiler](https://rustup.rs/). To switch back to upstream, uninstall `django-rusty-templates-agentic` before installing the original distribution. Your imports and backend setting stay the same.
+Prebuilt wheels are used when available for your platform and Python version. Installing from a source distribution or checkout requires a [Rust compiler](https://rustup.rs/). To switch back to upstream, uninstall `django-rusty-templates-agentic` before installing the original distribution. Your imports and backend setting stay the same.
 
 ## Usage
 
