@@ -1,11 +1,15 @@
 [build-system]
-requires = ["maturin>=1.9.3,<2.0"]
+requires = ["maturin>=1.15,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "django-rusty-templates-agentic"
 description = "An agentic fork of Django Rusty Templates with a compatible Python API"
 readme = "README.md"
+authors = [
+    { name = "Lily Foote" },
+    { name = "Jeff Triplett" },
+]
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
 dependencies = ["Django>=5.2,<7"]
@@ -40,7 +44,7 @@ DJANGO_SETTINGS_MODULE = "tests.settings"
 dev = [
     "django~=5.2.9",
     "hypothesis",
-    "maturin>=1.9.3,<2.0",
+    "maturin>=1.15,<2.0",
     "pytest>=9",
     "pytest-django",
     "pytest-cov",
