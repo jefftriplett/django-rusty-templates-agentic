@@ -851,7 +851,7 @@ pub struct CycleId(pub(crate) usize);
 pub enum Tag {
     Block {
         name: String,
-        nodes: Vec<TokenTree>,
+        nodes: Arc<Vec<TokenTree>>,
     },
     Extends {
         at: At,
@@ -967,9 +967,9 @@ impl TokenTree {
     /// Child lists used to discover inheritance blocks without a Python tree.
     pub fn child_nodes(&self) -> Vec<&[Self]> {
         match self {
+            Self::Tag(Tag::Block { nodes, .. }) => vec![nodes],
             Self::Tag(
-                Tag::Block { nodes, .. }
-                | Tag::Extends { nodes, .. }
+                Tag::Extends { nodes, .. }
                 | Tag::Autoescape { nodes, .. }
                 | Tag::With { nodes, .. }
                 | Tag::FilterBlock { nodes, .. }
@@ -2342,7 +2342,10 @@ impl<'t, 'py> Parser<'t, 'py> {
                 );
             }
         }
-        Ok(TokenTree::Tag(Tag::Block { name, nodes }))
+        Ok(TokenTree::Tag(Tag::Block {
+            name,
+            nodes: Arc::new(nodes),
+        }))
     }
 
     fn parse_extends(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {

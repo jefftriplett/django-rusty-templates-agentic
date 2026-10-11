@@ -726,18 +726,30 @@ impl Render for Tag {
         context: &mut Context,
     ) -> RenderResult<'t> {
         Ok(match self {
-            Self::Block { name, .. } => {
-                let blocks = context
-                    .inheritance_blocks
-                    .as_ref()
-                    .expect("Block rendering requires compiled inheritance blocks");
-                Cow::Owned(
-                    blocks
-                        .bind(py)
-                        .get_item(name)?
-                        .call_method1("render", (context.django_context(py)?,))?
-                        .extract()?,
-                )
+            Self::Block { name, nodes } => {
+                if let Some(blocks) = &context.python_blocks {
+                    Cow::Owned(
+                        blocks
+                            .bind(py)
+                            .get_item(name)?
+                            .call_method1("render", (context.django_context(py)?,))?
+                            .extract()?,
+                    )
+                } else {
+                    let owner = context
+                        .current_template
+                        .as_ref()
+                        .expect("inside a template")
+                        .clone();
+                    context.render_block(
+                        py,
+                        super::inheritance::BlockEntry {
+                            name: name.clone(),
+                            owner,
+                            nodes: nodes.clone(),
+                        },
+                    )?
+                }
             }
             Self::Extends {
                 at,
@@ -753,23 +765,19 @@ impl Render for Tag {
                         .resolve(py, template, context, ResolveFailures::Raise)?
                         .map_or_else(|| PyString::new(py, "").into_any(), |value| value.to_py(py))
                 };
-                let blocks = context
-                    .inheritance_blocks
-                    .as_ref()
-                    .expect("Extends rendering requires compiled inheritance blocks");
-                Cow::Owned(
-                    py.import("django_rusty_templates.inheritance")?
-                        .getattr("render_extends")?
-                        .call1((
-                            parent_value,
-                            parent_token,
-                            !matches!(parent, TagElement::Text(_)),
-                            blocks.bind(py),
-                            context.django_context(py)?,
-                        ))
-                        .map_err(|error| error.annotate(py, *at, "here", template))?
-                        .extract()?,
-                )
+                context
+                    .render_parent(
+                        py,
+                        parent_value,
+                        parent_token,
+                        !matches!(parent, TagElement::Text(_)),
+                    )
+                    .map_err(|error| match error {
+                        PyRenderError::PyErr(error) => {
+                            error.annotate(py, *at, "here", template).into()
+                        }
+                        error => error,
+                    })?
             }
             Self::Regroup(group) => {
                 let results = PyList::empty(py);

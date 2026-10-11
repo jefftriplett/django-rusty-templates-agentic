@@ -40,7 +40,10 @@ fn has_truthy_attr(variable: &Bound<'_, PyAny>, attr: &Bound<'_, PyString>) -> P
     }
 }
 
-fn resolve_callable(variable: Bound<'_, PyAny>) -> PyResult<Option<Bound<'_, PyAny>>> {
+fn resolve_callable<'py>(
+    variable: Bound<'py, PyAny>,
+    context: &mut Context,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     if !variable.is_callable() {
         return Ok(Some(variable));
     }
@@ -51,7 +54,7 @@ fn resolve_callable(variable: Bound<'_, PyAny>) -> PyResult<Option<Bound<'_, PyA
     if has_truthy_attr(&variable, intern!(py, "alters_data"))? {
         return Ok(None);
     }
-    match variable.call0() {
+    match context.call_variable(py, &variable) {
         Ok(value) => Ok(Some(value)),
         Err(error) if error.is_instance_of::<PyTypeError>(py) => {
             let signature = SIGNATURE
@@ -158,12 +161,36 @@ impl Resolve for Variable {
         context: &mut Context,
         failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
-        let mut parts = self.parts(template);
+        let mut parts = self.parts(template).peekable();
         let (first, mut object_at) = parts.next().expect("Variable names cannot be empty");
         let Some(variable) = context.resolve_root(py, first)? else {
             return Ok(None);
         };
-        let mut variable = match resolve_callable(variable) {
+        let variable = if variable.is_instance_of::<super::inheritance::BlockMarker>()
+            && parts.peek().is_some_and(|(part, _)| *part == "super")
+        {
+            parts.next();
+            let marker = variable
+                .extract::<PyRef<'_, super::inheritance::BlockMarker>>()
+                .map_err(PyErr::from)?
+                .clone();
+            let output = context
+                .render_super(py, &marker)
+                .map_err(|error| match error {
+                    crate::error::PyRenderError::PyErr(error) => {
+                        error.annotate(py, self.at, "here", template).into()
+                    }
+                    error => error,
+                })?;
+            let content = Content::String(ContentString::HtmlSafe(Cow::Owned(output)));
+            if parts.peek().is_none() {
+                return Ok(Some(content));
+            }
+            content.to_py(py)
+        } else {
+            variable
+        };
+        let mut variable = match resolve_callable(variable, context) {
             Ok(Some(variable)) => variable,
             Ok(None) => return Ok(Some(Content::Py(context.invalid_value(py, None)?))),
             Err(error) if silent_failure(&error, py) => {
@@ -173,7 +200,7 @@ impl Resolve for Variable {
         };
         for (part, key_at) in parts {
             let resolved = lookup_part(variable.clone(), part).and_then(|value| match value {
-                Some(value) => resolve_callable(value),
+                Some(value) => resolve_callable(value, context),
                 None => Ok(None),
             });
             variable = match resolved {
@@ -227,7 +254,9 @@ impl Resolve for ForVariable {
         context: &mut Context,
         _failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
-        if context.formatting_context.is_some() {
+        if context.formatting_context.is_some()
+            || context.loop_dictionary_cached(py, self.parent_count)
+        {
             let Some(mut value) = context.resolve_root(py, "forloop")? else {
                 return Ok(None);
             };
@@ -253,7 +282,7 @@ impl Resolve for ForVariable {
                 };
                 value = part;
             }
-            let result = resolve_callable(value)?.map(Content::Py);
+            let result = resolve_callable(value, context)?.map(Content::Py);
             context.refresh_formatting_flags(py)?;
             return Ok(result);
         }

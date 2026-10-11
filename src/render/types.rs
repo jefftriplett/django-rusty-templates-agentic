@@ -17,6 +17,7 @@ use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
 use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyType};
 
+use super::inheritance::{BlockEntry, BlockMarker};
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::parse::CycleId;
 use crate::template::django_rusty_templates::{Engine, Template, get_template, select_template};
@@ -29,10 +30,21 @@ static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static MARK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ForLoop {
     count: usize,
     len: usize,
+    dictionary: Arc<PyOnceLock<Py<PyDict>>>,
+}
+
+impl std::fmt::Debug for ForLoop {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ForLoop")
+            .field("count", &self.count)
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ForLoop {
@@ -82,7 +94,13 @@ pub struct Context {
     pub format_values: bool,
     pub instrument_render: bool,
     pub formatting_context: Option<Py<PyAny>>,
-    pub inheritance_blocks: Option<Py<PyAny>>,
+    // Weak reference to an input Context, used only while calling Python code.
+    pub callback_input: Option<Arc<Py<PyAny>>>,
+    pub inheritance_blocks: HashMap<String, Vec<BlockEntry>>,
+    pub python_blocks: Option<Py<PyAny>>,
+    pub current_template: Option<Arc<Template>>,
+    pub root_template: Option<Arc<Template>>,
+    pub inheritance_history: Vec<Arc<Py<PyAny>>>,
     // Share unchanged values across Python context snapshots. Each snapshot
     // owns a small overlay so later loop iterations cannot alter earlier ones.
     django_context_base: RefCell<Option<Py<PyDict>>>,
@@ -90,7 +108,7 @@ pub struct Context {
     pub string_if_invalid: String,
     names: Vec<HashSet<String>>,
     include_cache: HashMap<(CycleId, IncludeTemplateKey), Arc<Template>>,
-    cycle_indices: HashMap<CycleId, usize>,
+    pub(crate) cycle_indices: HashMap<CycleId, usize>,
     changed_states: Vec<HashMap<CycleId, Py<PyAny>>>,
     assigned: HashSet<String>,
     cycle_variables: HashSet<String>,
@@ -112,7 +130,12 @@ impl Context {
             format_values: false,
             instrument_render: true,
             formatting_context: None,
-            inheritance_blocks: None,
+            callback_input: None,
+            inheritance_blocks: HashMap::new(),
+            python_blocks: None,
+            current_template: None,
+            root_template: None,
+            inheritance_history: Vec::new(),
             django_context_base: RefCell::new(None),
             django_context_changes: HashSet::new(),
             string_if_invalid: String::new(),
@@ -140,7 +163,12 @@ impl Context {
             format_values: self.format_values,
             instrument_render: self.instrument_render,
             formatting_context: self.formatting_context.as_ref().map(|v| v.clone_ref(py)),
-            inheritance_blocks: self.inheritance_blocks.as_ref().map(|v| v.clone_ref(py)),
+            callback_input: self.callback_input.clone(),
+            inheritance_blocks: self.inheritance_blocks.clone(),
+            python_blocks: self.python_blocks.as_ref().map(|v| v.clone_ref(py)),
+            current_template: self.current_template.clone(),
+            root_template: self.root_template.clone(),
+            inheritance_history: self.inheritance_history.clone(),
             django_context_base: RefCell::new(None),
             django_context_changes: HashSet::new(),
             string_if_invalid: self.string_if_invalid.clone(),
@@ -217,6 +245,23 @@ impl Context {
         }
         let base = cached_base.as_ref().expect("base was initialized").bind(py);
         let overlay = PyDict::new(py);
+        if !self.loops.is_empty() {
+            overlay.set_item("forloop", self.loop_dictionary(py, 0)?)?;
+        }
+        if let Some(value) = self.get("block")
+            && let Ok(marker) = value.bind(py).extract::<PyRef<'_, BlockMarker>>()
+        {
+            overlay.set_item(
+                "block",
+                Bound::new(
+                    py,
+                    super::inheritance::BlockCallback {
+                        marker: marker.clone(),
+                        context: Arc::new(Mutex::new(self.clone_ref(py))),
+                    },
+                )?,
+            )?;
+        }
         let mut trimmed_base = None;
         for key in &self.django_context_changes {
             if let Some(value) = self.get(key) {
@@ -243,6 +288,13 @@ impl Context {
             .getattr("dicts")?
             .cast::<pyo3::types::PyList>()?
             .append(overlay)?;
+        if let Some(root) = &self.root_template {
+            context.setattr("template", Py::new(py, root.as_ref().clone())?)?;
+            context.setattr("template_name", root.template_name.as_deref())?;
+        }
+        if let Some(request) = &self.request {
+            context.setattr("request", request)?;
+        }
         Ok(context)
     }
 
@@ -261,6 +313,9 @@ impl Context {
                 Err(error) if error.is_instance_of::<PyKeyError>(py) => Ok(None),
                 Err(error) => Err(error),
             };
+        }
+        if key == "forloop" && !self.loops.is_empty() {
+            return self.loop_dictionary(py, 0).map(Some);
         }
         Ok(self.get(key).map(|value| value.bind(py).clone()))
     }
@@ -314,8 +369,21 @@ impl Context {
             context.bind(value.py()).set_item(&key, &value)?;
         }
         self.assigned.insert(key.clone());
-        self._insert(key, value, true);
+        let replace = self
+            .names
+            .last_mut()
+            .is_none_or(|names| !names.insert(key.clone()));
+        self._insert(key, value, replace);
         Ok(())
+    }
+
+    pub(crate) fn clear_variable(&mut self, key: &str) {
+        if let Some(values) = self.context.get_mut(key) {
+            values.clear();
+        }
+        if self.django_context_base.get_mut().is_some() {
+            self.django_context_changes.insert(key.to_string());
+        }
     }
 
     pub fn push_variable(&mut self, name: String, value: Bound<'_, PyAny>, index: usize) {
@@ -405,7 +473,11 @@ impl Context {
     }
 
     pub fn push_for_loop(&mut self, len: usize) {
-        self.loops.push(ForLoop { count: 0, len });
+        self.loops.push(ForLoop {
+            count: 0,
+            len,
+            dictionary: Arc::new(PyOnceLock::new()),
+        });
         self.changed_states.push(HashMap::new());
     }
 
@@ -429,9 +501,60 @@ impl Context {
         self.loops.get(index)
     }
 
+    pub fn loop_dictionary_cached(&self, py: Python<'_>, depth: usize) -> bool {
+        self.get_for_loop(depth)
+            .is_some_and(|loop_| loop_.dictionary.get(py).is_some())
+    }
+
+    fn fill_loop_dictionary(loop_: &ForLoop, dict: &Bound<'_, PyDict>) -> PyResult<()> {
+        dict.set_item("counter", loop_.counter())?;
+        dict.set_item("counter0", loop_.counter0())?;
+        dict.set_item("revcounter", loop_.rev_counter())?;
+        dict.set_item("revcounter0", loop_.rev_counter0())?;
+        dict.set_item("first", loop_.first())?;
+        dict.set_item("last", loop_.last())?;
+        Ok(())
+    }
+
+    pub fn loop_dictionary<'py>(
+        &self,
+        py: Python<'py>,
+        depth: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let Some(loop_) = self.get_for_loop(depth) else {
+            return Ok(self.get("forloop").map_or_else(
+                || PyDict::new(py).into_any(),
+                |value| value.bind(py).clone(),
+            ));
+        };
+        loop_
+            .dictionary
+            .get_or_try_init(py, || {
+                let dict = PyDict::new(py);
+                dict.set_item("parentloop", self.loop_dictionary(py, depth + 1)?)?;
+                Self::fill_loop_dictionary(loop_, &dict)?;
+                if py
+                    .import("django")?
+                    .getattr("VERSION")?
+                    .get_item(0)?
+                    .extract::<u8>()?
+                    >= 6
+                {
+                    dict.set_item("length", loop_.length())?;
+                }
+                Ok(dict.unbind())
+            })
+            .map(|dict| dict.bind(py).clone().into_any())
+    }
+
     /// Expose native loop scopes to Python callbacks on the live Django context.
     pub fn sync_loop_context(&self, py: Python<'_>, first: bool) -> PyResult<()> {
         let Some(context) = &self.formatting_context else {
+            if let Some(loop_) = self.loops.last()
+                && let Some(dict) = loop_.dictionary.get(py)
+            {
+                Self::fill_loop_dictionary(loop_, dict.bind(py))?;
+            }
             return Ok(());
         };
         let context = context.bind(py);
@@ -590,7 +713,13 @@ impl Context {
             self._insert(key, value, true);
             return Ok(());
         }
-        self.insert(key, value)
+        if self.get(&key).is_some() {
+            self.assigned.insert(key.clone());
+            self._insert(key, value, true);
+            Ok(())
+        } else {
+            self.insert(key, value)
+        }
     }
 
     pub fn merge_render_state(
@@ -610,6 +739,9 @@ impl Context {
         self.cycle_indices = scoped.cycle_indices;
         self.changed_states = scoped.changed_states;
         self.include_cache = scoped.include_cache;
+        self.autoescape = scoped.autoescape;
+        self.use_l10n = scoped.use_l10n;
+        self.use_tz = scoped.use_tz;
         Ok(())
     }
 
@@ -686,19 +818,19 @@ impl PyContext {
             .map(|request| request.bind(py).clone())
     }
 
+    #[pyo3(signature = (key, fallback=None))]
     fn get<'py>(
         &self,
         py: Python<'py>,
         key: String,
-        fallback: Bound<'py, PyAny>,
-    ) -> Bound<'py, PyAny> {
-        let guard = self
-            .context
-            .lock_py_attached(py)
-            .expect("Mutex should not be poisoned");
-        match guard.get(&key) {
-            Some(value) => value.bind(py).clone(),
-            None => fallback,
+        fallback: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        match self.__getitem__(py, key) {
+            Ok(value) => Ok(value),
+            Err(error) if error.is_instance_of::<PyKeyError>(py) => {
+                Ok(fallback.unwrap_or_else(|| py.None().into_bound(py)))
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -715,8 +847,19 @@ impl PyContext {
             .context
             .lock_py_attached(py)
             .expect("Mutex should not be poisoned");
-        match guard.get(&key) {
-            Some(value) => Ok(value.bind(py).clone()),
+        match guard.resolve_root(py, &key)? {
+            Some(value) if value.is_instance_of::<BlockMarker>() => {
+                let marker = value.extract::<PyRef<'_, BlockMarker>>()?.clone();
+                Ok(Bound::new(
+                    py,
+                    super::inheritance::BlockCallback {
+                        marker,
+                        context: self.context.clone(),
+                    },
+                )?
+                .into_any())
+            }
+            Some(value) => Ok(value),
             None => Err(PyKeyError::new_err(key)),
         }
     }
@@ -731,9 +874,6 @@ impl PyContext {
             .context
             .lock_py_attached(py)
             .expect("Mutex should not be poisoned");
-        if let Some(last) = guard.names.last_mut() {
-            last.insert(key.clone());
-        }
         guard.insert(key, value)
     }
 }
