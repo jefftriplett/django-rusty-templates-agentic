@@ -38,6 +38,34 @@ pub mod django_rusty_templates {
 
     static IMPORT_STRING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
+    /// Experimental JSON-only runtime sharing its parser/renderer with browser Wasm.
+    #[pyclass]
+    pub struct PortableEngine {
+        inner: dtl_core::Engine,
+    }
+
+    #[pymethods]
+    impl PortableEngine {
+        #[new]
+        fn new() -> Self {
+            Self {
+                inner: dtl_core::Engine::new(),
+            }
+        }
+
+        fn add_template(&mut self, name: &str, source: &str) -> PyResult<()> {
+            self.inner
+                .add_template(name, source)
+                .map_err(PyValueError::new_err)
+        }
+
+        fn render_json(&self, name: &str, context_json: &str) -> PyResult<String> {
+            self.inner
+                .render(name, context_json)
+                .map_err(PyValueError::new_err)
+        }
+    }
+
     trait WithSourceCode {
         fn with_source_code(
             err: miette::Report,

@@ -5,9 +5,9 @@ from django.template.backends.base import BaseEngine
 from django.template.backends.django import Template as BackendTemplate
 from django.template.backends.django import DjangoTemplates, get_installed_libraries
 
-from .django_rusty_templates import Engine, Template
+from .django_rusty_templates import Engine, PortableEngine, Template
 
-__all__ = ["RustyTemplates", "Template"]
+__all__ = ["RustyTemplates", "Template", "PortableEngine"]
 
 # Preserve Django's implementation when conformance runners replace Engine.
 _django_get_template = DjangoEngine.get_template

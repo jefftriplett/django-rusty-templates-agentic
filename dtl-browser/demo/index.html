@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rusty Templates · Browser prototype</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { max-width: 1100px; margin: 3rem auto; padding: 0 1rem; }
+  h1 { margin-bottom: .4rem; } p { line-height: 1.6; }
+  .editors { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  label { display: block; font-weight: 600; }
+  textarea { box-sizing: border-box; width: 100%; min-height: 220px; padding: .8rem; margin: .5rem 0 1rem; font: 14px/1.6 monospace; }
+  button { padding: .7rem 1rem; cursor: pointer; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 1rem; background: light-dark(#f2f4f8, #202630); }
+  iframe { width: 100%; min-height: 180px; border: 1px solid #888; background: white; }
+  #status { min-height: 1.5rem; } #status[data-error] { color: light-dark(#a31515, #ff9797); }
+  @media (max-width: 700px) { .editors { grid-template-columns: 1fr; } }
+</style>
+<h1>Rusty Templates in your browser</h1>
+<p>Use the same Django-style template bundle on the server and in your browser. This prototype runs locally in WebAssembly, without Python or a server render.</p>
+<div class="editors">
+  <section>
+    <label for="template">Page template</label>
+    <textarea id="template"></textarea>
+    <label for="base">base.html</label>
+    <textarea id="base"></textarea>
+    <label for="card">card.html</label>
+    <textarea id="card"></textarea>
+  </section>
+  <section>
+    <label for="context">JSON context</label>
+    <textarea id="context"></textarea>
+    <p>Supported: variables, dotted lookups, filters, <code>if/elif/else</code>, <code>for/empty</code>, includes, and inheritance with blocks and <code>block.super</code>. Python custom tags, translation and Django formatting are outside this prototype.</p>
+  </section>
+</div>
+<button id="render" disabled>Loading renderer…</button>
+<p id="status" role="status" aria-live="polite"></p>
+<h2>Preview</h2>
+<iframe id="preview" title="Rendered template preview" sandbox=""></iframe>
+<h2>HTML output</h2>
+<pre id="output"></pre>
+<script type="module" src="./main.js"></script>
+</html>
