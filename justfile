@@ -65,7 +65,7 @@ release-prepare *ARGS:
     git add bumpver.toml Cargo.toml Cargo.lock README.md
     git commit -m "Release $CURRENT_VERSION"
     git push -u origin "release/$CURRENT_VERSION"
-    gh pr create --base main --head "release/$CURRENT_VERSION" --title "Release $CURRENT_VERSION" --body "Bump the package version to $CURRENT_VERSION. After merging, run just release to build wheels and publish to PyPI."
+    gh pr create --repo jefftriplett/django-rusty-templates-agentic --base main --head "release/$CURRENT_VERSION" --title "Release $CURRENT_VERSION" --body "Bump the package version to $CURRENT_VERSION. After merging, run just release to build wheels and publish to PyPI."
 
 # Tag the merged version and push it to trigger wheel builds and PyPI publishing
 [group('release')]
