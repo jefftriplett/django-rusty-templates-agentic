@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -81,6 +82,10 @@ pub struct Context {
     pub format_values: bool,
     pub instrument_render: bool,
     pub formatting_context: Option<Py<PyAny>>,
+    // Share unchanged values across Python context snapshots. Each snapshot
+    // owns a small overlay so later loop iterations cannot alter earlier ones.
+    django_context_base: RefCell<Option<Py<PyDict>>>,
+    django_context_changes: HashSet<String>,
     pub string_if_invalid: String,
     names: Vec<HashSet<String>>,
     include_cache: HashMap<(CycleId, IncludeTemplateKey), Arc<Template>>,
@@ -106,6 +111,8 @@ impl Context {
             format_values: false,
             instrument_render: true,
             formatting_context: None,
+            django_context_base: RefCell::new(None),
+            django_context_changes: HashSet::new(),
             string_if_invalid: String::new(),
             loops: Vec::new(),
             names: Vec::new(),
@@ -131,6 +138,8 @@ impl Context {
             format_values: self.format_values,
             instrument_render: self.instrument_render,
             formatting_context: self.formatting_context.as_ref().map(|v| v.clone_ref(py)),
+            django_context_base: RefCell::new(None),
+            django_context_changes: self.django_context_changes.clone(),
             string_if_invalid: self.string_if_invalid.clone(),
             loops: self.loops.clone(),
             names: self.names.clone(),
@@ -193,9 +202,42 @@ impl Context {
         kwargs.set_item("autoescape", self.autoescape)?;
         kwargs.set_item("use_l10n", self.use_l10n)?;
         kwargs.set_item("use_tz", self.use_tz)?;
-        DJANGO_CONTEXT
+        let mut cached_base = self.django_context_base.borrow_mut();
+        if cached_base.is_none() {
+            let base = PyDict::new(py);
+            for (key, values) in &self.context {
+                if !self.django_context_changes.contains(key)
+                    && let Some(value) = values.last()
+                {
+                    base.set_item(key, value)?;
+                }
+            }
+            *cached_base = Some(base.unbind());
+        }
+        let base = cached_base.as_ref().expect("base was initialized").bind(py);
+        let overlay = PyDict::new(py);
+        let mut trimmed_base = None;
+        for key in &self.django_context_changes {
+            if let Some(value) = self.get(key) {
+                overlay.set_item(key, value)?;
+            } else if base.contains(key)? {
+                // A callback can remove a value that was originally in the
+                // base. Copy only in that case, preserving older snapshots.
+                let trimmed = match &trimmed_base {
+                    Some(trimmed) => trimmed,
+                    None => trimmed_base.insert(base.copy()?),
+                };
+                trimmed.del_item(key)?;
+            }
+        }
+        let context = DJANGO_CONTEXT
             .import(py, "django.template.context", "Context")?
-            .call((self.as_dict(py)?,), Some(&kwargs))
+            .call((trimmed_base.as_ref().unwrap_or(base),), Some(&kwargs))?;
+        context
+            .getattr("dicts")?
+            .cast::<pyo3::types::PyList>()?
+            .append(overlay)?;
+        Ok(context)
     }
 
     pub fn get(&self, key: &str) -> Option<&Py<PyAny>> {
@@ -237,6 +279,7 @@ impl Context {
     }
 
     fn _insert(&mut self, key: String, value: Bound<'_, PyAny>, replace: bool) {
+        self.django_context_changes.insert(key.clone());
         let value = value.unbind();
         match self.context.entry(key) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
@@ -329,6 +372,7 @@ impl Context {
     }
 
     pub fn pop_variable(&mut self, name: &str) {
+        self.django_context_changes.insert(name.to_string());
         let values = self
             .context
             .get_mut(name)

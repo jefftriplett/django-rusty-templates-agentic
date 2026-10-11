@@ -1609,7 +1609,11 @@ pub mod django_rusty_templates {
             if context.instrument_render {
                 let signal =
                     TEMPLATE_RENDERED.import(py, "django.test.signals", "template_rendered")?;
-                if signal.call_method0("has_listeners")?.is_truthy()? {
+                // Signal.has_listeners() takes a lock and inspects receivers even
+                // when its list is empty. Most production renders have none.
+                if signal.getattr("receivers")?.is_truthy()?
+                    && signal.call_method0("has_listeners")?.is_truthy()?
+                {
                     let template = Py::new(py, self.clone())?;
                     let kwargs = PyDict::new(py);
                     kwargs.set_item("sender", &template)?;
@@ -1651,6 +1655,25 @@ pub mod django_rusty_templates {
             })();
             context.string_if_invalid = previous_invalid;
             result
+        }
+
+        fn render_django_context(
+            &self,
+            py: Python<'_>,
+            context: Bound<'_, PyAny>,
+            instrument_render: bool,
+        ) -> PyResult<String> {
+            let mut rendering_context = Context::new(
+                HashMap::new(),
+                context.getattr("request").ok().map(Bound::unbind),
+                context.getattr("autoescape")?.extract()?,
+            );
+            rendering_context.use_l10n = context.getattr("use_l10n")?.extract()?;
+            rendering_context.use_tz = context.getattr("use_tz")?.extract()?;
+            rendering_context.format_values = true;
+            rendering_context.formatting_context = Some(context.unbind());
+            rendering_context.instrument_render = instrument_render;
+            self._render(py, &mut rendering_context)
         }
 
         fn _render(&self, py: Python<'_>, context: &mut Context) -> PyResult<String> {
@@ -1840,17 +1863,7 @@ pub mod django_rusty_templates {
         /// Render a variable fragment inside an already-bound Django template.
         /// Read only referenced roots, keeping formatting on the live context.
         fn _render_fragment(&self, py: Python<'_>, context: Bound<'_, PyAny>) -> PyResult<String> {
-            let mut rendering_context = Context::new(
-                HashMap::new(),
-                context.getattr("request").ok().map(Bound::unbind),
-                context.getattr("autoescape")?.extract()?,
-            );
-            rendering_context.use_l10n = context.getattr("use_l10n")?.extract()?;
-            rendering_context.use_tz = context.getattr("use_tz")?.extract()?;
-            rendering_context.format_values = true;
-            rendering_context.formatting_context = Some(context.unbind());
-            rendering_context.instrument_render = false;
-            self._render(py, &mut rendering_context)
+            self.render_django_context(py, context, false)
         }
 
         #[pyo3(name = "render", signature = (context=None, request=None))]
@@ -1915,6 +1928,22 @@ pub mod django_rusty_templates {
                         .getattr("template")
                         .is_ok_and(|template| !template.is_none())
                 });
+            // Django-owned include loops already have a live, bound context.
+            // Text and variable templates need no native assignment scopes, so
+            // resolve their referenced roots directly rather than flattening
+            // and importing every caller variable for each included child.
+            if already_bound
+                && self
+                    .nodes
+                    .iter()
+                    .all(|node| !matches!(node, TokenTree::Tag(_)))
+            {
+                return self.render_django_context(
+                    py,
+                    context.expect("already_bound requires a Django context"),
+                    true,
+                );
+            }
             let mut processor_values = HashMap::new();
             if let Some(ref request) = request
                 && !already_bound
