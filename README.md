@@ -102,4 +102,3 @@ Django Rusty Templates (Agentic) is open to contributions. These can come in man
 * Refactoring for readability or performance.
 
 For detailed instructions on setting up your development environment and contributing to the project, please see [CONTRIBUTING.md](CONTRIBUTING.md).
-For our AI/LLM policy, see [AI_POLICY.md](AI_POLICY.md).
