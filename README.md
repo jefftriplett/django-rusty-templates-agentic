@@ -14,7 +14,14 @@ Template compatibility is tested against Django 5.2, 6.0, and 6.1. Django 6 requ
 
 ## Versioning
 
-Releases use calendar versioning: `YYYY.MM.INCR`, with the increment starting at `1` each month. The current package version is `2026.10.1`.
+Releases use calendar versioning: `YYYY.MM.INCR`, with the increment starting at `1` each month. The current package version is `2026.10.2`.
+
+To release, run `just release-prepare YYYY.M.INCR` from a clean `main` checkout.
+This updates `Cargo.toml`, `Cargo.lock`, and this version notice, commits the bump
+on a release branch, pushes it, and opens a PR. Once the PR passes checks and is
+merged, switch to `main` and run `just release YYYY.M.INCR`. This pulls the merged
+version and pushes an annotated tag, triggering the wheel builds and PyPI
+publishing in GitHub Actions. Check the **Build wheels** workflow for completion.
 
 ## Installation
 
