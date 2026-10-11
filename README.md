@@ -46,6 +46,14 @@ TEMPLATES = [
 ]
 ```
 
+## WebAssembly for JavaScript clients
+
+This fork also includes an experimental WebAssembly (Wasm) version for JavaScript clients. Templates render directly in the browser using the `BrowserEngine` JavaScript API, with JSON context data and support for variables, selected filters, conditionals, loops, includes, and inheritance.
+
+The browser engine and the opt-in Python `PortableEngine` share the same Rust parser and renderer, allowing supported templates to run unchanged on both the server and client. The Wasm version supports a subset of Django's template language; the existing `RustyTemplates` backend retains its full Django implementation.
+
+See the [WebAssembly documentation](dtl-browser/README.md) for build instructions, the JavaScript API, a working demo, and the supported features and limitations.
+
 ## Contributing
 
 Django Rusty Templates (Agentic) is open to contributions. These can come in many forms:
