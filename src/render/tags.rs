@@ -963,7 +963,7 @@ impl For {
             list.reverse();
         }
         context.push_for_loop(list.len());
-        let mut parts = Vec::new();
+        let mut rendered = String::new();
         for (index, values) in list.into_iter().enumerate() {
             let values = match values {
                 Ok(values) => values,
@@ -982,12 +982,12 @@ impl For {
                 template,
             )?;
             context.sync_loop_context(py, index == 0)?;
-            parts.push(self.body.render(py, template, context)?);
+            rendered.push_str(&self.body.render(py, template, context)?);
             context.increment_for_loop();
         }
         context.pop_variables();
         context.pop_for_loop();
-        Ok(Cow::Owned(parts.join("")))
+        Ok(Cow::Owned(rendered))
     }
 
     fn render_string<'t>(
@@ -1009,7 +1009,7 @@ impl For {
             }
             .into());
         }
-        let mut parts = Vec::new();
+        let mut rendered = String::new();
         let mut chars: Vec<_> = string.chars().collect();
         if self.reversed {
             chars.reverse();
@@ -1021,12 +1021,12 @@ impl For {
             let c = PyString::new(py, &c.to_string());
             context.push_variable(variable.clone(), c.into_any(), index);
             context.sync_loop_context(py, index == 0)?;
-            parts.push(self.body.render(py, template, context)?);
+            rendered.push_str(&self.body.render(py, template, context)?);
             context.increment_for_loop();
         }
         context.pop_variables();
         context.pop_for_loop();
-        Ok(Cow::Owned(parts.join("")))
+        Ok(Cow::Owned(rendered))
     }
 }
 

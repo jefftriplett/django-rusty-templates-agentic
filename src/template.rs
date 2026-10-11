@@ -1678,7 +1678,7 @@ pub mod django_rusty_templates {
 
         fn _render(&self, py: Python<'_>, context: &mut Context) -> PyResult<String> {
             match self.render(py, context) {
-                Ok(content) => Ok(content.to_string()),
+                Ok(content) => Ok(content.into_owned()),
                 Err(err) => {
                     let err = err.try_into_render_error()?;
                     match err {

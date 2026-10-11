@@ -689,7 +689,7 @@ impl<'t, 'py> ContentString<'t> {
     pub fn content(self) -> Cow<'t, str> {
         match self {
             Self::String(content) | Self::HtmlSafe(content) => content,
-            Self::HtmlUnsafe(content) => Cow::Owned(encode_quoted_attribute(&content).to_string()),
+            Self::HtmlUnsafe(content) => Cow::Owned(encode_quoted_attribute(&content).into_owned()),
         }
     }
 
@@ -719,6 +719,11 @@ fn resolve_python<'t>(value: Bound<'_, PyAny>, context: &Context) -> PyResult<Co
         return Ok(ContentString::String(
             value.str()?.extract::<String>()?.into(),
         ));
+    }
+    // Exact built-in strings cannot define __html__. Keep subclasses on the
+    // protocol path so SafeString and custom HTML methods retain their behavior.
+    if value.is_exact_instance_of::<PyString>() {
+        return Ok(ContentString::HtmlUnsafe(value.extract::<String>()?.into()));
     }
     let py = value.py();
 
@@ -766,7 +771,7 @@ fn render_value_in_context<'t>(value: ContentString<'t>, context: &Context) -> C
     match value {
         ContentString::String(content) | ContentString::HtmlSafe(content) => content,
         ContentString::HtmlUnsafe(content) => match context.autoescape {
-            true => Cow::Owned(encode_quoted_attribute(&content).to_string()),
+            true => Cow::Owned(encode_quoted_attribute(&content).into_owned()),
             false => Cow::Owned(content.into()),
         },
     }

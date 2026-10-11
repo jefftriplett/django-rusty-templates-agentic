@@ -103,12 +103,13 @@ where
         match self.len() {
             0 => Ok(Cow::Borrowed("")),
             1 => self[0].render(py, template, context),
-            _ => Ok(Cow::Owned(
-                self.iter()
-                    .map(|node| node.render(py, template, context))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(""),
-            )),
+            _ => {
+                let mut rendered = String::new();
+                for node in self {
+                    rendered.push_str(&node.render(py, template, context)?);
+                }
+                Ok(Cow::Owned(rendered))
+            }
         }
     }
 }
