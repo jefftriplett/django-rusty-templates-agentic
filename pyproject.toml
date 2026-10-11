@@ -29,6 +29,7 @@ Upstream = "https://github.com/LilyFirefly/django-rusty-templates"
 module-name = "django_rusty_templates.django_rusty_templates"
 features = ["pyo3/extension-module"]
 python-source = "python"
+exclude = ["STATS.md"]
 
 [tool.pytest]
 strict_xfail = true
