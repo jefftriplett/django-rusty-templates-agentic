@@ -119,7 +119,7 @@ Once this PR is merged and the workflow is present on the default branch, open *
 gh workflow run full.yml --ref YOUR_BRANCH --repo jefftriplett/django-rusty-templates-agentic
 ```
 
-Individual workflows remain dispatchable. `Full CI` runs the Python 3.11–3.14/3.14t and exact final 3.15.0/3.15.0t matrix across Ubuntu, macOS, and Windows, serial Rust OS coverage, cargo-shear, and Django 5.2–6.2 conformance. Python 3.15 entries use uv-managed final runtimes and Django 6.1 with `--no-sync`; Django 5.2/6.0 are excluded on 3.15. Python 3.10 stays outside CI without changing the package minimum version. CodSpeed runs only when the private repository is connected and `ENABLE_CODSPEED=true` is configured.
+Individual workflows remain dispatchable. `Full CI` runs the Python 3.11–3.14/3.14t and exact final 3.15.0/3.15.0t matrix across Ubuntu, macOS, and Windows, serial Rust OS coverage, cargo-shear, and Django 5.2–6.2 conformance. Python 3.15 entries use uv-managed final runtimes and Django 6.1 with `--no-sync`; Django 5.2/6.0 are excluded on 3.15. The package requires Python 3.11 or newer. CodSpeed runs only when the private repository is connected and `ENABLE_CODSPEED=true` is configured.
 
 Coverage reports are retained as artifacts for seven days. **Codecov uploads remain disabled.** Wheel builds remain tag/manual only. No duplicate main-push test runs or schedules are added. The restoration PR remains unmerged until approved.
 
