@@ -2,7 +2,7 @@ import pytest
 from django.template import Context, TemplateSyntaxError
 
 from django_rusty_templates import Engine
-from django_rusty_templates.interop import NativeVariableNode
+from django.template.base import VariableNode
 
 
 def engine_with_templates(templates):
@@ -19,7 +19,7 @@ def test_nested_inheritance_renders_native_variables_and_super():
     )
     template = engine.get_template("child.html")
     assert template.render({"value": "<"}) == "[child middle base &lt;]"
-    assert template.nodelist.get_nodes_by_type(NativeVariableNode)
+    assert template.nodelist.get_nodes_by_type(VariableNode)
     assert template.render({"value": "next"}) == "[child middle base next]"
 
 

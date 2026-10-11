@@ -845,10 +845,21 @@ pub enum Cycle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct CycleId(usize);
+pub struct CycleId(pub(crate) usize);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tag {
+    Block {
+        name: String,
+        nodes: Vec<TokenTree>,
+    },
+    Extends {
+        at: At,
+        parent: TagElement,
+        parent_token: String,
+        relative: Option<String>,
+        nodes: Vec<TokenTree>,
+    },
     Autoescape {
         enabled: AutoescapeEnabled,
         nodes: Vec<TokenTree>,
@@ -950,6 +961,32 @@ pub enum TokenTree {
     Variable(Variable),
     ForVariable(ForVariable),
     Filter(Box<Filter>),
+}
+
+impl TokenTree {
+    /// Child lists used to discover inheritance blocks without a Python tree.
+    pub fn child_nodes(&self) -> Vec<&[Self]> {
+        match self {
+            Self::Tag(
+                Tag::Block { nodes, .. }
+                | Tag::Extends { nodes, .. }
+                | Tag::Autoescape { nodes, .. }
+                | Tag::With { nodes, .. }
+                | Tag::FilterBlock { nodes, .. }
+                | Tag::Spaceless(nodes)
+                | Tag::Verbatim(nodes),
+            ) => vec![nodes],
+            Self::Tag(Tag::If { truthy, falsey, .. }) => {
+                vec![truthy, falsey.as_deref().unwrap_or_default()]
+            }
+            Self::Tag(Tag::IfChanged { truthy, falsey, .. }) => vec![truthy, falsey],
+            Self::Tag(Tag::For(node)) => {
+                vec![&node.body, node.empty.as_deref().unwrap_or_default()]
+            }
+            Self::Tag(Tag::SimpleBlockTag(node)) => vec![&node.nodes],
+            _ => Vec::new(),
+        }
+    }
 }
 
 impl From<TagElement> for TokenTree {
@@ -1368,6 +1405,8 @@ pub struct Parser<'t, 'py> {
     forloop_depth: usize,
     named_cycles: HashMap<String, Cycle>,
     last_cycle: Option<CycleId>,
+    block_names: HashSet<String>,
+    has_extends: bool,
 }
 
 impl<'t, 'py> Parser<'t, 'py> {
@@ -1388,6 +1427,8 @@ impl<'t, 'py> Parser<'t, 'py> {
             forloop_depth: 0,
             named_cycles: HashMap::new(),
             last_cycle: None,
+            block_names: HashSet::new(),
+            has_extends: false,
         }
     }
 
@@ -1408,6 +1449,8 @@ impl<'t, 'py> Parser<'t, 'py> {
             forloop_depth: 0,
             named_cycles: HashMap::new(),
             last_cycle: None,
+            block_names: HashSet::new(),
+            has_extends: false,
         }
     }
 
@@ -1425,6 +1468,24 @@ impl<'t, 'py> Parser<'t, 'py> {
                 self.register_tag(&name, tag)?;
             }
         }
+        self.parse_nodes()
+    }
+
+    fn check_extends_first(nodes: &[TokenTree], node: &TokenTree) -> Result<(), PyParseError> {
+        if matches!(node, TokenTree::Tag(Tag::Extends { .. }))
+            && nodes.iter().any(|node| !matches!(node, TokenTree::Text(_)))
+        {
+            return Err(
+                crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
+                    "{% extends %} must be the first tag in the template.",
+                )
+                .into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn parse_nodes(&mut self) -> Result<Vec<TokenTree>, PyParseError> {
         let mut nodes = Vec::new();
         while let Some(token) = self.lexer.next() {
             let node = match token.token_type {
@@ -1448,6 +1509,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                     }
                 },
             };
+            Self::check_extends_first(&nodes, &node)?;
             nodes.push(node);
         }
         Ok(nodes)
@@ -1491,6 +1553,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                     }
                 },
             };
+            Self::check_extends_first(&nodes, &node)?;
             nodes.push(node);
         }
         Err(ParseError::MissingEndTag {
@@ -2077,6 +2140,13 @@ impl<'t, 'py> Parser<'t, 'py> {
         let tag = lex_tag(tag, at.0 + START_TAG_LEN).map_err(ParseError::from)?;
 
         Ok(match tag.content(self.template) {
+            "block" => Either::Left(self.parse_block(at, tag.parts)?),
+            "extends" => Either::Left(self.parse_extends(at, tag.parts)?),
+            "endblock" => Either::Right(EndTag {
+                end: EndTagType::Custom("endblock".to_string()),
+                at,
+                parts: Some(tag.parts),
+            }),
             "resetcycle" => Either::Left(self.parse_resetcycle(tag.parts)?),
             "with" => Either::Left(self.parse_with(at, tag.parts)?),
             "filter" => Either::Left(self.parse_filter_block(at, tag.parts)?),
@@ -2233,6 +2303,93 @@ impl<'t, 'py> Parser<'t, 'py> {
                 }
             }
         })
+    }
+
+    fn parse_block(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
+        let names: Vec<_> = self.template.content(parts.at).split_whitespace().collect();
+        let [name] = names.as_slice() else {
+            return Err(
+                crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
+                    "'block' tag takes only one argument",
+                )
+                .into(),
+            );
+        };
+        let name = (*name).to_string();
+        if !self.block_names.insert(name.clone()) {
+            return Err(
+                crate::template::django_rusty_templates::TemplateSyntaxError::new_err(format!(
+                    "'block' tag with name '{name}' appears more than once"
+                ))
+                .into(),
+            );
+        }
+        let (nodes, end) = self.parse_until(
+            vec![EndTagType::Custom("endblock".to_string())],
+            "block".into(),
+            at,
+        )?;
+        if let Some(parts) = end.parts {
+            let end_source = self.template.content(end.at);
+            let end_source = end_source[START_TAG_LEN..end_source.len() - START_TAG_LEN].trim();
+            let end_name = self.template.content(parts.at).trim();
+            if end_source != "endblock" && end_source != format!("endblock {name}") {
+                return Err(
+                    crate::template::django_rusty_templates::TemplateSyntaxError::new_err(format!(
+                        "Invalid endblock name '{end_name}' for block '{name}'"
+                    ))
+                    .into(),
+                );
+            }
+        }
+        Ok(TokenTree::Tag(Tag::Block { name, nodes }))
+    }
+
+    fn parse_extends(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
+        let expression = self.template.content(parts.at);
+        if expression.is_empty() {
+            return Err(
+                crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
+                    "'extends' takes one argument",
+                )
+                .into(),
+            );
+        }
+        if self.has_extends {
+            return Err(
+                crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
+                    "'extends' cannot appear more than once in the same template",
+                )
+                .into(),
+            );
+        }
+        self.has_extends = true;
+        let parent = self.parse_filter_expression(expression, parts.at, parts.at.0)?;
+        let parent_token = expression.to_string();
+        let relative = if let TagElement::Text(text) = &parent {
+            let name = self.template.content(text.at);
+            if name.starts_with("./") || name.starts_with("../") {
+                Some(
+                    self.py
+                        .import("django.template.loader_tags")?
+                        .getattr("construct_relative_path")?
+                        .call1((self.origin, name))?
+                        .extract::<String>()?,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let nodes = self.parse_nodes()?;
+        Ok(TokenTree::Tag(Tag::Extends {
+            at,
+            parent,
+            parent_token,
+            relative,
+            nodes,
+        }))
     }
 
     #[allow(clippy::type_complexity)]

@@ -193,3 +193,53 @@ def test_region_string_fast_path_preserves_subclass_hooks(autoescape):
         )
         == expected
     )
+
+
+def test_inherited_block_bodies_are_grouped():
+    source = (
+        '{% extends "base.html" %}{% block body %}'
+        "<p>{{ first }} / {{ second }}</p>{% endblock %}"
+    )
+    engine = Engine(
+        loaders=[
+            (
+                "django.template.loaders.locmem.Loader",
+                {
+                    "base.html": "[{% block body %}base{% endblock %}]",
+                },
+            )
+        ]
+    )
+    template = compile_template(source, engine)
+    regions = template.nodelist.get_nodes_by_type(NativeRegionNode)
+    assert len(regions) == 1
+    assert regions[0].source == "<p>{{ first }} / {{ second }}</p>"
+    assert template.render(Context({"first": "<", "second": "&"})) == (
+        "[<p>&lt; / &amp;</p>]"
+    )
+
+
+def test_equivalent_origin_binding_does_not_walk_nodes(monkeypatch):
+    from django.template.base import Node, Origin
+
+    template = compile_template("{% block body %}{{ value }}{% endblock %}", Engine())
+    loader = object()
+    origin = Origin("page.html", template_name="page.html", loader=loader)
+    template.bind_origin(origin)
+    nodes = template.nodelist.get_nodes_by_type(Node)
+    assert all(node.origin is origin for node in nodes)
+
+    def unexpected_walk(*args):
+        raise AssertionError("Repeated origin binding walked the template tree")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(template.nodelist, "get_nodes_by_type", unexpected_walk)
+        template.bind_origin(origin)
+        template.bind_origin(
+            Origin("page.html", template_name="page.html", loader=loader)
+        )
+
+    replacement = Origin("page.html", template_name="alias.html", loader=loader)
+    template.bind_origin(replacement)
+    assert template.origin is replacement
+    assert all(node.origin is replacement for node in nodes)

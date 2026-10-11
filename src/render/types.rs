@@ -82,6 +82,7 @@ pub struct Context {
     pub format_values: bool,
     pub instrument_render: bool,
     pub formatting_context: Option<Py<PyAny>>,
+    pub inheritance_blocks: Option<Py<PyAny>>,
     // Share unchanged values across Python context snapshots. Each snapshot
     // owns a small overlay so later loop iterations cannot alter earlier ones.
     django_context_base: RefCell<Option<Py<PyDict>>>,
@@ -111,6 +112,7 @@ impl Context {
             format_values: false,
             instrument_render: true,
             formatting_context: None,
+            inheritance_blocks: None,
             django_context_base: RefCell::new(None),
             django_context_changes: HashSet::new(),
             string_if_invalid: String::new(),
@@ -138,6 +140,7 @@ impl Context {
             format_values: self.format_values,
             instrument_render: self.instrument_render,
             formatting_context: self.formatting_context.as_ref().map(|v| v.clone_ref(py)),
+            inheritance_blocks: self.inheritance_blocks.as_ref().map(|v| v.clone_ref(py)),
             django_context_base: RefCell::new(None),
             django_context_changes: HashSet::new(),
             string_if_invalid: self.string_if_invalid.clone(),
@@ -306,9 +309,13 @@ impl Context {
         self._insert(key, value, false);
     }
 
-    pub fn insert(&mut self, key: String, value: Bound<'_, PyAny>) {
+    pub fn insert(&mut self, key: String, value: Bound<'_, PyAny>) -> PyResult<()> {
+        if let Some(context) = &self.formatting_context {
+            context.bind(value.py()).set_item(&key, &value)?;
+        }
         self.assigned.insert(key.clone());
         self._insert(key, value, true);
+        Ok(())
     }
 
     pub fn push_variable(&mut self, name: String, value: Bound<'_, PyAny>, index: usize) {
@@ -532,6 +539,22 @@ impl Context {
         id: CycleId,
         value: Bound<'_, PyAny>,
     ) -> PyResult<bool> {
+        if let Some(live) = &self.formatting_context {
+            let live = live.bind(py);
+            let state = live.call_method1("get", ("forloop",))?;
+            let state = if state.is_none() {
+                live.getattr("render_context")?
+            } else {
+                state
+            };
+            let key = ("rusty_ifchanged", id.0);
+            let previous = state.call_method1("get", (key,))?;
+            let changed = value.ne(&previous)?;
+            if changed {
+                state.set_item(key, value)?;
+            }
+            return Ok(changed);
+        }
         let frame = self
             .changed_states
             .last_mut()
@@ -546,35 +569,68 @@ impl Context {
         Ok(changed)
     }
 
-    pub fn reset_cycle(&mut self, id: CycleId) {
+    pub fn reset_cycle(&mut self, py: Python<'_>, id: CycleId) -> PyResult<()> {
+        if let Some(live) = &self.formatting_context {
+            live.bind(py)
+                .getattr("render_context")?
+                .set_item(("rusty_cycle", id.0), 0)?;
+        }
         self.cycle_indices.remove(&id);
+        Ok(())
     }
 
-    pub fn insert_cycle(&mut self, key: String, value: Bound<'_, PyAny>) {
+    pub fn insert_cycle(&mut self, key: String, value: Bound<'_, PyAny>) -> PyResult<()> {
         self.cycle_variables.insert(key.clone());
-        self.insert(key, value);
+        if let Some(live) = &self.formatting_context {
+            // Django's named cycles update the nearest existing binding,
+            // including across block/with scopes, rather than shadowing it.
+            live.bind(value.py())
+                .call_method1("set_upward", (&key, &value))?;
+            self.assigned.insert(key.clone());
+            self._insert(key, value, true);
+            return Ok(());
+        }
+        self.insert(key, value)
     }
 
-    pub fn merge_render_state(&mut self, py: Python<'_>, scoped: Self, local_names: &[String]) {
+    pub fn merge_render_state(
+        &mut self,
+        py: Python<'_>,
+        scoped: Self,
+        local_names: &[String],
+    ) -> PyResult<()> {
         for name in &scoped.cycle_variables {
             if !local_names.contains(name)
                 && self.context.contains_key(name)
                 && let Some(value) = scoped.context.get(name).and_then(|values| values.last())
             {
-                self.insert_cycle(name.clone(), value.bind(py).clone());
+                self.insert_cycle(name.clone(), value.bind(py).clone())?;
             }
         }
         self.cycle_indices = scoped.cycle_indices;
         self.changed_states = scoped.changed_states;
         self.include_cache = scoped.include_cache;
+        Ok(())
     }
 
-    pub fn next_cycle_index(&mut self, id: CycleId, length: usize) -> usize {
-        *self
+    pub fn next_cycle_index(
+        &mut self,
+        py: Python<'_>,
+        id: CycleId,
+        length: usize,
+    ) -> PyResult<usize> {
+        if let Some(live) = &self.formatting_context {
+            let state = live.bind(py).getattr("render_context")?;
+            let key = ("rusty_cycle", id.0);
+            let index: usize = state.call_method1("get", (key, 0))?.extract()?;
+            state.set_item(key, (index + 1) % length)?;
+            return Ok(index);
+        }
+        Ok(*self
             .cycle_indices
             .entry(id)
             .and_modify(|index| *index = (*index + 1) % length)
-            .or_default()
+            .or_default())
     }
 }
 
@@ -665,7 +721,12 @@ impl PyContext {
         }
     }
 
-    fn __setitem__<'py>(&self, py: Python<'py>, key: String, value: Bound<'py, PyAny>) {
+    fn __setitem__<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        value: Bound<'py, PyAny>,
+    ) -> PyResult<()> {
         let mut guard = self
             .context
             .lock_py_attached(py)
@@ -673,7 +734,7 @@ impl PyContext {
         if let Some(last) = guard.names.last_mut() {
             last.insert(key.clone());
         }
-        guard.insert(key, value);
+        guard.insert(key, value)
     }
 }
 

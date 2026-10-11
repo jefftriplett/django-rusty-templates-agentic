@@ -88,13 +88,16 @@ impl<'t> Lexer<'t> {
     }
 
     fn lex_text(&mut self) -> Token {
-        let next_tag = self.rest.find("{%");
-        let next_variable = self.rest.find("{{");
-        let next_comment = self.rest.find("{#");
-        let next = [next_tag, next_variable, next_comment]
-            .iter()
-            .filter_map(|n| *n)
-            .min();
+        // Search once for the next opening delimiter. Three independent
+        // searches repeatedly scanned the entire remaining source when one
+        // delimiter kind (often comments) was absent, making lexing quadratic.
+        let next = self.rest.match_indices('{').find_map(|(index, _)| {
+            matches!(
+                self.rest.as_bytes().get(index + 1),
+                Some(b'{' | b'%' | b'#')
+            )
+            .then_some(index)
+        });
         let len = match next {
             None => {
                 let len = self.rest.len();
@@ -133,14 +136,11 @@ impl<'t> Lexer<'t> {
             return Token::text(at);
         };
         // This can be removed if https://code.djangoproject.com/ticket/35899 lands
-        match self.rest.find("\n") {
-            Some(newline) if newline < n => {
-                let at = (self.byte, newline + 1);
-                self.byte += newline + 1;
-                self.rest = &self.rest[newline + 1..];
-                return Token::text(at);
-            }
-            _ => {}
+        if let Some(newline) = self.rest[..n].find('\n') {
+            let at = (self.byte, newline + 1);
+            self.byte += newline + 1;
+            self.rest = &self.rest[newline + 1..];
+            return Token::text(at);
         }
         let len = n + end_str.len();
         self.rest = &self.rest[len..];
@@ -240,6 +240,48 @@ mod tests {
         let lexer = Lexer::new(template.into());
         let tokens: Vec<_> = lexer.collect();
         assert_eq!(tokens, vec![]);
+    }
+
+    #[test]
+    fn test_opening_delimiters_after_literal_braces_and_unicode() {
+        let template = "é {x { {{ value }} { {% if value %} {# comment #} {";
+        let tokens: Vec<_> = Lexer::new(template.into()).collect();
+        assert_eq!(
+            contents(template, tokens),
+            vec![
+                "é {x { ",
+                " value ",
+                " { ",
+                " if value ",
+                " ",
+                " comment ",
+                " {",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_newline_after_delimiter_does_not_make_tag_text() {
+        let template = "{{ value }}\n{% if value %}\n{# comment #}\n";
+        let tokens: Vec<_> = Lexer::new(template.into()).collect();
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| &token.token_type)
+                .collect::<Vec<_>>(),
+            vec![
+                &TokenType::Variable,
+                &TokenType::Text,
+                &TokenType::Tag,
+                &TokenType::Text,
+                &TokenType::Comment,
+                &TokenType::Text,
+            ]
+        );
+        assert_eq!(
+            contents(template, tokens),
+            vec![" value ", "\n", " if value ", "\n", " comment ", "\n",]
+        );
     }
 
     #[test]
