@@ -226,6 +226,9 @@ wheels = [
 [[package]]
 name = "django-rusty-templates-agentic"
 source = { editable = "." }
+dependencies = [
+    { name = "django" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -243,15 +246,16 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [{ name = "django", specifier = ">=5.2,<7" }]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "django", specifier = "~=5.2.9" },
     { name = "hypothesis" },
     { name = "inline-snapshot" },
-    { name = "maturin" },
+    { name = "maturin", specifier = ">=1.9.3,<2.0" },
     { name = "pre-commit" },
-    { name = "pytest" },
+    { name = "pytest", specifier = ">=9" },
     { name = "pytest-codspeed" },
     { name = "pytest-cov" },
     { name = "pytest-django" },
