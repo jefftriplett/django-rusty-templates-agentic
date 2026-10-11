@@ -9,8 +9,10 @@ from django.template.backends.django import DjangoTemplates
 from django_rusty_templates import PortableEngine, RustyTemplates
 
 PROTOTYPE = Path(__file__).resolve().parents[1] / "dtl-browser"
-CASES = json.loads((PROTOTYPE / "tests" / "parity.json").read_text())
-CASES.append(json.loads((PROTOTYPE / "demo" / "catalog.json").read_text()))
+CASES = json.loads((PROTOTYPE / "tests" / "parity.json").read_text(encoding="utf-8"))
+CASES.append(
+    json.loads((PROTOTYPE / "demo" / "catalog.json").read_text(encoding="utf-8"))
+)
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])

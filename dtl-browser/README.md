@@ -59,7 +59,7 @@ import json
 from pathlib import Path
 from django_rusty_templates import PortableEngine
 
-bundle = json.loads(Path("dtl-browser/demo/catalog.json").read_text())
+bundle = json.loads(Path("dtl-browser/demo/catalog.json").read_text(encoding="utf-8"))
 engine = PortableEngine()
 for name, source in {**bundle["templates"], bundle["name"]: bundle["source"]}.items():
     engine.add_template(name, source)
