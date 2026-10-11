@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 pub mod django_rusty_templates {
     use std::borrow::Cow;
     use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -35,6 +36,8 @@ pub mod django_rusty_templates {
     import_exception!(django.urls, NoReverseMatch);
 
     static DJANGO_CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+    static TEMPLATE_RENDERED: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
     static IMPORT_STRING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -1601,6 +1604,20 @@ pub mod django_rusty_templates {
                     .extract()?;
                 return Ok(Cow::Owned(output));
             }
+            // Django fallbacks already signal via Template._render. Native regions
+            // inside those templates are implementation details, not templates.
+            if context.instrument_render {
+                let signal =
+                    TEMPLATE_RENDERED.import(py, "django.test.signals", "template_rendered")?;
+                if signal.call_method0("has_listeners")?.is_truthy()? {
+                    let template = Py::new(py, self.clone())?;
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("sender", &template)?;
+                    kwargs.set_item("template", &template)?;
+                    kwargs.set_item("context", context.django_context(py)?)?;
+                    signal.call_method("send", (), Some(&kwargs))?;
+                }
+            }
             let previous_invalid = std::mem::replace(
                 &mut context.string_if_invalid,
                 self.engine.string_if_invalid.clone(),
@@ -1737,6 +1754,11 @@ pub mod django_rusty_templates {
         }
 
         #[getter]
+        fn name(&self) -> Option<&str> {
+            self.template_name.as_deref()
+        }
+
+        #[getter]
         fn source(&self) -> &str {
             &self.template
         }
@@ -1799,6 +1821,14 @@ pub mod django_rusty_templates {
                 .map(|nodes| nodes.bind(py).clone())
         }
 
+        fn __hash__(&self) -> u64 {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.template.hash(&mut hasher);
+            self.filename.hash(&mut hasher);
+            Arc::as_ptr(&self.engine).hash(&mut hasher);
+            hasher.finish()
+        }
+
         fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
             other.extract::<PyRef<'_, Self>>().is_ok_and(|other| {
                 self.template == other.template
@@ -1819,6 +1849,7 @@ pub mod django_rusty_templates {
             rendering_context.use_tz = context.getattr("use_tz")?.extract()?;
             rendering_context.format_values = true;
             rendering_context.formatting_context = Some(context.unbind());
+            rendering_context.instrument_render = false;
             self._render(py, &mut rendering_context)
         }
 
