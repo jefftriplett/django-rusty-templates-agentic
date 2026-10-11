@@ -4,7 +4,7 @@ use pyo3::exceptions::{PyAttributeError, PyIndexError, PyKeyError, PyTypeError, 
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::PyString;
+use pyo3::types::{PyDict, PyString};
 
 use dtl_lexer::types::TemplateString;
 
@@ -78,7 +78,14 @@ fn lookup_part<'py>(
     part: &str,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
     let py = variable.py();
-    if variable.get_type().hasattr("__getitem__")? {
+    // Exact dictionaries need no generic mapping dispatch or KeyError on a
+    // miss. Missing keys must still fall through to attributes and integer keys.
+    let exact_dict = variable.cast_exact::<PyDict>().ok();
+    if let Some(dict) = &exact_dict {
+        if let Some(value) = dict.get_item(part)? {
+            return Ok(Some(value));
+        }
+    } else if variable.get_type().hasattr("__getitem__")? {
         match variable.get_item(part) {
             Ok(value) => return Ok(Some(value)),
             Err(error)
@@ -90,8 +97,12 @@ fn lookup_part<'py>(
             Err(error) => return Err(error),
         }
     }
-    let base_context = BASE_CONTEXT.import(py, "django.template.context", "BaseContext")?;
-    let is_context = variable.is_instance(base_context)?;
+    let is_context = if exact_dict.is_some() {
+        false
+    } else {
+        let base_context = BASE_CONTEXT.import(py, "django.template.context", "BaseContext")?;
+        variable.is_instance(base_context)?
+    };
     if !is_context || !variable.get_type().hasattr(part)? {
         match variable.getattr(part) {
             Ok(value) => return Ok(Some(value)),
@@ -99,7 +110,10 @@ fn lookup_part<'py>(
                 if error.is_instance_of::<PyTypeError>(py)
                     || error.is_instance_of::<PyAttributeError>(py) =>
             {
+                // A built-in dict has no user-defined property that could
+                // raise AttributeError. Only inspect dir() for other objects.
                 if !is_context
+                    && exact_dict.is_none()
                     && DIR
                         .import(py, "builtins", "dir")?
                         .call1((&variable,))?

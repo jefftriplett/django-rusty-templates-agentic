@@ -66,3 +66,29 @@ def test_variable_lookup_protocols(assert_render, source, value, expected):
 def test_noisy_variable_errors(template_engine, source, value, exception, message):
     with pytest.raises(exception, match=message):
         template_engine.from_string(source).render({"value": value})
+
+
+class OverrideDictionary(dict):
+    def __getitem__(self, key):
+        return f"override: {key}"
+
+
+class MissingDictionary(dict):
+    def __missing__(self, key):
+        return f"missing: {key}"
+
+
+@pytest.mark.parametrize(
+    ("source", "value", "expected"),
+    [
+        ("{{ value.key }}", OverrideDictionary(key="stored"), "override: key"),
+        ("{{ value.key }}", MissingDictionary(), "missing: key"),
+        ("{{ value.0 }}", {0: "integer key"}, "integer key"),
+        ("{{ value.0 }}", {"0": "string key", 0: "integer key"}, "string key"),
+        ("{{ value.items|length }}", {"key": "value"}, "1"),
+    ],
+)
+def test_dictionary_lookup_fast_path_preserves_protocols(
+    assert_render, source, value, expected
+):
+    assert_render(source, {"value": value}, expected)

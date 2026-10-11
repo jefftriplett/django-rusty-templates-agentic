@@ -77,3 +77,23 @@ def test_safe_lower(assert_render):
     template = "{{ html|safe|lower }}"
     expected = "<p>hello world!</p>"
     assert_render(template=template, context={"html": html}, expected=expected)
+
+
+def test_string_subclass_html_protocol(assert_render):
+    class HtmlString(str):
+        def __html__(self):
+            return "<b>safe</b>"
+
+    assert_render("{{ value }}", {"value": HtmlString("<i>unsafe</i>")}, "<b>safe</b>")
+
+
+def test_string_subclass_custom_str(assert_render):
+    class CustomString(str):
+        def __str__(self):
+            return "<b>custom</b>"
+
+    assert_render(
+        "{{ value }}",
+        {"value": CustomString("original")},
+        "&lt;b&gt;custom&lt;/b&gt;",
+    )
