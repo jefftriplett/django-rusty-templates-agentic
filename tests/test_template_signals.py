@@ -189,3 +189,30 @@ def test_inherited_include_keeps_live_context_and_signals(child):
         "local:one;local:two;" if "with" in child else "one:1:ONE;two:2:TWO;"
     )
     assert seen == ["one", "two"]
+
+
+def test_first_context_snapshot_inside_loop_restores_missing_variables(monkeypatch):
+    # Disable native signaling so the first Python snapshot is made for a
+    # fallback child after the loop variable has already entered its scope.
+    monkeypatch.setattr(template_rendered, "has_listeners", lambda sender=None: False)
+    child = '{% block body %}{{ item|default:"missing" }}{% endblock %}'
+    engine = Engine(
+        loaders=[("django.template.loaders.locmem.Loader", {"child.html": child})]
+    )
+    contexts = []
+
+    def receiver(sender, template, context, **kwargs):
+        if template.name == "child.html":
+            contexts.append(context)
+
+    template_rendered.connect(receiver, weak=False)
+    try:
+        output = engine.from_string(
+            '{% for item in items %}{% include "child.html" %}{% endfor %}'
+            '{% include "child.html" %}{% include "child.html" %}'
+        ).render({"items": ["one", "two"], "shared": "outer"})
+    finally:
+        template_rendered.disconnect(receiver)
+    assert output == "onetwomissingmissing"
+    assert [context.get("item") for context in contexts] == ["one", "two", None, None]
+    assert all(context["shared"] == "outer" for context in contexts)

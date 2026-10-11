@@ -139,7 +139,7 @@ impl Context {
             instrument_render: self.instrument_render,
             formatting_context: self.formatting_context.as_ref().map(|v| v.clone_ref(py)),
             django_context_base: RefCell::new(None),
-            django_context_changes: self.django_context_changes.clone(),
+            django_context_changes: HashSet::new(),
             string_if_invalid: self.string_if_invalid.clone(),
             loops: self.loops.clone(),
             names: self.names.clone(),
@@ -206,9 +206,7 @@ impl Context {
         if cached_base.is_none() {
             let base = PyDict::new(py);
             for (key, values) in &self.context {
-                if !self.django_context_changes.contains(key)
-                    && let Some(value) = values.last()
-                {
+                if let Some(value) = values.last() {
                     base.set_item(key, value)?;
                 }
             }
@@ -233,6 +231,11 @@ impl Context {
         let context = DJANGO_CONTEXT
             .import(py, "django.template.context", "Context")?
             .call((trimmed_base.as_ref().unwrap_or(base),), Some(&kwargs))?;
+        if let Some(trimmed) = trimmed_base {
+            // Keep the trimmed base for later snapshots too. Scoped values
+            // present at the first conversion must stay absent after a pop.
+            *cached_base = Some(trimmed.unbind());
+        }
         context
             .getattr("dicts")?
             .cast::<pyo3::types::PyList>()?
@@ -279,7 +282,11 @@ impl Context {
     }
 
     fn _insert(&mut self, key: String, value: Bound<'_, PyAny>, replace: bool) {
-        self.django_context_changes.insert(key.clone());
+        // Pure native renders never need a Python snapshot. Start tracking
+        // mutations only after the first conversion has captured a base.
+        if self.django_context_base.get_mut().is_some() {
+            self.django_context_changes.insert(key.clone());
+        }
         let value = value.unbind();
         match self.context.entry(key) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
@@ -372,7 +379,9 @@ impl Context {
     }
 
     pub fn pop_variable(&mut self, name: &str) {
-        self.django_context_changes.insert(name.to_string());
+        if self.django_context_base.get_mut().is_some() {
+            self.django_context_changes.insert(name.to_string());
+        }
         let values = self
             .context
             .get_mut(name)
