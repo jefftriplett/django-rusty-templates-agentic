@@ -1,6 +1,8 @@
-# Django Rusty Templates
+# Django Rusty Templates (Agentic)
 
-Django Rusty Templates is an experimental reimplementation of Django's templating language in Rust.
+Django Rusty Templates (Agentic) is a fork of [Lily's Django Rusty Templates library](https://github.com/LilyFirefly/django-rusty-templates), an experimental reimplementation of Django's templating language in Rust. This fork began as an agentic attempt to try out the idea, exploring compatibility, performance, and shared server/browser templates.
+
+The distribution is named `django-rusty-templates-agentic` to respect the original project's PyPI namespace. It is intended as a drop-in replacement while upstream develops: Python imports remain `django_rusty_templates`, and the Django backend remains `django_rusty_templates.RustyTemplates`. Lily and the upstream contributors retain credit for the original library; see [LICENSE](LICENSE).
 
 Template compatibility is tested against Django 5.2, 6.0, and 6.1. Django 6 requires Python 3.12 or newer. Partial templates, inheritance, and fully custom Python tags use Django's parser/node interoperability layer; compatible variables use the native renderer. Django 6.2 development support is tested against a pinned `main` checkout; its `now` format expressions also use the interoperability layer. See [CONTRIBUTING.md](CONTRIBUTING.md) for local conformance checks.
 
@@ -12,19 +14,24 @@ Template compatibility is tested against Django 5.2, 6.0, and 6.1. Django 6 requ
 
 ## Installation
 
-Django Rusty Templates is not yet ready for full release, so it is not available on PyPI yet. Instead it can be installed from github or from a local clone:
+Install this fork from its GitHub repository or a local checkout. These instructions do not require a PyPI release.
+
+Because both distributions provide the same Python package, uninstall the original before installing this fork in an existing environment:
 
 ```sh
-$ pip install git+https://github.com/LilyFirefly/django-rusty-templates.git
+pip uninstall django-rusty-templates
+pip install git+https://github.com/jefftriplett/django-rusty-templates-agentic.git
 ```
+
+For a local installation:
 
 ```sh
-
-$ git clone git@github.com:LilyFirefly/django-rusty-templates.git
-$ pip install ./django-rusty-templates
+git clone https://github.com/jefftriplett/django-rusty-templates-agentic.git
+cd django-rusty-templates-agentic
+pip install .
 ```
 
-You will need a rust compiler installed (https://rustup.rs/).
+Source installations require a [Rust compiler](https://rustup.rs/). To switch back to upstream, uninstall `django-rusty-templates-agentic` before installing the original distribution. Your imports and backend setting stay the same.
 
 ## Usage
 
@@ -41,7 +48,7 @@ TEMPLATES = [
 
 ## Contributing
 
-Django Rusty Templates is open to contributions. These can come in many forms:
+Django Rusty Templates (Agentic) is open to contributions. These can come in many forms:
 
 * Implementing missing features, such as filters and tags built into Django.
 * Reporting bugs where Django Rusty Templates gives the wrong result.

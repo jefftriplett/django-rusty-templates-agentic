@@ -1,7 +1,7 @@
 ## Getting started with development
 
 ### Requirements
-`django-rusty-templates` is written in Rust, so you'll need to install the [Rust toolchain](https://www.rust-lang.org/tools/install).
+`django-rusty-templates-agentic` is written in Rust, so you'll need to install the [Rust toolchain](https://www.rust-lang.org/tools/install).
 
 To run the `just` recipes, you will need to have [Just](https://github.com/casey/just) installed.
 
@@ -43,7 +43,7 @@ Running `just bootstrap` does it for you.
 ## Running tests
 
 ### Python tests with pytest
-To run the Python tests, build Django Rusty Templates in develop mode with maturin and then run pytest.
+To run the Python tests, build Django Rusty Templates (Agentic) in develop mode with maturin and then run pytest.
 Each change in rust needs a new execution of maturin develop.
 ```bash
 $ maturin develop
@@ -116,7 +116,7 @@ Every PR runs the Ubuntu/Python 3.13 sanity job (local Python and serial Rust te
 Once this PR is merged and the workflow is present on the default branch, open **Actions → Full CI → Run workflow** and select the branch for comprehensive coverage. This manually calls the Python, Rust, lint, Django, and optional CodSpeed workflows from that same revision. After these workflow definitions exist on the default branch, the CLI equivalent is:
 
 ```bash
-gh workflow run full.yml --ref YOUR_BRANCH --repo jefftriplett/django-rusty-templates-private
+gh workflow run full.yml --ref YOUR_BRANCH --repo jefftriplett/django-rusty-templates-agentic
 ```
 
 Individual workflows remain dispatchable. `Full CI` runs the Python 3.11–3.14/3.14t and exact final 3.15.0/3.15.0t matrix across Ubuntu, macOS, and Windows, serial Rust OS coverage, cargo-shear, and Django 5.2–6.2 conformance. Python 3.15 entries use uv-managed final runtimes and Django 6.1 with `--no-sync`; Django 5.2/6.0 are excluded on 3.15. Python 3.10 stays outside CI without changing the package minimum version. CodSpeed runs only when the private repository is connected and `ENABLE_CODSPEED=true` is configured.

@@ -3,7 +3,9 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "django-rusty-templates"
+name = "django-rusty-templates-agentic"
+description = "An agentic fork of Django Rusty Templates with a compatible Python API"
+readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [
     "Framework :: Django",
@@ -16,7 +18,12 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+[project.urls]
+Repository = "https://github.com/jefftriplett/django-rusty-templates-agentic"
+Upstream = "https://github.com/LilyFirefly/django-rusty-templates"
+
 [tool.maturin]
+module-name = "django_rusty_templates.django_rusty_templates"
 features = ["pyo3/extension-module"]
 python-source = "python"
 

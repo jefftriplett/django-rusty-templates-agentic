@@ -251,7 +251,7 @@ wheels = [
 ]
 
 [[package]]
-name = "django-rusty-templates"
+name = "django-rusty-templates-agentic"
 source = { editable = "." }
 
 [package.dev-dependencies]
