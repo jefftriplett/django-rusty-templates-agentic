@@ -1,24 +1,36 @@
 [build-system]
-requires = ["maturin>=1.7,<2.0"]
+requires = ["maturin>=1.9.3,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "django-rusty-templates"
-requires-python = ">=3.10"
+name = "django-rusty-templates-agentic"
+description = "An agentic fork of Django Rusty Templates with a compatible Python API"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+dependencies = ["Django>=5.2,<7"]
+requires-python = ">=3.11"
 classifiers = [
     "Framework :: Django",
     "Framework :: Django :: 5.2",
     "Framework :: Django :: 6.0",
     "Framework :: Django :: 6.1",
+    "Framework :: Django :: 6.2",
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
 
+[project.urls]
+Repository = "https://github.com/jefftriplett/django-rusty-templates-agentic"
+Upstream = "https://github.com/LilyFirefly/django-rusty-templates"
+
 [tool.maturin]
+module-name = "django_rusty_templates.django_rusty_templates"
 features = ["pyo3/extension-module"]
 python-source = "python"
+exclude = ["STATS.md"]
 
 [tool.pytest]
 strict_xfail = true
@@ -28,8 +40,8 @@ DJANGO_SETTINGS_MODULE = "tests.settings"
 dev = [
     "django~=5.2.9",
     "hypothesis",
-    "maturin",
-    "pytest",
+    "maturin>=1.9.3,<2.0",
+    "pytest>=9",
     "pytest-django",
     "pytest-cov",
     "pytest-codspeed",
@@ -40,7 +52,7 @@ dev = [
 ]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 # Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`)  codes by default.
