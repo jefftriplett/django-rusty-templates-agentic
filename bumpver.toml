@@ -1,0 +1,12 @@
+[bumpver]
+current_version = "2026.10.2"
+version_pattern = "YYYY.MM.INC1"
+# `just release-prepare` commits on a release branch; `just release` tags after merge.
+commit = false
+tag = false
+push = false
+
+[bumpver.file_patterns]
+"bumpver.toml" = ['current_version = "{version}"']
+"Cargo.toml" = ['^version = "{version}"']
+"README.md" = ['The current package version is `{version}`.']

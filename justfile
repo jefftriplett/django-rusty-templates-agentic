@@ -47,33 +47,36 @@ rust-coverage-browser:
     pytest
     cargo llvm-cov report --workspace --open
 
-# Prepare a CalVer bump on a branch and open its PR (start from clean main)
+# Bump the CalVer version on a release branch and open its PR (extra args go to bumpver update)
 [group('release')]
-release-prepare VERSION:
+release-prepare *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     test -z "$(git status --porcelain)"
     test "$(git branch --show-current)" = main
     git pull --ff-only origin main
     test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
-    git switch -c "release/{{VERSION}}"
-    uv run --no-sync python scripts/bump_version.py '{{VERSION}}'
-    cargo metadata --locked --no-deps --format-version 1 >/dev/null
-    git add Cargo.toml Cargo.lock README.md
-    git commit -m "Release {{VERSION}}"
-    git push -u origin "release/{{VERSION}}"
-    gh pr create --base main --head "release/{{VERSION}}" --title "Release {{VERSION}}" --body "Bump the package version to {{VERSION}}. After merging, run just release {{VERSION}} to build wheels and publish to PyPI."
+    uvx bumpver@2026.1132 update {{ARGS}}
+    eval "$(uvx --quiet bumpver@2026.1132 show --no-fetch --environ)"
+    # bumpver can't target Cargo.lock's package entry; let Cargo refresh only the workspace crates.
+    cargo update --workspace --offline
+    cargo metadata --locked --format-version 1 >/dev/null
+    git switch -c "release/$CURRENT_VERSION"
+    git add bumpver.toml Cargo.toml Cargo.lock README.md
+    git commit -m "Release $CURRENT_VERSION"
+    git push -u origin "release/$CURRENT_VERSION"
+    gh pr create --base main --head "release/$CURRENT_VERSION" --title "Release $CURRENT_VERSION" --body "Bump the package version to $CURRENT_VERSION. After merging, run just release to build wheels and publish to PyPI."
 
 # Tag the merged version and push it to trigger wheel builds and PyPI publishing
 [group('release')]
-release VERSION:
+release:
     #!/usr/bin/env bash
     set -euo pipefail
     test -z "$(git status --porcelain)"
     test "$(git branch --show-current)" = main
     git pull --ff-only origin main
     test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
-    uv run --no-sync python -c 'import sys, tomllib; actual = tomllib.load(open("Cargo.toml", "rb"))["package"]["version"]; sys.exit(0 if actual == sys.argv[1] else f"Requested version {sys.argv[1]} does not match {actual}")' '{{VERSION}}'
-    cargo metadata --locked --no-deps --format-version 1 >/dev/null
-    git tag -a '{{VERSION}}' -m 'Release {{VERSION}}'
-    git push origin 'refs/tags/{{VERSION}}'
+    eval "$(uvx --quiet bumpver@2026.1132 show --no-fetch --environ)"
+    cargo metadata --locked --format-version 1 >/dev/null
+    git tag -a "$CURRENT_VERSION" -m "Release $CURRENT_VERSION"
+    git push origin "refs/tags/$CURRENT_VERSION"
