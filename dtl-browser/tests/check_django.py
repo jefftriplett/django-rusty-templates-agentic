@@ -9,9 +9,13 @@ from django.template import Context, Engine
 if not settings.configured:
     settings.configure(USE_I18N=False, USE_TZ=False)
 
-cases = json.loads(Path(__file__).with_name("parity.json").read_text())
+cases = json.loads(Path(__file__).with_name("parity.json").read_text(encoding="utf-8"))
 cases.append(
-    json.loads((Path(__file__).parents[1] / "demo" / "catalog.json").read_text())
+    json.loads(
+        (Path(__file__).parents[1] / "demo" / "catalog.json").read_text(
+            encoding="utf-8"
+        )
+    )
 )
 for case in cases:
     engine = Engine(
