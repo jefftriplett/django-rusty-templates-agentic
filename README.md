@@ -12,6 +12,10 @@ Template compatibility is tested against Django 5.2, 6.0, and 6.1. Django 6 requ
 * Error reporting that is at least as useful as Django's errors.
 * Improved performance over Django's pure Python implementation.
 
+## Versioning
+
+Releases use calendar versioning: `YYYY.MM.INCR`, with the increment starting at `1` each month. The current package version is `2026.10.1`.
+
 ## Installation
 
 Install this fork from its GitHub repository or a local checkout. These instructions do not require a PyPI release.
