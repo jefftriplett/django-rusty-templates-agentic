@@ -14,7 +14,7 @@ Template compatibility is tested against Django 5.2, 6.0, and 6.1. Django 6 requ
 
 ## Versioning
 
-Releases use calendar versioning: `YYYY.MM.INCR`, with the increment starting at `1` each month. The current package version is `2026.10.3`.
+Releases use calendar versioning: `YYYY.MM.INCR`, with the increment starting at `1` each month. The current package version is `2026.10.4`.
 
 To release, run `just release-prepare` from a clean `main` checkout. It uses
 [bumpver](https://github.com/mbarkhau/bumpver) to pick the next version, updates
