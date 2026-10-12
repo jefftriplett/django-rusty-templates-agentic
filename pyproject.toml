@@ -29,6 +29,7 @@ dynamic = ["version"]
 
 [project.urls]
 Repository = "https://github.com/jefftriplett/django-rusty-templates-agentic"
+Changelog = "https://github.com/jefftriplett/django-rusty-templates-agentic/blob/main/CHANGELOG.md"
 Upstream = "https://github.com/LilyFirefly/django-rusty-templates"
 
 [tool.maturin]
