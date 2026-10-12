@@ -135,7 +135,19 @@ def main():
         "django": django.get_version(),
         "rusty_version": importlib.metadata.version("django-rusty-templates-agentic"),
         "fixture_sha256": hashlib.sha256(
-            json.dumps(sources, sort_keys=True).encode()
+            json.dumps(
+                {
+                    "sources": sources,
+                    "values": {name: values for name, (_, values) in cases.items()},
+                    "types": {
+                        name: {
+                            key: type(value).__name__ for key, value in values.items()
+                        }
+                        for name, (_, values) in cases.items()
+                    },
+                },
+                sort_keys=True,
+            ).encode()
         ).hexdigest(),
         "number": args.number,
         "repeat": args.repeat,
