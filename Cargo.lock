@@ -329,6 +329,7 @@ dependencies = [
  "either",
  "encoding_rs",
  "html-escape",
+ "memchr",
  "miette",
  "num-bigint",
  "num-traits",

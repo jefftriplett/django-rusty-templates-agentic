@@ -69,6 +69,7 @@ dtl-lexer = { path = "dtl-lexer" }
 either = "1.15.0"
 encoding_rs = "0.8.35"
 html-escape = "0.2.13"
+memchr = "2.8.2"
 miette.workspace = true
 num-bigint.workspace = true
 num-traits = "0.2.19"

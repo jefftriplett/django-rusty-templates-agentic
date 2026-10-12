@@ -1110,6 +1110,13 @@ fn append_escaped(text: &str, output: &mut String) {
     // Its Cow encoder still borrows unchanged text, and borrowing the Python
     // input avoids the source copy even when an escaped fragment is required.
     if text.len() >= 1024 {
+        let bytes = text.as_bytes();
+        if memchr::memchr3(b'&', b'<', b'>', bytes).is_none()
+            && memchr::memchr2(b'"', b'\'', bytes).is_none()
+        {
+            output.push_str(text);
+            return;
+        }
         append_large_escaped(text, output);
         return;
     }
