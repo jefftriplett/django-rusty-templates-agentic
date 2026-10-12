@@ -17,14 +17,14 @@ from types import ModuleType
 import django
 from django.conf import settings
 from django.template import Context, Engine as DjangoEngine, Library, Node
-from django.urls import path
+from django.urls import path as url_path
 
 from django_rusty_templates import Engine
 
 
 def component_library():
     urls = ModuleType("rusty_component_benchmark_urls")
-    urls.urlpatterns = [path("", lambda request: None, name="benchmark_home")]
+    urls.urlpatterns = [url_path("", lambda request: None, name="benchmark_home")]
     sys.modules[urls.__name__] = urls
     module = ModuleType("rusty_component_benchmark")
     module.register = Library()
