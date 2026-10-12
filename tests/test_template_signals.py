@@ -192,12 +192,29 @@ def test_inherited_include_keeps_live_context_and_signals(child):
 
 
 def test_first_context_snapshot_inside_loop_restores_missing_variables(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    from django.template import Library, Node
+
+    # Blocks compile natively now. Use an arbitrary compiler to exercise the
+    # Python fallback that this snapshot regression specifically targets.
+    library = ModuleType("snapshot_fallback_tags")
+    library.register = Library()
+
+    class EmptyNode(Node):
+        def render(self, context):
+            return ""
+
+    library.register.tag("snapshot", lambda parser, token: EmptyNode())
+    monkeypatch.setitem(sys.modules, library.__name__, library)
     # Disable native signaling so the first Python snapshot is made for a
     # fallback child after the loop variable has already entered its scope.
     monkeypatch.setattr(template_rendered, "has_listeners", lambda sender=None: False)
-    child = '{% block body %}{{ item|default:"missing" }}{% endblock %}'
+    child = '{% load snapshot %}{% snapshot %}{% block body %}{{ item|default:"missing" }}{% endblock %}'
     engine = Engine(
-        loaders=[("django.template.loaders.locmem.Loader", {"child.html": child})]
+        libraries={"snapshot": library.__name__},
+        loaders=[("django.template.loaders.locmem.Loader", {"child.html": child})],
     )
     contexts = []
 

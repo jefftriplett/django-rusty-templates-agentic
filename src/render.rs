@@ -1,5 +1,7 @@
+mod callbacks;
 pub mod common;
 pub mod filters;
+pub mod inheritance;
 pub mod lorem;
 pub mod tags;
 pub mod types;

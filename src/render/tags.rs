@@ -118,7 +118,7 @@ impl Resolve for Url {
                     Ok(url) => url,
                     Err(_) => PyString::new(py, "").into_any(),
                 };
-                context.insert(variable.clone(), value);
+                context.insert(variable.clone(), value)?;
                 Ok(None)
             }
         }
@@ -726,6 +726,59 @@ impl Render for Tag {
         context: &mut Context,
     ) -> RenderResult<'t> {
         Ok(match self {
+            Self::Block { name, nodes } => {
+                if let Some(blocks) = &context.python_blocks {
+                    Cow::Owned(
+                        blocks
+                            .bind(py)
+                            .get_item(name)?
+                            .call_method1("render", (context.django_context(py)?,))?
+                            .extract()?,
+                    )
+                } else {
+                    let owner = context
+                        .current_template
+                        .as_ref()
+                        .expect("inside a template")
+                        .clone();
+                    context.render_block(
+                        py,
+                        super::inheritance::BlockEntry {
+                            name: name.clone(),
+                            owner,
+                            nodes: nodes.clone(),
+                        },
+                    )?
+                }
+            }
+            Self::Extends {
+                at,
+                parent,
+                parent_token,
+                relative,
+                ..
+            } => {
+                let parent_value = if let Some(relative) = relative {
+                    PyString::new(py, relative).into_any()
+                } else {
+                    parent
+                        .resolve(py, template, context, ResolveFailures::Raise)?
+                        .map_or_else(|| PyString::new(py, "").into_any(), |value| value.to_py(py))
+                };
+                context
+                    .render_parent(
+                        py,
+                        parent_value,
+                        parent_token,
+                        !matches!(parent, TagElement::Text(_)),
+                    )
+                    .map_err(|error| match error {
+                        PyRenderError::PyErr(error) => {
+                            error.annotate(py, *at, "here", template).into()
+                        }
+                        error => error,
+                    })?
+            }
             Self::Regroup(group) => {
                 let results = PyList::empty(py);
                 if let Some(target) = group.target.resolve(
@@ -765,7 +818,7 @@ impl Render for Tag {
                         }
                     }
                 }
-                context.insert(group.asvar.clone(), results.into_any());
+                context.insert(group.asvar.clone(), results.into_any())?;
                 Cow::Borrowed("")
             }
             Self::IfChanged {
@@ -805,7 +858,7 @@ impl Render for Tag {
                 }
             }
             Self::ResetCycle(id) => {
-                context.reset_cycle(*id);
+                context.reset_cycle(py, *id)?;
                 Cow::Borrowed("")
             }
             Self::With { assignments, nodes } => {
@@ -818,15 +871,23 @@ impl Render for Tag {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut scoped = context.clone_ref(py);
+                let scope = if let Some(live) = &scoped.formatting_context {
+                    Some(live.bind(py).call_method0("push")?)
+                } else {
+                    None
+                };
                 let local_names = values
                     .iter()
                     .map(|(name, _)| (*name).clone())
                     .collect::<Vec<_>>();
                 for (name, value) in values {
-                    scoped.insert(name.clone(), value);
+                    scoped.insert(name.clone(), value)?;
                 }
                 let rendered = nodes.render(py, template, &mut scoped);
-                context.merge_render_state(py, scoped, &local_names);
+                if let Some(scope) = scope {
+                    scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                }
+                context.merge_render_state(py, scoped, &local_names)?;
                 rendered?
             }
             Self::FilterBlock { filters, nodes } => {
@@ -875,7 +936,7 @@ impl Render for Tag {
             Self::WidthRatio { args, asvar } => {
                 let result = render_widthratio(args, py, template, context)?;
                 if let Some(name) = asvar {
-                    context.insert(name.clone(), PyString::new(py, &result).into_any());
+                    context.insert(name.clone(), PyString::new(py, &result).into_any())?;
                     Cow::Borrowed("")
                 } else {
                     Cow::Owned(result)
@@ -885,14 +946,17 @@ impl Render for Tag {
             Self::Autoescape { enabled, nodes } => {
                 let autoescape = context.autoescape;
                 context.autoescape = enabled.into();
-
-                let mut rendered = vec![];
-                for node in nodes {
-                    rendered.push(node.render(py, template, context)?);
+                if let Some(live) = &context.formatting_context {
+                    live.bind(py).setattr("autoescape", context.autoescape)?;
                 }
-
+                let rendered = nodes
+                    .render(py, template, context)
+                    .map(|output| Cow::Owned(output.into_owned()));
                 context.autoescape = autoescape;
-                Cow::Owned(rendered.join(""))
+                if let Some(live) = &context.formatting_context {
+                    live.bind(py).setattr("autoescape", autoescape)?;
+                }
+                rendered?
             }
             Self::If {
                 condition,
@@ -921,7 +985,7 @@ impl Render for Tag {
                     .bind(py)
                     .call(PyTuple::new(py, args)?, Some(&kwargs))?;
                 if let Some(target) = &tag.target_var {
-                    context.insert(target.clone(), output);
+                    context.insert(target.clone(), output)?;
                     Cow::Borrowed("")
                 } else {
                     Content::Py(output).render(context)?
@@ -1283,7 +1347,15 @@ impl Render for Include {
                         None => values.push(PyString::new(py, "").into_any()),
                     }
                 }
+                let scope = if let Some(live) = &context.formatting_context {
+                    Some(live.bind(py).call_method0("push")?)
+                } else {
+                    None
+                };
                 for (key, value) in names.iter().zip(values) {
+                    if let Some(live) = &context.formatting_context {
+                        live.bind(py).set_item(key, &value)?;
+                    }
                     context.append(key.to_string(), value);
                 }
                 let rendered = include
@@ -1291,6 +1363,9 @@ impl Render for Include {
                     .map(|content| Cow::Owned(content.into_owned()));
                 for key in names {
                     context.pop_variable(key);
+                }
+                if let Some(scope) = scope {
+                    scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
                 }
                 rendered
             }
@@ -1342,6 +1417,9 @@ fn call_tag<'t, 'py>(
 }
 
 fn build_pycontext<'py>(py: Python<'py>, context: &mut Context) -> PyResult<Bound<'py, PyAny>> {
+    if let Some(live) = &context.formatting_context {
+        return Ok(live.bind(py).clone());
+    }
     // Take ownership of `context` so we can pass it to Python.
     // The `context` variable now points to an empty `Context` instance which will not be
     // used except as a placeholder.
@@ -1352,6 +1430,9 @@ fn build_pycontext<'py>(py: Python<'py>, context: &mut Context) -> PyResult<Boun
 }
 
 fn retrieve_context<'py>(py: Python<'py>, py_context: Bound<'py, PyAny>, context: &mut Context) {
+    if context.formatting_context.is_some() {
+        return;
+    }
     // Retrieve the PyContext wrapper from Python
     let extracted_context: PyContext = py_context
         .extract()
@@ -1436,7 +1517,7 @@ fn store_target_var<'t>(
             Ok(Cow::Owned(output.str()?.extract::<String>()?))
         }
         Some(target_var) => {
-            context.insert(target_var.clone(), content);
+            context.insert(target_var.clone(), content)?;
             Ok(Cow::Borrowed(""))
         }
     }
@@ -1626,7 +1707,7 @@ impl Render for Now {
 
         if let Some(asvar_at) = self.asvar {
             let var_name = template.content(asvar_at);
-            context.insert(var_name.to_string(), result);
+            context.insert(var_name.to_string(), result)?;
             Ok(Cow::Borrowed(""))
         } else {
             let rendered = result.cast_into::<PyString>().map_err(PyErr::from)?;
@@ -1754,7 +1835,7 @@ impl Render for FirstOf {
                     let rendered = RENDER_FIRSTOF_VALUE
                         .import(py, "django.template.base", "render_value_in_context")?
                         .call1((content.to_py(py), context.django_context(py)?))?;
-                    context.insert(asvar.to_string(), rendered);
+                    context.insert(asvar.to_string(), rendered)?;
                     return Ok(Cow::Borrowed(""));
                 }
 
@@ -1763,7 +1844,7 @@ impl Render for FirstOf {
             }
         }
         if let Some(asvar) = &self.asvar {
-            context.insert(asvar.to_string(), PyString::new(py, "").into_any());
+            context.insert(asvar.to_string(), PyString::new(py, "").into_any())?;
         }
         Ok(Cow::Borrowed(""))
     }
@@ -1781,7 +1862,7 @@ impl SimpleCycle {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> Result<ResolvedCycleValue<'t, 'py>, PyRenderError> {
-        let index = context.next_cycle_index(self.id, self.values.len());
+        let index = context.next_cycle_index(py, self.id, self.values.len())?;
         let CycleValue { value, at } = &self.values[index];
         let content = value.resolve(py, template, context, ResolveFailures::Raise)?;
         Ok(ResolvedCycleValue { at: *at, content })
@@ -1798,9 +1879,9 @@ impl NamedCycle {
         let ResolvedCycleValue { at, content } = self.cycle.resolve_next(py, template, context)?;
 
         if let Some(content) = &content {
-            context.insert_cycle(self.asvar.clone(), content.to_py(py));
+            context.insert_cycle(self.asvar.clone(), content.to_py(py))?;
         } else {
-            context.insert_cycle(self.asvar.clone(), intern!(py, "").clone().into_any());
+            context.insert_cycle(self.asvar.clone(), intern!(py, "").clone().into_any())?;
         }
 
         Ok(ResolvedCycleValue { at, content })

@@ -224,6 +224,12 @@ class InteropTemplate(Template):
 
     def bind_origin(self, origin):
         old_origin = self.origin
+        # Rust exposes fresh Origin objects when delegating renders. Equivalent
+        # loader/name bindings need no work, even when their identities differ.
+        if origin is old_origin or (
+            origin == old_origin and origin.template_name == old_origin.template_name
+        ):
+            return
         self.origin = origin
         for partial in self.extra_data.get("partials", {}).values():
             if partial.origin is old_origin:
