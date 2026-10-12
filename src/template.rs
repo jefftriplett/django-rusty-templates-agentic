@@ -11,8 +11,8 @@ pub mod django_rusty_templates {
 
     use encoding_rs::Encoding;
     use pyo3::exceptions::{
-        PyAttributeError, PyImportError, PyNotImplementedError, PyOverflowError, PyTypeError,
-        PyValueError,
+        PyAttributeError, PyException, PyImportError, PyNotImplementedError, PyOverflowError,
+        PyTypeError, PyValueError,
     };
     use pyo3::import_exception;
     use pyo3::intern;
@@ -1234,6 +1234,14 @@ pub mod django_rusty_templates {
                     .insert(start, (end, crate::parse::PythonNode(Arc::new(node))));
             }
             let nodes = parser.parse().map_err(|error| {
+                if parser.compiler_parser.as_ref().is_some_and(|compiler| {
+                    compiler
+                        .bind(py)
+                        .getattr("compiler_failed")
+                        .is_ok_and(|failed| failed.extract::<bool>().unwrap_or(true))
+                }) {
+                    return native_parse_error(error, &source, filename.as_deref());
+                }
                 canonical_parse_error(
                     py,
                     error,
@@ -1603,10 +1611,11 @@ pub mod django_rusty_templates {
         template_name: Option<&str>,
     ) -> PyErr {
         if let crate::parse::PyParseError::PyErr(ref error) = error
-            && error
-                .value(py)
-                .hasattr("_rusty_compiler_error")
-                .unwrap_or(false)
+            && (!error.is_instance_of::<PyException>(py)
+                || error
+                    .value(py)
+                    .hasattr("_rusty_compiler_error")
+                    .unwrap_or(false))
         {
             return error.clone_ref(py);
         }
@@ -1624,6 +1633,9 @@ pub mod django_rusty_templates {
         })();
         match validation {
             Err(error) => {
+                if !error.is_instance_of::<PyException>(py) {
+                    return error;
+                }
                 let diagnostic = native.value(py).to_string();
                 let _ = error.value(py).setattr("rusty_diagnostic", &diagnostic);
                 let _ = error.value(py).call_method1("add_note", (diagnostic,));
@@ -1674,7 +1686,13 @@ pub mod django_rusty_templates {
                 Err(error) => {
                     if let Some(compiler) = &parser.compiler_parser {
                         let native = native_parse_error(error, template, Some(&filename));
-                        if native.value(py).hasattr("_rusty_compiler_error")? {
+                        if !native.is_instance_of::<PyException>(py)
+                            || compiler
+                                .bind(py)
+                                .getattr("compiler_failed")?
+                                .extract::<bool>()?
+                            || native.value(py).hasattr("_rusty_compiler_error")?
+                        {
                             return Err(native);
                         }
                         return Err(PyErr::from_value(
@@ -1750,7 +1768,13 @@ pub mod django_rusty_templates {
                 Err(error) => {
                     if let Some(compiler) = &parser.compiler_parser {
                         let native = native_parse_error(error, &template, None);
-                        if native.value(py).hasattr("_rusty_compiler_error")? {
+                        if !native.is_instance_of::<PyException>(py)
+                            || compiler
+                                .bind(py)
+                                .getattr("compiler_failed")?
+                                .extract::<bool>()?
+                            || native.value(py).hasattr("_rusty_compiler_error")?
+                        {
                             return Err(native);
                         }
                         return Err(PyErr::from_value(

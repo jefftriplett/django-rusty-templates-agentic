@@ -537,3 +537,79 @@ def test_dynamic_unannotated_replacement_reports_contract_error_once(libraries):
             "{% load custom %}{% replace %}{% late %}"
         )
     assert len(calls) == 1
+
+
+class ReadOnlyControlFlow(BaseException):
+    def __setattr__(self, name, value):
+        raise RuntimeError("exception attributes are readonly")
+
+
+@pytest.mark.parametrize(
+    "exception_type",
+    [KeyboardInterrupt, SystemExit, BaseException, ReadOnlyControlFlow],
+)
+@pytest.mark.parametrize("debug", [False, True])
+def test_compiler_control_flow_exception_is_not_replayed_or_annotated(
+    libraries, exception_type, debug
+):
+    library, modules, _ = libraries
+    error = exception_type("interrupted")
+    calls = []
+
+    @library.tag("interrupt")
+    def interrupt(parser, token):
+        calls.append(token)
+        raise error
+
+    interrupt.rusty_isolated_compiler = True
+    source = "{% load custom %}{% interrupt %}"
+    with pytest.raises(exception_type) as reference:
+        DjangoEngine(libraries=modules, debug=debug).from_string(source)
+    assert reference.value is error
+    assert len(calls) == 1
+    calls.clear()
+    with pytest.raises(exception_type) as caught:
+        Engine(libraries=modules, debug=debug).from_string(source)
+    assert caught.value is error
+    assert len(calls) == 1
+    for attribute in [
+        "token",
+        "template_debug",
+        "rusty_diagnostic",
+        "_rusty_compiler_error",
+    ]:
+        assert not hasattr(error, attribute)
+
+
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("interface", ["string", "region"])
+def test_readonly_exception_annotation_failure_does_not_replay_compiler(
+    libraries, debug, interface
+):
+    library, modules, _ = libraries
+    calls = []
+
+    class ReadOnlyException(Exception):
+        def __setattr__(self, name, value):
+            raise AttributeError("exception attributes are readonly")
+
+    @library.tag("frozen")
+    def frozen(parser, token):
+        calls.append(token)
+        raise ReadOnlyException("original failure")
+
+    frozen.rusty_isolated_compiler = True
+    source = "{% load custom %}{% frozen %}"
+    with pytest.raises(AttributeError) as expected:
+        DjangoEngine(libraries=modules, debug=debug).from_string(source)
+    assert len(calls) == 1
+    calls.clear()
+    with pytest.raises(AttributeError) as caught:
+        engine = Engine(libraries=modules, debug=debug)
+        if interface == "string":
+            engine.from_string(source)
+        else:
+            engine._compile_interop_region(source, [])
+    assert type(caught.value) is type(expected.value)
+    assert str(caught.value) == str(expected.value)
+    assert len(calls) == 1

@@ -24,6 +24,7 @@ class CompilerParser(Parser):
         self._source_bytes = source.encode()
         self._tokenized = False
         self.completed_spans = []
+        self.compiler_failed = False
 
     def load(self, source):
         # Loading a library updates the persistent parser's tags and filters;
@@ -65,18 +66,24 @@ class CompilerParser(Parser):
         assert token.token_type == TokenType.BLOCK
         self.command_stack.append((token.contents.split()[0], token))
         try:
-            node = compiler(self, token)
+            try:
+                node = compiler(self, token)
+            except Exception as error:
+                # Match Parser.parse(): compiler errors are annotated here,
+                # while errors from extend_nodelist go straight to Template.
+                raise self.error(token, error)
             self.extend_nodelist(NodeList(), node, token)
-        except Exception as error:
-            error = self.error(token, error)
-            error._rusty_compiler_error = True
-            if self.engine.debug:
+        except BaseException as error:
+            # Record failure before Template's debug hook. Annotation itself
+            # may fail for readonly exceptions; neither error may replay a call.
+            self.compiler_failed = True
+            if isinstance(error, Exception) and self.engine.debug:
                 from .diagnostics import get_exception_info
 
                 error.template_debug = get_exception_info(
                     self.source, self.origin, error, error.token
                 )
-            raise error
+            raise
         self.command_stack.pop()
         # delete_first_token() deliberately doesn't use next_token() in Django.
         # The first still-pending token provides the exact consumed boundary.
