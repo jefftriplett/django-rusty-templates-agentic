@@ -8,11 +8,11 @@ Results are synthetic microseconds per iteration, not HTTP request timings.
 import argparse
 import json
 import platform
-import statistics
 import sys
-import timeit
 from pathlib import Path
 from types import ModuleType
+
+from benchmark_pairs import compare_pairs, measure_pairs
 
 import django
 from django.conf import settings
@@ -70,7 +70,7 @@ def main():
             SECRET_KEY="benchmark",
             ROOT_URLCONF="rusty_component_benchmark_urls",
         )
-    results = {}
+    operations = {}
     values = {"values": list(range(args.iterations))}
     libraries = component_library()
     for debug in [False, True]:
@@ -131,12 +131,17 @@ def main():
                             )
                             captured = Context({**values, **padding})
 
-                            def lookup():
+                            def lookup(captured=captured):
                                 return captured["i"]
 
                             captured["lookup"] = lookup
 
-                        def render():
+                        def render(
+                            engine=engine,
+                            path=path,
+                            template=template,
+                            captured=captured,
+                        ):
                             current = (
                                 engine.get_template("loop.html")
                                 if path == "load_and_render"
@@ -148,17 +153,10 @@ def main():
 
                         for _ in range(3):
                             assert render() == expected
-                        samples = timeit.repeat(
-                            render, number=args.number, repeat=args.repeat
-                        )
                         key = f"debug={debug}/cached={cached}/{shape}/{name}/{path}"
-                        results[key] = (
-                            statistics.median(samples)
-                            / args.number
-                            / args.iterations
-                            * 1e6
-                        )
-    fixed_results = {}
+                        operations[key] = (render, args.number, 1 / args.iterations)
+    results, paired_ratios = measure_pairs(operations, args.repeat)
+    fixed_operations = {}
     for debug in [False, True]:
         for shape, source in [
             ("flat", "content"),
@@ -185,7 +183,9 @@ def main():
                     for render_path in ["loaded", "load_and_render"]:
                         template = engine.get_template("page.html")
 
-                        def render_fixed():
+                        def render_fixed(
+                            engine=engine, render_path=render_path, template=template
+                        ):
                             current = (
                                 engine.get_template("page.html")
                                 if render_path == "load_and_render"
@@ -195,15 +195,17 @@ def main():
 
                         for _ in range(3):
                             assert render_fixed() == "content"
-                        samples = timeit.repeat(
+                        key = f"debug={debug}/cached={cached}/{shape}/{name}/{render_path}"
+                        fixed_operations[key] = (
                             render_fixed,
-                            number=max(args.number, 1000),
-                            repeat=args.repeat,
+                            max(args.number, 1000),
+                            1,
                         )
-                        fixed_results[
-                            f"debug={debug}/cached={cached}/{shape}/{name}/{render_path}"
-                        ] = statistics.median(samples) / max(args.number, 1000) * 1e6
+    fixed_results, fixed_ratios = measure_pairs(fixed_operations, args.repeat)
+    paired_ratios.update(fixed_ratios)
     report = {
+        "measurement": "paired-shuffled-v1",
+        "paired_ratios": paired_ratios,
         "python": platform.python_version(),
         "django": django.get_version(),
         "platform": platform.platform(),
@@ -221,25 +223,7 @@ def main():
         for field in ["python", "django", "number", "repeat", "iterations"]:
             if baseline[field] != report[field]:
                 raise SystemExit(f"Incompatible baseline: {field}")
-        failures = []
-        for key, value in {**results, **fixed_results}.items():
-            if "/rusty/" not in key:
-                continue
-            metric = (
-                "microseconds_per_iteration"
-                if key in results
-                else "microseconds_per_render"
-            )
-            measurements = report[metric]
-            reference = baseline[metric][key]
-            # The unchanged Django arm calibrates CPU drift between builds.
-            django_key = key.replace("/rusty/", "/django/")
-            control_ratio = measurements[django_key] / baseline[metric][django_key]
-            ratio = (value / reference) / control_ratio
-            if ratio > 1 + args.max_regression:
-                failures.append(f"{key}: {ratio:.2f}x baseline relative to Django")
-        if failures:
-            raise SystemExit("Performance regression:\n" + "\n".join(failures))
+        compare_pairs(baseline, report, args.max_regression)
 
 
 if __name__ == "__main__":

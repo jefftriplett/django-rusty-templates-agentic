@@ -8,13 +8,13 @@ import argparse
 import hashlib
 import json
 import platform
-import statistics
 import sys
 import tempfile
-import timeit
 import warnings
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+
+from benchmark_pairs import compare_pairs, measure_pairs
 
 import django
 from django.conf import settings
@@ -106,7 +106,7 @@ def main():
         "object": {"": {"name": "ok"}},
         "format": "Y",
     }
-    results = {}
+    operations = {}
     with (
         warnings.catch_warnings(),
         tempfile.TemporaryDirectory(prefix="rusty-parser-") as directory,
@@ -147,43 +147,50 @@ def main():
                                 ),
                             )
 
-                            def compile_template():
+                            def compile_template(
+                                engine=engine,
+                                source=source,
+                                origin=origin,
+                                name=filename.name,
+                            ):
                                 return engine._compile_loaded_template(
-                                    source, origin, filename.name
+                                    source, origin, name
                                 )
                         else:
                             origin = loaded.origin
 
-                            def compile_template():
+                            def compile_template(
+                                engine=engine,
+                                source=source,
+                                origin=origin,
+                                name=filename.name,
+                            ):
                                 return Template(
                                     source,
                                     origin=origin,
-                                    name=filename.name,
+                                    name=name,
                                     engine=engine,
                                 )
 
                         assert compile_template().render(Context(values)) == expected
 
-                        def render():
+                        def render(loaded=loaded):
                             return loaded.render(Context(values))
 
-                        def load_and_render():
-                            return engine.get_template(filename.name).render(
-                                Context(values)
-                            )
+                        def load_and_render(engine=engine, name=filename.name):
+                            return engine.get_template(name).render(Context(values))
 
                         for phase, operation in [
                             ("compile", compile_template),
                             ("warm_render", render),
                             ("load_and_render", load_and_render),
                         ]:
-                            samples = timeit.repeat(
-                                operation, number=args.number, repeat=args.repeat
-                            )
-                            results[
-                                f"{case}/debug={debug}/cached={cached}/{arm}/{phase}"
-                            ] = statistics.median(samples) / args.number * 1e6
+                            key = f"{case}/debug={debug}/cached={cached}/{arm}/{phase}"
+                            operations[key] = (operation, args.number, 1)
+        results, paired_ratios = measure_pairs(operations, args.repeat)
     report = dict(
+        measurement="paired-shuffled-v1",
+        paired_ratios=paired_ratios,
         python=platform.python_version(),
         django=django.get_version(),
         number=args.number,
@@ -202,18 +209,7 @@ def main():
         for field in ["python", "django", "number", "repeat", "sources"]:
             if base[field] != report[field]:
                 raise SystemExit(f"Incompatible baseline: {field}")
-        failures = []
-        for key, value in results.items():
-            if "/rusty/" not in key:
-                continue
-            control = key.replace("/rusty/", "/django/")
-            ratio = (value / base["microseconds"][key]) / (
-                results[control] / base["microseconds"][control]
-            )
-            if ratio > 1 + args.max_regression:
-                failures.append(f"{key}: {ratio:.2f}x baseline relative to Django")
-        if failures:
-            raise SystemExit("Performance regression:\n" + "\n".join(failures))
+        compare_pairs(base, report, args.max_regression)
 
 
 if __name__ == "__main__":

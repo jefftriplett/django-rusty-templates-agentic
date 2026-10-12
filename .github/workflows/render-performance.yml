@@ -8,6 +8,7 @@ on:
       - 'python/**'
       - 'dtl-lexer/**'
       - 'scripts/benchmark_loop_values.py'
+      - 'scripts/benchmark_pairs.py'
       - 'scripts/benchmark_callback_contexts.py'
       - 'scripts/benchmark_mixed_templates.py'
       - 'scripts/benchmark_parsing_features.py'
