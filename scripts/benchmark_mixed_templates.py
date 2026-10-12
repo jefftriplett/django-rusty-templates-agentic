@@ -78,7 +78,9 @@ def main():
                         compile_origin = Origin(
                             str(Path(directory, "page.html")),
                             template_name="page.html",
-                            loader=SimpleNamespace(_native=origin.loader),
+                            loader=SimpleNamespace(
+                                _native=getattr(origin.loader, "_native", origin.loader)
+                            ),
                         )
 
                         def compile_template():
@@ -112,17 +114,26 @@ def main():
                         "load_and_render": load_and_render,
                     }
                     for phase, operation in phases.items():
+                        # Cached lookup takes about a microsecond. Thirty
+                        # calls are too few to distinguish regressions from
+                        # timer/scheduling noise; retain the same threshold.
+                        number = (
+                            max(args.number, 10000)
+                            if phase == "load" and cached
+                            else args.number
+                        )
                         samples = timeit.repeat(
-                            operation, number=args.number, repeat=args.repeat
+                            operation, number=number, repeat=args.repeat
                         )
                         results[f"debug={debug}/cached={cached}/{name}/{phase}"] = (
-                            statistics.median(samples) / args.number * 1e6
+                            statistics.median(samples) / number * 1e6
                         )
     report = {
         "python": platform.python_version(),
         "django": django.get_version(),
         "number": args.number,
         "repeat": args.repeat,
+        "cached_load_number": max(args.number, 10000),
         "microseconds": results,
     }
     if args.json_output:
@@ -130,8 +141,8 @@ def main():
     print(json.dumps(report, indent=2))
     if args.baseline:
         baseline = json.loads(args.baseline.read_text())
-        for field in ["python", "django", "number", "repeat"]:
-            if baseline[field] != report[field]:
+        for field in ["python", "django", "number", "repeat", "cached_load_number"]:
+            if baseline.get(field) != report[field]:
                 raise SystemExit(f"Incompatible baseline: {field}")
         failures = []
         for key, value in results.items():
