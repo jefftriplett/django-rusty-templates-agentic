@@ -7,6 +7,8 @@ Use a release-built extension; results are synthetic, not HTTP timings.
 
 import argparse
 import json
+import hashlib
+import importlib.metadata
 import platform
 import statistics
 import tempfile
@@ -105,6 +107,21 @@ def main():
                     def load_and_render():
                         return engine.get_template("page.html").render(Context(values))
 
+                    # Prepare fresh child templates outside the timed region.
+                    # Dependencies retain the selected loader cache policy.
+                    first_samples = []
+                    for _ in range(args.repeat):
+                        fresh = [compile_template() for _ in range(args.number)]
+                        first_samples.append(
+                            timeit.timeit(
+                                lambda: fresh.pop().render(Context(values)),
+                                number=args.number,
+                            )
+                        )
+                    results[f"debug={debug}/cached={cached}/{name}/first_render"] = (
+                        statistics.median(first_samples) / args.number * 1e6
+                    )
+
                     phases = {
                         "read_source": lambda: Path(directory, "page.html").read_text(),
                         "compile": compile_template,
@@ -130,6 +147,11 @@ def main():
                         )
     report = {
         "python": platform.python_version(),
+        "platform": platform.platform(),
+        "rusty_version": importlib.metadata.version("django-rusty-templates-agentic"),
+        "fixture_sha256": hashlib.sha256(
+            json.dumps(sources, sort_keys=True).encode()
+        ).hexdigest(),
         "django": django.get_version(),
         "number": args.number,
         "repeat": args.repeat,
@@ -141,7 +163,14 @@ def main():
     print(json.dumps(report, indent=2))
     if args.baseline:
         baseline = json.loads(args.baseline.read_text())
-        for field in ["python", "django", "number", "repeat", "cached_load_number"]:
+        for field in [
+            "python",
+            "django",
+            "number",
+            "repeat",
+            "cached_load_number",
+            "fixture_sha256",
+        ]:
             if baseline.get(field) != report[field]:
                 raise SystemExit(f"Incompatible baseline: {field}")
         failures = []
