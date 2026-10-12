@@ -341,3 +341,29 @@ def test_native_body_error_is_not_masked_at_fallback_parent(monkeypatch, debug):
         if debug:
             assert caught.value.template_debug["name"] == "child.html"
             assert "for first, second in rows" in caught.value.template_debug["during"]
+
+
+@pytest.mark.parametrize("debug", [False, True])
+def test_warm_native_parent_does_not_cross_python_loader_bridge(monkeypatch, debug):
+    templates = {
+        "base.html": "{% block body %}base{% endblock %}",
+        "child.html": '{% extends "base.html" %}{% block body %}child {{ value }}{% endblock %}',
+    }
+    engine = Engine(
+        debug=debug,
+        loaders=[
+            (
+                "django.template.loaders.cached.Loader",
+                [("django.template.loaders.locmem.Loader", templates)],
+            )
+        ],
+    )
+    child = engine.get_template("child.html")
+    assert child.render(Context({"value": "<&>"})) == "child &lt;&amp;&gt;"
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Warm native inheritance crossed Python's loader bridge")
+
+    monkeypatch.setattr("django_rusty_templates.interop.find_template", unexpected)
+    for _ in range(3):
+        assert child.render(Context({"value": "<&>"})) == "child &lt;&amp;&gt;"

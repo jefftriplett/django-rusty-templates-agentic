@@ -673,6 +673,28 @@ pub mod django_rusty_templates {
     }
 
     impl Engine {
+        /// Peek only at the first loader: later loaders cannot bypass an
+        /// earlier uncached loader's search order. Misses use normal loading.
+        pub(crate) fn cached_native_template(
+            &self,
+            py: Python<'_>,
+            name: &str,
+        ) -> Option<Template> {
+            let loaders = self
+                .template_loaders
+                .lock_py_attached(py)
+                .expect("loader lock is not poisoned");
+            let Loader::Cached(loader) = loaders.first()? else {
+                return None;
+            };
+            let mut template = loader.cache.get(name)?.as_ref().ok()?.clone();
+            if !template.is_native() {
+                return None;
+            }
+            template.loader_path.insert(0, 0);
+            Some(template)
+        }
+
         pub fn dirs(&self, py: Python<'_>) -> PyResult<Vec<PathBuf>> {
             if let Some(configuration) = &self.configuration {
                 return configuration
@@ -1087,10 +1109,12 @@ pub mod django_rusty_templates {
 
         /// Inspect native compilation without compiling a Python fallback tree.
         /// Custom tag libraries can execute registration code during inspection.
+        #[pyo3(signature = (source, template_name=None))]
         fn explain_template<'py>(
             &self,
             py: Python<'py>,
             source: &str,
+            template_name: Option<String>,
         ) -> PyResult<Bound<'py, PyDict>> {
             let report = PyDict::new(py);
             report.set_item("mode", "native")?;
@@ -1102,7 +1126,12 @@ pub mod django_rusty_templates {
                 report.set_item("reason", "version-specific Django variable syntax")?;
                 return Ok(report);
             }
-            let mut parser = Parser::new(py, TemplateString(source), self.engine.clone(), None);
+            let mut parser = Parser::new(
+                py,
+                TemplateString(source),
+                self.engine.clone(),
+                template_name.as_deref(),
+            );
             match parser.parse() {
                 Ok(_) => {}
                 Err(crate::parse::PyParseError::PyErr(error))
@@ -1139,6 +1168,59 @@ pub mod django_rusty_templates {
                 }
             }
             Ok(report)
+        }
+
+        #[pyo3(signature = (source, callbacks, template_name=None, filename=None))]
+        fn _compile_interop_region(
+            &self,
+            py: Python<'_>,
+            source: String,
+            callbacks: Vec<(usize, usize, Py<PyAny>)>,
+            template_name: Option<String>,
+            filename: Option<PathBuf>,
+        ) -> PyResult<Template> {
+            let mut parser = Parser::new(
+                py,
+                TemplateString(&source),
+                self.engine.clone(),
+                template_name.as_deref(),
+            );
+            for (start, end, node) in callbacks {
+                if start >= end
+                    || end > source.len()
+                    || !source.is_char_boundary(start)
+                    || !source.is_char_boundary(end)
+                {
+                    return Err(PyValueError::new_err("Invalid interop node source span"));
+                }
+                parser
+                    .python_nodes
+                    .insert(start, (end, crate::parse::PythonNode(Arc::new(node))));
+            }
+            let nodes = parser.parse().map_err(|error| {
+                canonical_parse_error(
+                    py,
+                    error,
+                    self.engine.clone(),
+                    &source,
+                    filename.as_deref(),
+                    template_name.as_deref(),
+                )
+            })?;
+            Ok(Template {
+                template: Arc::from(source),
+                filename,
+                template_name,
+                nodes: Arc::new(nodes),
+                engine: self.engine.clone(),
+                loader_path: Vec::new(),
+                inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
+                django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
+                fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
+                native_blocks: Arc::new(OnceLock::new()),
+                python_renderer: None,
+                has_inheritance: false,
+            })
         }
 
         fn _syntax_diagnostic(

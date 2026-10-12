@@ -9,14 +9,44 @@ import argparse
 import json
 import platform
 import statistics
+import sys
 import timeit
 from pathlib import Path
+from types import ModuleType
 
 import django
 from django.conf import settings
-from django.template import Context, Engine as DjangoEngine
+from django.template import Context, Engine as DjangoEngine, Library, Node
 
 from django_rusty_templates import Engine
+
+
+def component_library():
+    module = ModuleType("rusty_component_benchmark")
+    module.register = Library()
+    sys.modules[module.__name__] = module
+
+    @module.register.simple_tag
+    def badge(value):
+        return f"badge:{value}"
+
+    @module.register.inclusion_tag("card.html")
+    def card(value):
+        return {"value": value}
+
+    class CustomNode(Node):
+        def __init__(self, expression):
+            self.expression = expression
+
+        def render(self, context):
+            context["seen"] = self.expression.resolve(context)
+            return f"custom:{context['seen']}"
+
+    @module.register.tag("custom")
+    def compile_custom(parser, token):
+        return CustomNode(parser.compile_filter(token.split_contents()[1]))
+
+    return {"components": module.__name__}
 
 
 def main():
@@ -34,18 +64,39 @@ def main():
         settings.configure(USE_I18N=False, SECRET_KEY="benchmark")
     results = {}
     values = {"values": list(range(args.iterations))}
+    libraries = component_library()
     for debug in [False, True]:
         for shape, body in [
             ("text", "x"),
             ("one", "{{ i }}"),
             ("two", "{{ i }}{{ i }}"),
+            (
+                "components",
+                "{% badge i %}/{{ i }}/{% card i %}/{% custom i %}/{{ seen }}/{% include 'part.html' with value=i %}|",
+            ),
         ]:
-            source = "{% for i in values %}" + body + "{% endfor %}"
+            source = (
+                ("{% load components %}" if shape == "components" else "")
+                + "{% for i in values %}"
+                + body
+                + "{% endfor %}"
+            )
             expected = "".join(
-                "x" if shape == "text" else str(i) * (1 if shape == "one" else 2)
+                f"badge:{i}/{i}/card:{i}/custom:{i}/{i}/part:{i}|"
+                if shape == "components"
+                else "x"
+                if shape == "text"
+                else str(i) * (1 if shape == "one" else 2)
                 for i in values["values"]
             )
-            loader = ("django.template.loaders.locmem.Loader", {"loop.html": source})
+            loader = (
+                "django.template.loaders.locmem.Loader",
+                {
+                    "loop.html": source,
+                    "card.html": "card:{{ value }}",
+                    "part.html": "part:{{ value }}",
+                },
+            )
             for name, kind in [("rusty", Engine), ("django", DjangoEngine)]:
                 for cached in [True, False]:
                     loaders = (
@@ -53,7 +104,7 @@ def main():
                         if cached
                         else [loader]
                     )
-                    engine = kind(loaders=loaders, debug=debug)
+                    engine = kind(loaders=loaders, debug=debug, libraries=libraries)
                     for path in ["loaded", "string", "load_and_render"]:
                         template = (
                             engine.from_string(source)

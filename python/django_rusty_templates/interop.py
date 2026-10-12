@@ -12,8 +12,9 @@ from django.template.base import (
     TextNode,
     VariableNode,
 )
-from django.template.loader_tags import ExtendsNode
-from django.template.defaulttags import ForNode, IfNode
+from django.template.loader_tags import BlockNode, ExtendsNode, IncludeNode
+from django.template.defaulttags import CommentNode, ForNode, IfNode, LoadNode, URLNode
+from django.template.library import InclusionNode, SimpleNode
 
 
 class NativeVariableNode(VariableNode):
@@ -45,13 +46,21 @@ class NativeRegionNode(Node):
 
     child_nodelists = ("nodelist",)
     render = NativeVariableNode.render
-    native = NativeVariableNode.native
 
-    def __init__(self, nodes, engine, source):
+    @property
+    def native(self):
+        if self._native is None:
+            self._native = self.engine._compile_interop_region(
+                self.source, self.callbacks, self.origin.template_name, self.origin.name
+            )
+        return self._native
+
+    def __init__(self, nodes, engine, source, callbacks=()):
         self.nodelist = NodeList(nodes)
         self.engine = engine
         self.source = source
         self._native = None
+        self.callbacks = callbacks
         self.token = nodes[0].token
         self.origin = nodes[0].origin
         self.load_prefix = nodes[0].load_prefix
@@ -97,7 +106,9 @@ class NativeParser(Parser):
                 for name in node.child_nodelists
                 for child in getattr(node, name)
             )
-        return False
+        # Inheritance remains visible to Django's block discovery. Other
+        # opaque nodes can execute at explicit boundaries inside a Rust region.
+        return type(node) not in (BlockNode, ExtendsNode)
 
     def parse(self, parse_until=None):
         self.parse_depth += 1
@@ -107,6 +118,7 @@ class NativeParser(Parser):
             self.parse_depth -= 1
         if self.native_engine.debug or self.parse_depth:
             return nodes
+        self.inspection_nodes = nodes
         return self.group_nodes(nodes)
 
     def group_nodes(self, nodes):
@@ -118,12 +130,62 @@ class NativeParser(Parser):
             variables = [
                 node for node in region if isinstance(node, NativeVariableNode)
             ]
-            structural = any(type(node) in (ForNode, IfNode) for node in region)
+            structural = any(
+                type(node) not in (TextNode, NativeVariableNode) for node in region
+            )
             if len(variables) >= 2 or structural:
                 start = region[0].token._native_position[0]
                 end = region[-1]._native_end
                 source = region[0].load_prefix + self.source[start:end]
-                grouped.append(NativeRegionNode(region[:], self.native_engine, source))
+                callbacks = []
+                prefix_bytes = len(region[0].load_prefix.encode())
+                offsets = [prefix_bytes]
+                for character in self.source[start:end]:
+                    offsets.append(offsets[-1] + len(character.encode()))
+
+                def collect(node):
+                    if (
+                        isinstance(node, (NativeVariableNode, NativeRegionNode))
+                        or type(node) is TextNode
+                    ):
+                        return
+                    if type(node) in (ForNode, IfNode):
+                        for name in node.child_nodelists:
+                            for child in getattr(node, name):
+                                collect(child)
+                        return
+                    node_start = node.token._native_position[0]
+                    node_end = node._native_end
+                    span = node.load_prefix + self.source[node_start:node_end]
+                    if (
+                        type(node)
+                        in (
+                            SimpleNode,
+                            InclusionNode,
+                            URLNode,
+                            IncludeNode,
+                            LoadNode,
+                            CommentNode,
+                        )
+                        and self.native_engine.explain_template(
+                            span, self.origin.template_name
+                        )["mode"]
+                        == "native"
+                    ):
+                        return
+                    for name in node.child_nodelists:
+                        children = getattr(node, name, None)
+                        if children is not None:
+                            children[:] = self.group_nodes(children)
+                    callbacks.append(
+                        (offsets[node_start - start], offsets[node_end - start], node)
+                    )
+
+                for node in region:
+                    collect(node)
+                grouped.append(
+                    NativeRegionNode(region[:], self.native_engine, source, callbacks)
+                )
             else:
                 grouped.extend(region)
             region.clear()
@@ -164,11 +226,9 @@ class NativeParser(Parser):
         return grouped
 
     def extend_nodelist(self, nodelist, node, token):
-        end = (
-            self.last_token._native_position[1]
-            if type(node) in (ForNode, IfNode)
-            else token._native_position[1]
-        )
+        # A compiler may consume a block or perform lookahead and push a token
+        # back. The next remaining token identifies its actual consumed span.
+        end = self.tokens[-1]._native_position[0] if self.tokens else len(self.source)
         if token.contents.startswith("load ") and token.token_type.value == 2:
             self.load_prefix += "{% " + token.contents + " %}"
         if isinstance(node, ExtendsNode):
@@ -189,6 +249,18 @@ class NativeParser(Parser):
         super().extend_nodelist(nodelist, node, token)
 
 
+class InspectionNodeList(NodeList):
+    """Keep Django's public node indexing while rendering compiled regions."""
+
+    def __init__(self, inspection_nodes, rendering_nodes):
+        super().__init__(inspection_nodes)
+        self.contains_nontext = inspection_nodes.contains_nontext
+        self.rendering_nodes = rendering_nodes
+
+    def render(self, context):
+        return self.rendering_nodes.render(context)
+
+
 class InteropTemplate(Template):
     @staticmethod
     def compile_native_nodes(nodes):
@@ -196,6 +268,12 @@ class InteropTemplate(Template):
             if isinstance(node, (NativeVariableNode, NativeRegionNode)):
                 # Compile only the maximal regions, not their inspection nodes.
                 node.native
+                if isinstance(node, NativeRegionNode):
+                    for _, _, callback in node.callbacks:
+                        for name in callback.child_nodelists:
+                            InteropTemplate.compile_native_nodes(
+                                getattr(callback, name, ())
+                            )
             else:
                 for name in node.child_nodelists:
                     InteropTemplate.compile_native_nodes(getattr(node, name, ()))
@@ -208,7 +286,7 @@ class InteropTemplate(Template):
             self.compile_native_nodes(nodes)
             for partial in self.extra_data.get("partials", {}).values():
                 self.compile_native_nodes(partial.nodelist)
-            return nodes
+            return InspectionNodeList(getattr(parser, "inspection_nodes", nodes), nodes)
         except Exception as error:
             diagnostic = self.engine._syntax_diagnostic(
                 self.source,
@@ -234,7 +312,9 @@ class InteropTemplate(Template):
         for partial in self.extra_data.get("partials", {}).values():
             if partial.origin is old_origin:
                 partial.origin = origin
-        for node in self.nodelist.get_nodes_by_type(Node):
+        for node in self.nodelist.rendering_nodes.get_nodes_by_type(
+            Node
+        ) + self.nodelist.get_nodes_by_type(Node):
             if node.origin is old_origin:
                 node.origin = origin
 

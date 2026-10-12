@@ -972,6 +972,19 @@ impl Render for Tag {
             Self::For(for_tag) => for_tag.render(py, template, context)?,
             Self::Include(include_tag) => include_tag.render(py, template, context)?,
             Self::Load => Cow::Borrowed(""),
+            Self::PythonNode(node) => {
+                let live = context.formatting_context.as_ref().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "Interop regions require a live Django Context",
+                    )
+                })?;
+                let output = node
+                    .0
+                    .bind(py)
+                    .call_method1("render_annotated", (live.bind(py),))?;
+                context.refresh_formatting_flags(py)?;
+                Cow::Owned(output.extract::<String>()?)
+            }
             Self::QueryString(tag) => {
                 let mut args = build_args(py, template, context, &tag.args)?;
                 let kwargs = build_kwargs(py, template, context, &tag.kwargs)?;

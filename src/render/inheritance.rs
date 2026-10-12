@@ -167,6 +167,25 @@ impl Context {
                     skip.append(origin.bind(py))?;
                 }
                 let engine = &self.root_template.as_ref().unwrap_or(&current).engine;
+                let cached = parent
+                    .extract::<String>()
+                    .ok()
+                    .and_then(|name| engine.cached_native_template(py, &name));
+                if let Some(cached) = cached {
+                    let origin = cached.origin().into_pyobject(py)?.into_any();
+                    // Compare full origins, not just template names: aliases
+                    // and same-name overrides must still honor Django skips.
+                    if !skip.contains(&origin)? {
+                        self.inheritance_history.push(Arc::new(origin.unbind()));
+                        self.add_blocks(&current);
+                        if !cached.extends_parent() {
+                            self.add_blocks(&Arc::new(cached.clone()));
+                        }
+                        return cached
+                            .render_chain(py, self)
+                            .map(|output| std::borrow::Cow::Owned(output.into_owned()));
+                    }
+                }
                 let loaded = py
                     .import("django_rusty_templates.interop")?
                     .getattr("find_template")?
