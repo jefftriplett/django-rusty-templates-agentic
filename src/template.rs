@@ -364,6 +364,7 @@ pub mod django_rusty_templates {
                     nodes: Arc::new(Vec::new()),
                     has_inheritance: false,
                     has_python_callbacks: false,
+                    has_simple_tag_results: false,
                     engine: self.engine.clone(),
                     template_name: Some(renderer.getattr("name")?.extract()?),
                     loader_path: loader.path[self.path.len()..].to_vec(),
@@ -803,6 +804,7 @@ pub mod django_rusty_templates {
                 nodes: Arc::new(Vec::new()),
                 has_inheritance: false,
                 has_python_callbacks: false,
+                has_simple_tag_results: false,
                 engine,
             });
         }
@@ -1257,6 +1259,7 @@ pub mod django_rusty_templates {
                 template: Arc::from(source),
                 filename,
                 template_name,
+                has_simple_tag_results: Template::nodes_have_simple_tag_results(&nodes),
                 nodes: Arc::new(nodes),
                 engine: self.engine.clone(),
                 loader_path: Vec::new(),
@@ -1569,6 +1572,7 @@ pub mod django_rusty_templates {
         partial_data: Arc<InspectionNodes>,
         has_inheritance: bool,
         has_python_callbacks: bool,
+        has_simple_tag_results: bool,
         python_renderer: Option<Arc<Py<PyAny>>>,
     }
 
@@ -1735,6 +1739,7 @@ pub mod django_rusty_templates {
                 python_renderer,
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
                 has_python_callbacks,
+                has_simple_tag_results: Template::nodes_have_simple_tag_results(&nodes),
                 nodes: Arc::new(nodes),
                 engine,
             })
@@ -1819,6 +1824,7 @@ pub mod django_rusty_templates {
                 python_renderer,
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
                 has_python_callbacks,
+                has_simple_tag_results: Template::nodes_have_simple_tag_results(&nodes),
                 nodes: Arc::new(nodes),
                 engine,
             })
@@ -1912,6 +1918,7 @@ pub mod django_rusty_templates {
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
                 has_python_callbacks: self.has_python_callbacks
                     && Self::nodes_have_callbacks(&nodes),
+                has_simple_tag_results: Self::nodes_have_simple_tag_results(&nodes),
                 nodes,
                 inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
                 django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
@@ -1925,6 +1932,19 @@ pub mod django_rusty_templates {
 
         fn has_inheritance(&self) -> bool {
             self.has_inheritance
+        }
+
+        fn nodes_have_simple_tag_results(nodes: &[TokenTree]) -> bool {
+            nodes.iter().any(|node| {
+                (match node {
+                    TokenTree::Tag(Tag::SimpleTag(tag)) => tag.target_var.is_none(),
+                    TokenTree::Tag(Tag::SimpleBlockTag(tag)) => tag.target_var.is_none(),
+                    _ => false,
+                }) || node
+                    .child_nodes()
+                    .iter()
+                    .any(|children| Self::nodes_have_simple_tag_results(children))
+            })
         }
 
         fn nodes_have_callbacks(nodes: &[TokenTree]) -> bool {
@@ -2108,10 +2128,16 @@ pub mod django_rusty_templates {
                 &mut context.string_if_invalid,
                 self.engine.string_if_invalid.clone(),
             );
+            let previous_validation = std::mem::replace(
+                &mut context.validate_tag_results,
+                self.has_simple_tag_results,
+            );
             let result = context.join_scope(|context| {
                 let template = TemplateString(&self.template);
                 for (index, node) in nodes.iter().enumerate() {
-                    context.join_index = index;
+                    if context.validate_tag_results {
+                        context.join_index = index;
+                    }
                     match node.render_into(py, template, context, output) {
                         Err(PyRenderError::PyErr(error)) => {
                             if self.engine.debug.load(Ordering::Relaxed) {
@@ -2136,6 +2162,7 @@ pub mod django_rusty_templates {
                 }
                 Ok(())
             });
+            context.validate_tag_results = previous_validation;
             context.string_if_invalid = previous_invalid;
             context.python_blocks = previous_python_blocks;
             context.current_template = previous_template;

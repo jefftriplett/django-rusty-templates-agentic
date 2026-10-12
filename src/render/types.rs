@@ -104,6 +104,7 @@ pub struct Context {
     pub format_values: bool,
     pub instrument_render: bool,
     // Join metadata only; ordinary rendering still appends to a shared buffer.
+    pub(crate) validate_tag_results: bool,
     pub(crate) join_index: usize,
     pub(crate) join_error: Option<(usize, String)>,
     pub formatting_context: Option<Py<PyAny>>,
@@ -134,6 +135,9 @@ impl Context {
         &mut self,
         render: impl FnOnce(&mut Self) -> Result<T, crate::error::PyRenderError>,
     ) -> Result<T, crate::error::PyRenderError> {
+        if !self.validate_tag_results {
+            return render(self);
+        }
         let parent_index = std::mem::replace(&mut self.join_index, 0);
         let parent_error = self.join_error.take();
         let result = render(self).and_then(|value| {
@@ -164,6 +168,7 @@ impl Context {
             use_tz: None,
             format_values: false,
             instrument_render: true,
+            validate_tag_results: false,
             join_index: 0,
             join_error: None,
             formatting_context: None,
@@ -199,6 +204,7 @@ impl Context {
             use_tz: self.use_tz,
             format_values: self.format_values,
             instrument_render: self.instrument_render,
+            validate_tag_results: self.validate_tag_results,
             join_index: 0,
             join_error: None,
             formatting_context: self.formatting_context.as_ref().map(|v| v.clone_ref(py)),

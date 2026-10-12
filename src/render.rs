@@ -151,7 +151,9 @@ where
         // non-string result until then, so a later callback error wins.
         context.join_scope(|context| {
             for (index, node) in self.iter().enumerate() {
-                context.join_index = index;
+                if context.validate_tag_results {
+                    context.join_index = index;
+                }
                 node.render_into(py, template, context, output)?;
             }
             Ok(())

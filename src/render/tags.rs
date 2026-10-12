@@ -1199,7 +1199,9 @@ impl For {
             )?;
             context.sync_loop_context(py, index == 0)?;
             for (body_index, node) in self.body.iter().enumerate() {
-                context.join_index = index * self.body.len() + body_index;
+                if context.validate_tag_results {
+                    context.join_index = index * self.body.len() + body_index;
+                }
                 node.render_into(py, template, context, rendered)?;
             }
             context.increment_for_loop();
@@ -1241,7 +1243,9 @@ impl For {
             context.push_variable(variable.clone(), c.into_any(), index);
             context.sync_loop_context(py, index == 0)?;
             for (body_index, node) in self.body.iter().enumerate() {
-                context.join_index = index * self.body.len() + body_index;
+                if context.validate_tag_results {
+                    context.join_index = index * self.body.len() + body_index;
+                }
                 node.render_into(py, template, context, rendered)?;
             }
             context.increment_for_loop();
