@@ -97,3 +97,37 @@ def test_custom_compile_error_preserves_original_exception(custom_engine):
         engine.from_string("{% load custom %}{% broken %}")
     assert caught.value is error
     assert error.template_debug["during"] == "{% broken %}"
+
+
+def test_explain_template_reports_custom_fallback_location(custom_engine):
+    library, engine = custom_engine
+
+    @library.tag("constant")
+    def compile_constant(parser, token):
+        return ConstantNode("custom")
+
+    source = "{% load custom %}\nCafé\n{% constant %}"
+    report = engine.explain_template(source)
+    assert report == {
+        "mode": "hybrid",
+        "reason": "not yet implemented: Fully custom tag",
+        "tag": "{% constant %}",
+        "span": (len("{% load custom %}\nCafé\n".encode()), len("{% constant %}")),
+        "line": 3,
+    }
+    assert engine.from_string(source).render() == "\nCafé\ncustom"
+
+
+def test_explain_template_reports_native_and_rejects_invalid_syntax():
+    engine = Engine()
+    assert engine.explain_template("{% for i in values %}{{ i }}{% endfor %}") == {
+        "mode": "native",
+        "reason": None,
+        "tag": None,
+        "span": None,
+        "line": None,
+    }
+    from django.template import TemplateSyntaxError
+
+    with pytest.raises(TemplateSyntaxError):
+        engine.explain_template("{% for i in values %}")

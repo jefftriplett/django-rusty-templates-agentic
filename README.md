@@ -114,3 +114,27 @@ Django Rusty Templates (Agentic) is open to contributions. These can come in man
 * Refactoring for readability or performance.
 
 For detailed instructions on setting up your development environment and contributing to the project, please see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Loop rendering regressions
+
+`uv run python scripts/benchmark_loop_values.py --json-output results.json`
+measures integer loops, text-only loops, and repeated variables against Django.
+It checks output before timing and covers `from_string`, warm loaded rendering,
+and loading plus rendering with explicit cached/uncached loaders and both debug
+settings. Build the extension with `uv run maturin develop --release` first.
+These are synthetic timings, not HTTP request measurements.
+
+The Render performance PR workflow builds the PR base and candidate in release
+mode on the same runner with the same Python dependencies. It saves both reports
+and fails if a Rusty case slows by more than 15% relative to its matching Django
+control. Timing failures should be rerun
+to distinguish runner noise from a reproducible regression. Normal correctness
+CI also rejects full Django Context construction during native loop value
+formatting. Additional loop cases feed the optional CodSpeed dashboard.
+
+`engine.explain_template(source)` reports `mode` (`native`, `hybrid`, or
+`unsupported`) and the first native compilation blocker. For a tag blocker it
+includes `reason`, the complete `tag` token, its UTF-8 byte `span` (start, length),
+and its one-based `line`. Version-specific variable syntax reports no tag
+location. Inspection loads tag libraries but does not compile a Python fallback
+tree or render the template; a native report does not imply zero Python callbacks.

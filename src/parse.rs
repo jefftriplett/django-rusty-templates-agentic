@@ -1407,6 +1407,7 @@ pub struct Parser<'t, 'py> {
     last_cycle: Option<CycleId>,
     block_names: HashSet<String>,
     has_extends: bool,
+    pub last_tag: Option<At>,
 }
 
 impl<'t, 'py> Parser<'t, 'py> {
@@ -1429,6 +1430,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             last_cycle: None,
             block_names: HashSet::new(),
             has_extends: false,
+            last_tag: None,
         }
     }
 
@@ -1451,6 +1453,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             last_cycle: None,
             block_names: HashSet::new(),
             has_extends: false,
+            last_tag: None,
         }
     }
 
@@ -2137,6 +2140,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         tag: &'t str,
         at: At,
     ) -> Result<Either<TokenTree, EndTag>, PyParseError> {
+        self.last_tag = Some(at);
         let tag = lex_tag(tag, at.0 + START_TAG_LEN).map_err(ParseError::from)?;
 
         Ok(match tag.content(self.template) {
