@@ -1024,7 +1024,18 @@ impl Render for Tag {
                 let output = node
                     .0
                     .bind(py)
-                    .call_method1("render_annotated", (live.bind(py),))?;
+                    .call_method1("render_annotated", (live.bind(py),))
+                    .inspect_err(|error| {
+                        // Native and Django Origin objects differ, so Django's
+                        // annotation hook may leave metadata to the owner.
+                        let culprit = error
+                            .value(py)
+                            .getattr("_culprit_node")
+                            .unwrap_or_else(|_| node.0.bind(py).clone());
+                        if let Ok(token) = culprit.getattr("token") {
+                            let _ = error.value(py).setattr("token", token);
+                        }
+                    })?;
                 context.refresh_formatting_flags(py)?;
                 Cow::Owned(output.extract::<String>()?)
             }
@@ -1408,6 +1419,7 @@ impl Render for Include {
                 } else {
                     None
                 };
+                context.push_scope(&names);
                 for (key, value) in names.iter().zip(values) {
                     if let Some(live) = &context.formatting_context {
                         live.bind(py).set_item(key, &value)?;
@@ -1417,9 +1429,7 @@ impl Render for Include {
                 let rendered = include
                     .render(py, context, self.template_at(), template)
                     .map(|content| Cow::Owned(content.into_owned()));
-                for key in names {
-                    context.pop_variable(key);
-                }
+                context.pop_variables();
                 if let Some(scope) = scope {
                     scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
                 }

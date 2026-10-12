@@ -323,8 +323,8 @@ impl Parser<'_, '_> {
                     return Err(invalid().into());
                 };
                 let path = expression(self, *path)?;
-                let target = if args.len() >= 2
-                    && self.template.content(args[args.len() - 2]) == "as"
+                let target = if (args.len() == 1 && tag == "as")
+                    || (args.len() >= 2 && self.template.content(args[args.len() - 2]) == "as")
                 {
                     Some(
                         self.template

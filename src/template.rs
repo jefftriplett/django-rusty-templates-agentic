@@ -11,8 +11,8 @@ pub mod django_rusty_templates {
 
     use encoding_rs::Encoding;
     use pyo3::exceptions::{
-        PyAttributeError, PyImportError, PyNotImplementedError, PyOverflowError, PyTypeError,
-        PyValueError,
+        PyAttributeError, PyException, PyImportError, PyNotImplementedError, PyOverflowError,
+        PyTypeError, PyValueError,
     };
     use pyo3::import_exception;
     use pyo3::intern;
@@ -363,6 +363,7 @@ pub mod django_rusty_templates {
                     template: Arc::from(renderer.getattr("source")?.extract::<String>()?),
                     nodes: Arc::new(Vec::new()),
                     has_inheritance: false,
+                    has_python_callbacks: false,
                     engine: self.engine.clone(),
                     template_name: Some(renderer.getattr("name")?.extract()?),
                     loader_path: loader.path[self.path.len()..].to_vec(),
@@ -801,6 +802,7 @@ pub mod django_rusty_templates {
                 python_renderer: Some(Arc::new(renderer.unbind())),
                 nodes: Arc::new(Vec::new()),
                 has_inheritance: false,
+                has_python_callbacks: false,
                 engine,
             });
         }
@@ -1165,6 +1167,7 @@ pub mod django_rusty_templates {
                 template_name.as_deref(),
             );
             parser.emit_warnings = false;
+            parser.inspect_only = true;
             match parser.parse() {
                 Ok(_) => {}
                 Err(crate::parse::PyParseError::PyErr(error))
@@ -1231,6 +1234,14 @@ pub mod django_rusty_templates {
                     .insert(start, (end, crate::parse::PythonNode(Arc::new(node))));
             }
             let nodes = parser.parse().map_err(|error| {
+                if parser.compiler_parser.as_ref().is_some_and(|compiler| {
+                    compiler
+                        .bind(py)
+                        .getattr("compiler_failed")
+                        .is_ok_and(|failed| failed.extract::<bool>().unwrap_or(true))
+                }) {
+                    return native_parse_error(error, &source, filename.as_deref());
+                }
                 canonical_parse_error(
                     py,
                     error,
@@ -1240,6 +1251,8 @@ pub mod django_rusty_templates {
                     template_name.as_deref(),
                 )
             })?;
+            let has_python_callbacks =
+                parser.compiler_parser.is_some() || !parser.python_nodes.is_empty();
             Ok(Template {
                 template: Arc::from(source),
                 filename,
@@ -1255,6 +1268,7 @@ pub mod django_rusty_templates {
                 partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
                 python_renderer: None,
                 has_inheritance: false,
+                has_python_callbacks,
             })
         }
 
@@ -1272,6 +1286,7 @@ pub mod django_rusty_templates {
                 template_name.as_deref(),
             );
             parser.emit_warnings = false;
+            parser.inspect_only = true;
             let parsed = parser.parse();
             match parsed {
                 Ok(_) => Ok(None),
@@ -1553,6 +1568,7 @@ pub mod django_rusty_templates {
         native_partials: Arc<OnceLock<HashMap<String, PartialDefinition>>>,
         partial_data: Arc<InspectionNodes>,
         has_inheritance: bool,
+        has_python_callbacks: bool,
         python_renderer: Option<Arc<Py<PyAny>>>,
     }
 
@@ -1596,6 +1612,15 @@ pub mod django_rusty_templates {
         filename: Option<&Path>,
         template_name: Option<&str>,
     ) -> PyErr {
+        if let crate::parse::PyParseError::PyErr(ref error) = error
+            && (!error.is_instance_of::<PyException>(py)
+                || error
+                    .value(py)
+                    .hasattr("_rusty_compiler_error")
+                    .unwrap_or(false))
+        {
+            return error.clone_ref(py);
+        }
         let native = native_parse_error(error, source, filename);
         let validation = (|| -> PyResult<()> {
             py.import("django_rusty_templates.diagnostics")?
@@ -1610,6 +1635,9 @@ pub mod django_rusty_templates {
         })();
         match validation {
             Err(error) => {
+                if !error.is_instance_of::<PyException>(py) {
+                    return error;
+                }
                 let diagnostic = native.value(py).to_string();
                 let _ = error.value(py).setattr("rusty_diagnostic", &diagnostic);
                 let _ = error.value(py).call_method1("add_note", (diagnostic,));
@@ -1658,6 +1686,23 @@ pub mod django_rusty_templates {
                     Vec::new()
                 }
                 Err(error) => {
+                    if let Some(compiler) = &parser.compiler_parser {
+                        let native = native_parse_error(error, template, Some(&filename));
+                        if !native.is_instance_of::<PyException>(py)
+                            || compiler
+                                .bind(py)
+                                .getattr("compiler_failed")?
+                                .extract::<bool>()?
+                            || native.value(py).hasattr("_rusty_compiler_error")?
+                        {
+                            return Err(native);
+                        }
+                        return Err(PyErr::from_value(
+                            compiler
+                                .bind(py)
+                                .call_method1("canonical_error", (native.value(py),))?,
+                        ));
+                    }
                     return Err(canonical_parse_error(
                         py,
                         error,
@@ -1668,6 +1713,14 @@ pub mod django_rusty_templates {
                     ));
                 }
             };
+            let partial_data = Arc::new(InspectionNodes(PyOnceLock::new()));
+            if let Some(compiler) = &parser.compiler_parser {
+                partial_data.0.get_or_try_init(py, || {
+                    compiler.bind(py).getattr("extra_data").map(Bound::unbind)
+                })?;
+            }
+            let has_python_callbacks =
+                parser.compiler_parser.is_some() || !parser.python_nodes.is_empty();
             Ok(Self {
                 template: Arc::from(template),
                 filename: Some(filename),
@@ -1678,9 +1731,10 @@ pub mod django_rusty_templates {
                 fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
                 native_blocks: Arc::new(OnceLock::new()),
                 native_partials: Arc::new(OnceLock::new()),
-                partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
+                partial_data,
                 python_renderer,
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
+                has_python_callbacks,
                 nodes: Arc::new(nodes),
                 engine,
             })
@@ -1716,6 +1770,23 @@ pub mod django_rusty_templates {
                     Vec::new()
                 }
                 Err(error) => {
+                    if let Some(compiler) = &parser.compiler_parser {
+                        let native = native_parse_error(error, &template, None);
+                        if !native.is_instance_of::<PyException>(py)
+                            || compiler
+                                .bind(py)
+                                .getattr("compiler_failed")?
+                                .extract::<bool>()?
+                            || native.value(py).hasattr("_rusty_compiler_error")?
+                        {
+                            return Err(native);
+                        }
+                        return Err(PyErr::from_value(
+                            compiler
+                                .bind(py)
+                                .call_method1("canonical_error", (native.value(py),))?,
+                        ));
+                    }
                     return Err(canonical_parse_error(
                         py,
                         error,
@@ -1726,6 +1797,14 @@ pub mod django_rusty_templates {
                     ));
                 }
             };
+            let partial_data = Arc::new(InspectionNodes(PyOnceLock::new()));
+            if let Some(compiler) = &parser.compiler_parser {
+                partial_data.0.get_or_try_init(py, || {
+                    compiler.bind(py).getattr("extra_data").map(Bound::unbind)
+                })?;
+            }
+            let has_python_callbacks =
+                parser.compiler_parser.is_some() || !parser.python_nodes.is_empty();
             Ok(Self {
                 template: Arc::from(template),
                 filename: None,
@@ -1736,9 +1815,10 @@ pub mod django_rusty_templates {
                 fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
                 native_blocks: Arc::new(OnceLock::new()),
                 native_partials: Arc::new(OnceLock::new()),
-                partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
+                partial_data,
                 python_renderer,
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
+                has_python_callbacks,
                 nodes: Arc::new(nodes),
                 engine,
             })
@@ -1750,7 +1830,26 @@ pub mod django_rusty_templates {
             let previous_root = context.root_template.clone();
             let previous_cycles = std::mem::take(&mut context.cycle_indices);
             let previous_instrument = std::mem::replace(&mut context.instrument_render, true);
+            let callback_scope = if self.has_python_callbacks {
+                context
+                    .formatting_context
+                    .as_ref()
+                    .map(|live| {
+                        py.import("django_rusty_templates.compiler")?
+                            .getattr("begin_render")?
+                            .call1((live.bind(py), Py::new(py, self.clone())?))
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
             let result = self.render_chain(py, context);
+            if let Some(scope) = callback_scope {
+                let cleanup = scope.call_method0("close");
+                if result.is_ok() {
+                    cleanup?;
+                }
+            }
             context.inheritance_blocks = previous_blocks;
             context.inheritance_history = previous_history;
             context.root_template = previous_root;
@@ -1811,6 +1910,8 @@ pub mod django_rusty_templates {
             self.native_partials();
             Self {
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
+                has_python_callbacks: self.has_python_callbacks
+                    && Self::nodes_have_callbacks(&nodes),
                 nodes,
                 inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
                 django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
@@ -1824,6 +1925,16 @@ pub mod django_rusty_templates {
 
         fn has_inheritance(&self) -> bool {
             self.has_inheritance
+        }
+
+        fn nodes_have_callbacks(nodes: &[TokenTree]) -> bool {
+            nodes.iter().any(|node| {
+                matches!(node, TokenTree::Tag(Tag::PythonNode(_)))
+                    || node
+                        .child_nodes()
+                        .iter()
+                        .any(|children| Self::nodes_have_callbacks(children))
+            })
         }
 
         fn nodes_have_inheritance(nodes: &[TokenTree]) -> bool {
@@ -1902,6 +2013,63 @@ pub mod django_rusty_templates {
                     kwargs.set_item("context", context.django_context(py)?)?;
                     signal.call_method("send", (), Some(&kwargs))?;
                 }
+            }
+            if context.formatting_context.is_none() && self.has_python_callbacks {
+                let direct_input =
+                    context.current_template.is_none() && context.callback_input.is_some();
+                let live = if direct_input {
+                    context
+                        .callback_input
+                        .as_ref()
+                        .expect("direct input requires a caller")
+                        .bind(py)
+                        .call0()?
+                } else {
+                    context.django_context(py)?
+                };
+                let processor_values = if direct_input
+                    && live
+                        .getattr("_processors_index")
+                        .is_ok_and(|index| !index.is_none())
+                {
+                    Some(context.as_dict(py)?)
+                } else {
+                    None
+                };
+                let scope = py
+                    .import("django_rusty_templates.compiler")?
+                    .getattr("begin_render")?
+                    .call1((&live, Py::new(py, self.clone())?, processor_values))?;
+                let before: Option<HashMap<String, Py<PyAny>>> = if direct_input {
+                    None
+                } else {
+                    Some(live.call_method0("flatten")?.extract()?)
+                };
+                context.formatting_context = Some(live.unbind());
+                let result = self.render_body(py, &self.nodes, context);
+                let live = context
+                    .formatting_context
+                    .take()
+                    .expect("callback context initialized");
+                let cleanup = scope.call_method0("close");
+                if result.is_ok() {
+                    cleanup?;
+                }
+                if let Some(before) = before {
+                    let after: HashMap<String, Py<PyAny>> =
+                        live.bind(py).call_method0("flatten")?.extract()?;
+                    for (name, value) in after {
+                        if before
+                            .get(&name)
+                            .is_none_or(|previous| !previous.bind(py).is(value.bind(py)))
+                        {
+                            context.insert(name, value.into_bound(py))?;
+                        }
+                    }
+                } else {
+                    context.refresh_assignments(py, live.bind(py))?;
+                }
+                return result;
             }
             self.render_body(py, &self.nodes, context)
         }
@@ -2321,6 +2489,25 @@ pub mod django_rusty_templates {
                         .getattr("template")
                         .is_ok_and(|template| !template.is_none())
                 });
+            // Opaque callbacks and native nodes can both read a caller-owned
+            // Context directly. No flatten/import/writeback is needed here.
+            if is_django_context
+                && self.has_python_callbacks
+                && processor_index.is_none()
+                && request.is_none()
+            {
+                let input = context.as_ref().expect("Django context checked");
+                let scope = py
+                    .import("django_rusty_templates.compiler")?
+                    .getattr("begin_render")?
+                    .call1((input, Py::new(py, self.clone())?))?;
+                let result = self.render_django_context(py, input.clone(), true);
+                let cleanup = scope.call_method0("close");
+                if result.is_ok() {
+                    cleanup?;
+                }
+                return result;
+            }
             // Django-owned include loops already have a live, bound context.
             // Text and variable templates need no native assignment scopes, so
             // resolve their referenced roots directly rather than flattening
