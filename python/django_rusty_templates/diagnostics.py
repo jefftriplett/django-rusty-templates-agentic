@@ -50,6 +50,12 @@ def attach_debug(source, error, filename=None):
         error.template_debug = Template.get_exception_info(template, error, token)
 
 
+def get_exception_info(source, origin, exception, token):
+    """Build Django debug metadata from source without compiling a node tree."""
+    template = SimpleNamespace(source=source, origin=origin)
+    return Template.get_exception_info(template, exception, token)
+
+
 def render_url(view_name, urlconf, args, kwargs, current_app):
     from django.urls import reverse
 
@@ -82,3 +88,16 @@ def render_url(view_name, urlconf, args, kwargs, current_app):
         context = Context(autoescape=False)
         context.template = SimpleNamespace(engine=SimpleNamespace(debug=False))
         return "".join([NodeList([ResolverFailure()]).render(context)])
+
+
+def format_now(format_string, escape):
+    """Format a natively resolved now expression with Django's date service."""
+    from datetime import datetime
+    from django.conf import settings
+    from django.template.defaultfilters import date
+    from django.utils import timezone
+    from django.utils.html import conditional_escape
+
+    tzinfo = timezone.get_current_timezone() if settings.USE_TZ else None
+    formatted = date(datetime.now(tz=tzinfo), format_string)
+    return conditional_escape(formatted) if escape else formatted

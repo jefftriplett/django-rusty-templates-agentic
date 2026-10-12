@@ -109,7 +109,7 @@ class NativeParser(Parser):
             )
         # Inheritance remains visible to Django's block discovery. Other
         # opaque nodes can execute at explicit boundaries inside a Rust region.
-        return type(node) not in (BlockNode, ExtendsNode)
+        return not isinstance(node, (BlockNode, ExtendsNode))
 
     def parse(self, parse_until=None):
         self.parse_depth += 1
@@ -237,7 +237,10 @@ class NativeParser(Parser):
         end = self.tokens[-1]._native_position[0] if self.tokens else len(self.source)
         if token.contents.startswith("load ") and token.token_type.value == 2:
             self.load_prefix += "{% " + token.contents + " %}"
-        if isinstance(node, ExtendsNode):
+        if type(node) is ExtendsNode:
+            from .inheritance import NativeExtendsNode
+
+            node.__class__ = NativeExtendsNode
             node.parent_name = ParentExpression(node.parent_name)
         if (
             not self.native_engine.debug
@@ -411,7 +414,7 @@ class ParentExpression:
         parent = self.expression.resolve(context)
         native = getattr(parent, "template", parent)
         if isinstance(native, NativeTemplate):
-            return native._django_template
+            return native if native._is_native else native._django_template
         return parent
 
 

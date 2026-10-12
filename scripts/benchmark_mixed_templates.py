@@ -25,7 +25,7 @@ from django_rusty_templates import Engine
 def fixture():
     row = "{% badge i %}/{{ i }}/{% custom i %}/{{ seen }}/{% card i %}/{% include 'part.html' with value=i %}/{% url 'benchmark_home' %}|"
     return {
-        "base.html": "{% load components %}{% custom 0 %}<main>{% block content %}base{% endblock %}</main>{{ seen }}",
+        "base.html": "<main>{% block content %}base{% endblock %}</main>{{ seen }}",
         "page.html": '{% extends "base.html" %}{% block content %}{% load components %}{% for i in values %}'
         + row * 3
         + "{% endfor %}{% endblock %}",

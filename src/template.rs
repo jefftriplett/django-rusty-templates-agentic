@@ -26,6 +26,7 @@ pub mod django_rusty_templates {
     use crate::render::types::{Context, PyContext};
     use crate::render::{Render, RenderResult};
     use crate::utils::PyResultMethods;
+    use dtl_lexer::core::{Lexer, TokenType};
     use dtl_lexer::types::TemplateString;
 
     import_exception!(django.core.exceptions, ImproperlyConfigured);
@@ -1134,9 +1135,9 @@ pub mod django_rusty_templates {
             for key in ["reason", "tag", "span", "line"] {
                 report.set_item(key, py.None())?;
             }
-            if needs_python_variable_syntax(py, source)? {
+            if let Some(reason) = python_variable_syntax_reason(py, source)? {
                 report.set_item("mode", "hybrid")?;
-                report.set_item("reason", "version-specific Django variable syntax")?;
+                report.set_item("reason", reason)?;
                 return Ok(report);
             }
             let mut parser = Parser::new(
@@ -1258,19 +1259,11 @@ pub mod django_rusty_templates {
                     Ok(None)
                 }
                 Err(error) => {
-                    let error = canonical_parse_error(
-                        py,
-                        error,
-                        self.engine.clone(),
-                        source,
-                        filename.as_deref(),
-                        template_name.as_deref(),
-                    );
-                    Ok(error
-                        .value(py)
-                        .getattr("rusty_diagnostic")
-                        .ok()
-                        .and_then(|value| value.extract().ok()))
+                    // Django already rejected this source in the compatibility
+                    // parser. Attach the native explanation without validating
+                    // again or invoking arbitrary compilers a second time.
+                    let error = native_parse_error(error, source, filename.as_deref());
+                    Ok(Some(error.value(py).to_string()))
                 }
             }
         }
@@ -1547,21 +1540,19 @@ pub mod django_rusty_templates {
             "partialdef",
             "partial",
             "Django 6.1 variable lookup",
+            "Django 6.0 signed exponent",
             "Django 6.2 now expressions",
         ]
         .iter()
         .any(|tag| error.value(py).to_string() == format!("not yet implemented: {tag}"))
     }
 
-    fn canonical_parse_error(
-        py: Python<'_>,
+    fn native_parse_error(
         error: crate::parse::PyParseError,
-        engine: Arc<Engine>,
         source: &str,
         filename: Option<&Path>,
-        template_name: Option<&str>,
     ) -> PyErr {
-        let native = match error.try_into_parse_error() {
+        match error.try_into_parse_error() {
             Ok(error) => {
                 if let Some(filename) = filename {
                     TemplateSyntaxError::with_source_code(
@@ -1573,7 +1564,18 @@ pub mod django_rusty_templates {
                 }
             }
             Err(error) => error,
-        };
+        }
+    }
+
+    fn canonical_parse_error(
+        py: Python<'_>,
+        error: crate::parse::PyParseError,
+        engine: Arc<Engine>,
+        source: &str,
+        filename: Option<&Path>,
+        template_name: Option<&str>,
+    ) -> PyErr {
+        let native = native_parse_error(error, source, filename);
         let validation = (|| -> PyResult<()> {
             py.import("django_rusty_templates.diagnostics")?
                 .getattr("validate_syntax")?
@@ -1596,26 +1598,81 @@ pub mod django_rusty_templates {
         }
     }
 
-    fn needs_python_variable_syntax(py: Python<'_>, source: &str) -> PyResult<bool> {
+    fn python_variable_syntax_reason(
+        py: Python<'_>,
+        source: &str,
+    ) -> PyResult<Option<&'static str>> {
         if !source.contains("..")
             && !source.contains("e+")
             && !source.contains("E+")
             && !source.contains("e-")
             && !source.contains("E-")
         {
-            return Ok(false);
+            return Ok(None);
         }
         let version = py.import("django")?.getattr("VERSION")?;
         let series = (
             version.get_item(0)?.extract::<u8>()?,
             version.get_item(1)?.extract::<u8>()?,
         );
-        Ok((series >= (6, 0)
-            && (source.contains("e+")
-                || source.contains("E+")
-                || source.contains("e-")
-                || source.contains("E-")))
-            || (series >= (6, 1) && source.contains("..")))
+        if series < (6, 0) {
+            return Ok(None);
+        }
+        let template = TemplateString(source);
+        let mut comment = false;
+        for token in Lexer::new(template) {
+            if !matches!(token.token_type, TokenType::Variable | TokenType::Tag) {
+                continue;
+            }
+            let content = token.content(template);
+            if matches!(token.token_type, TokenType::Tag) {
+                let name = content.split_whitespace().next();
+                if name == Some("endcomment") {
+                    comment = false;
+                    continue;
+                }
+                if comment {
+                    continue;
+                }
+                if name == Some("comment") {
+                    comment = true;
+                    continue;
+                }
+            } else if comment {
+                continue;
+            }
+            let mut quote = None;
+            let mut escaped = false;
+            let bytes = content.as_bytes();
+            for (index, &byte) in bytes.iter().enumerate() {
+                if let Some(end) = quote {
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == end {
+                        quote = None;
+                    }
+                    continue;
+                }
+                if matches!(byte, b'\'' | b'"') {
+                    quote = Some(byte);
+                    continue;
+                }
+                if series >= (6, 1) && byte == b'.' && bytes.get(index + 1) == Some(&b'.') {
+                    return Ok(Some("Django 6.1 variable lookup"));
+                }
+                if matches!(byte, b'e' | b'E')
+                    && index > 0
+                    && bytes[index - 1].is_ascii_digit()
+                    && matches!(bytes.get(index + 1), Some(b'+' | b'-'))
+                    && bytes.get(index + 2).is_some_and(u8::is_ascii_digit)
+                {
+                    return Ok(Some("Django 6.0 signed exponent"));
+                }
+            }
+        }
+        Ok(None)
     }
 
     impl Template {
@@ -1633,11 +1690,9 @@ pub mod django_rusty_templates {
                 Some(template_name),
             );
             let mut python_renderer = None;
-            let parsed = if needs_python_variable_syntax(py, template)? {
+            let parsed = if let Some(reason) = python_variable_syntax_reason(py, template)? {
                 Err(crate::parse::PyParseError::PyErr(
-                    PyNotImplementedError::new_err(
-                        "not yet implemented: Django 6.1 variable lookup",
-                    ),
+                    PyNotImplementedError::new_err(format!("not yet implemented: {reason}")),
                 ))
             } else {
                 parser.parse()
@@ -1697,11 +1752,9 @@ pub mod django_rusty_templates {
         ) -> PyResult<Self> {
             let mut parser = Parser::new(py, TemplateString(&template), engine.clone(), None);
             let mut python_renderer = None;
-            let parsed = if needs_python_variable_syntax(py, &template)? {
+            let parsed = if let Some(reason) = python_variable_syntax_reason(py, &template)? {
                 Err(crate::parse::PyParseError::PyErr(
-                    PyNotImplementedError::new_err(
-                        "not yet implemented: Django 6.1 variable lookup",
-                    ),
+                    PyNotImplementedError::new_err(format!("not yet implemented: {reason}")),
                 ))
             } else {
                 parser.parse()
@@ -1825,7 +1878,7 @@ pub mod django_rusty_templates {
             contains(nodes)
         }
 
-        fn compiled_blocks<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        pub(crate) fn compiled_blocks<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
             self.fallback_blocks
                 .0
                 .get_or_try_init(py, || {
@@ -2095,12 +2148,9 @@ pub mod django_rusty_templates {
                         .call_method1("get", ("block_context",))?
                         .is_none()
                     {
-                        // A Python child supplied Django block objects. Keep
-                        // this mixed chain at the explicit fallback boundary.
-                        return self
-                            ._django_template(py)?
-                            .call_method1("_render", (context,))?
-                            .extract();
+                        // Render the compiled native body against Django's
+                        // block stack without recompiling the ancestor.
+                        return self.render_django_context(py, context, true);
                     }
                     return self.py_render(py, Some(context), None);
                 }
@@ -2114,8 +2164,9 @@ pub mod django_rusty_templates {
             exception: Bound<'py, PyAny>,
             token: Bound<'py, PyAny>,
         ) -> PyResult<Bound<'py, PyAny>> {
-            self._django_template(py)?
-                .call_method1("get_exception_info", (exception, token))
+            py.import("django_rusty_templates.diagnostics")?
+                .getattr("get_exception_info")?
+                .call1((self.template.as_ref(), self.origin(), exception, token))
         }
 
         #[getter]

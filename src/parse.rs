@@ -805,6 +805,8 @@ impl PartialEq for SimpleBlockTag {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Now {
     pub format: String,
+    pub expression: Option<TagElement>,
+    pub escape: bool,
     pub asvar: Option<At>,
 }
 
@@ -1811,10 +1813,60 @@ impl<'t, 'py> Parser<'t, 'py> {
             version.get_item(1)?.extract::<u8>()?,
         );
         if series >= (6, 2) {
-            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
-                "not yet implemented: Django 6.2 now expressions",
-            )
-            .into());
+            let content = self.template.content(parts.at);
+            let mut tokens = Vec::new();
+            let mut start = None;
+            let mut quote = None;
+            let mut escaped = false;
+            for (offset, character) in content.char_indices() {
+                if let Some(end) = quote {
+                    if escaped {
+                        escaped = false;
+                    } else if character == '\\' {
+                        escaped = true;
+                    } else if character == end {
+                        quote = None;
+                    }
+                } else if matches!(character, '\'' | '"') {
+                    start.get_or_insert(offset);
+                    quote = Some(character);
+                } else if character.is_whitespace() {
+                    if let Some(begin) = start.take() {
+                        tokens.push((parts.at.0 + begin, offset - begin));
+                    }
+                } else {
+                    start.get_or_insert(offset);
+                }
+            }
+            if let Some(begin) = start {
+                tokens.push((parts.at.0 + begin, content.len() - begin));
+            }
+            let asvar = if tokens.len() == 3 && self.template.content(tokens[1]) == "as" {
+                let target = tokens.pop();
+                tokens.pop();
+                target
+            } else {
+                None
+            };
+            let [at] = tokens.as_slice() else {
+                return Err(
+                    crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
+                        "'now' statement takes one argument",
+                    )
+                    .into(),
+                );
+            };
+            let expression = self.parse_filter_expression(self.template.content(*at), *at, at.0)?;
+            let escape = !matches!(
+                expression,
+                TagElement::Text(_) | TagElement::TranslatedText(_)
+            );
+            return Ok(Now {
+                format: String::new(),
+                expression: Some(expression),
+                escape,
+                asvar,
+            });
         }
         let mut lexer = NowLexer::new(self.template, parts);
 
@@ -1834,6 +1886,8 @@ impl<'t, 'py> Parser<'t, 'py> {
 
         Ok(Now {
             format: format.to_string(),
+            expression: None,
+            escape: false,
             asvar,
         })
     }
