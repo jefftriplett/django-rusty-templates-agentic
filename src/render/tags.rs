@@ -1198,7 +1198,10 @@ impl For {
                 template,
             )?;
             context.sync_loop_context(py, index == 0)?;
-            self.body.render_into(py, template, context, rendered)?;
+            for (body_index, node) in self.body.iter().enumerate() {
+                context.join_index = index * self.body.len() + body_index;
+                node.render_into(py, template, context, rendered)?;
+            }
             context.increment_for_loop();
         }
         context.pop_variables();
@@ -1237,7 +1240,10 @@ impl For {
             let c = PyString::new(py, &c.to_string());
             context.push_variable(variable.clone(), c.into_any(), index);
             context.sync_loop_context(py, index == 0)?;
-            self.body.render_into(py, template, context, rendered)?;
+            for (body_index, node) in self.body.iter().enumerate() {
+                context.join_index = index * self.body.len() + body_index;
+                node.render_into(py, template, context, rendered)?;
+            }
             context.increment_for_loop();
         }
         context.pop_variables();
@@ -1270,7 +1276,8 @@ impl Render for For {
         } else {
             None
         };
-        let result = self.render_loop_into(py, template, context, output);
+        let result =
+            context.join_scope(|context| self.render_loop_into(py, template, context, output));
         if let Some(scope) = scope {
             scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
         }
@@ -1679,7 +1686,14 @@ fn store_target_var_into(
             } else {
                 content
             };
-            super::types::append_python_string(&output.str()?.into_any(), false, rendered)?;
+            if output.is_instance_of::<PyString>() {
+                // Joining uses the underlying Unicode contents even when a
+                // string subclass overrides __str__.
+                super::types::append_python_string(&output, false, rendered)?;
+            } else if context.join_error.is_none() {
+                let name = output.get_type().name()?.to_string();
+                context.join_error = Some((context.join_index, name));
+            }
             Ok(())
         }
         Some(target_var) => {

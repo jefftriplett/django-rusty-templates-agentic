@@ -2110,28 +2110,26 @@ pub mod django_rusty_templates {
             );
             let result = (|| {
                 let template = TemplateString(&self.template);
-                for node in nodes {
-                    match node.render_into(py, template, context, output) {
-                        Err(PyRenderError::PyErr(error)) => {
-                            if self.engine.debug.load(Ordering::Relaxed) {
-                                let _ = (|| -> PyResult<()> {
-                                    py.import("django_rusty_templates.diagnostics")?
-                                        .getattr("attach_debug")?
-                                        .call1((
-                                            self.template.as_ref(),
-                                            error.value(py),
-                                            self.filename
-                                                .as_ref()
-                                                .map(|path| path.to_string_lossy().into_owned()),
-                                        ))?;
-                                    Ok(())
-                                })();
-                            }
-                            return Err(error.into());
+                match nodes.render_into(py, template, context, output) {
+                    Err(PyRenderError::PyErr(error)) => {
+                        if self.engine.debug.load(Ordering::Relaxed) {
+                            let _ = (|| -> PyResult<()> {
+                                py.import("django_rusty_templates.diagnostics")?
+                                    .getattr("attach_debug")?
+                                    .call1((
+                                        self.template.as_ref(),
+                                        error.value(py),
+                                        self.filename
+                                            .as_ref()
+                                            .map(|path| path.to_string_lossy().into_owned()),
+                                    ))?;
+                                Ok(())
+                            })();
                         }
-                        Err(error) => return Err(self.render_error(error).into()),
-                        Ok(()) => {}
+                        return Err(error.into());
                     }
+                    Err(error) => return Err(self.render_error(error).into()),
+                    Ok(()) => {}
                 }
                 Ok(())
             })();

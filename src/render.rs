@@ -120,7 +120,27 @@ where
     }
 }
 
-impl<T> Render for Vec<T>
+impl<T: Render> Render for Vec<T> {
+    fn render<'t>(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> RenderResult<'t> {
+        self.as_slice().render(py, template, context)
+    }
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> RenderIntoResult {
+        self.as_slice().render_into(py, template, context, output)
+    }
+}
+
+impl<T> Render for [T]
 where
     T: Render,
 {
@@ -132,7 +152,7 @@ where
     ) -> RenderResult<'t> {
         match self.len() {
             0 => Ok(Cow::Borrowed("")),
-            1 => self[0].render(py, template, context),
+            1 => context.join_scope(|context| self[0].render(py, template, context)),
             _ => {
                 let mut rendered = String::new();
                 self.render_into(py, template, context, &mut rendered)?;
@@ -147,10 +167,15 @@ where
         context: &mut Context,
         output: &mut String,
     ) -> RenderIntoResult {
-        for node in self {
-            node.render_into(py, template, context, output)?;
-        }
-        Ok(())
+        // Django renders every sibling before joining their results. Defer a
+        // non-string result until then, so a later callback error wins.
+        context.join_scope(|context| {
+            for (index, node) in self.iter().enumerate() {
+                context.join_index = index;
+                node.render_into(py, template, context, output)?;
+            }
+            Ok(())
+        })
     }
 }
 

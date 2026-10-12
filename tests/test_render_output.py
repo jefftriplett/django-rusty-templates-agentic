@@ -106,16 +106,7 @@ def test_render_output_boundaries(engine_options, autoescape, shape):
 @pytest.mark.parametrize(
     "kind,autoescape",
     [
-        pytest.param(
-            kind,
-            autoescape,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="Existing simple-tag coercion difference, issue #134",
-            ),
-        )
-        if kind == "subclass" and not autoescape
-        else (kind, autoescape)
+        (kind, autoescape)
         for kind in ("exact", "safe", "subclass", "custom", "safe_str", "lazy")
         for autoescape in (True, False)
     ],
