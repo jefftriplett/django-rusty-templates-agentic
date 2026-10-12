@@ -194,3 +194,26 @@ def test_translation_filters_receive_django_lazy_values(monkeypatch):
         kind(libraries=libraries).from_string(source).render(Context())
         for kind in [DjangoEngine, Engine]
     ] == ["lazy", "lazy"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [Decimal("1234.50"), datetime(2026, 1, 8, 12, tzinfo=timezone.utc), "<&>50%%"],
+)
+@pytest.mark.parametrize("autoescape", [False, True])
+def test_noop_translation_preserves_value_formatting(value, autoescape):
+    source = '{% load i18n tz %}{% timezone "Europe/Paris" %}{% translate value noop %}{% endtimezone %}'
+    outputs = [
+        kind(libraries=LIBRARIES)
+        .from_string(source)
+        .render(
+            Context(
+                {"value": value},
+                autoescape=autoescape,
+                use_l10n=True,
+                use_tz=True,
+            )
+        )
+        for kind in [DjangoEngine, Engine]
+    ]
+    assert outputs[0] == outputs[1]
