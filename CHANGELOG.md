@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Parse stock tags and templates around opted-in custom tags faster, reduce inspection reparsing, and strengthen performance checks. ([#125](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/125), [#126](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/126), [#127](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/127), [#128](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/128))
+
 ## 2026.10.7
 
 Reduce Django parsing for DEBUG and mixed inheritance, and parse Django 6 expressions and template partials in Rust. ([#120](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/120), [#121](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/121), [#122](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/122))
