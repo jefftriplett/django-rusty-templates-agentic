@@ -38,6 +38,7 @@ static RENDER_FIRSTOF_VALUE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static STRIP_SPACES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DEBUG_NODE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static MARK_BLOCK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static BUILTINS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -1669,10 +1670,8 @@ fn store_target_var<'t>(
     match target_var {
         None => {
             let output = if context.autoescape {
-                content
-                    .py()
-                    .import("django.utils.html")?
-                    .getattr("conditional_escape")?
+                CONDITIONAL_ESCAPE
+                    .import(content.py(), "django.utils.html", "conditional_escape")?
                     .call1((content,))?
             } else {
                 content
