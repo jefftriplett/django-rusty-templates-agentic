@@ -139,6 +139,7 @@ impl Render for StockNode {
                         } else {
                             message_context
                         },
+                        filters.is_empty(),
                     ))?,
                     None => {
                         let name = match root {

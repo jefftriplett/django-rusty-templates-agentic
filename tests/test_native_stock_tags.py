@@ -172,3 +172,25 @@ def test_translated_literal_is_not_translated_twice(monkeypatch, options):
         for kind in [DjangoEngine, Engine]
     ]
     assert outputs == ["translated", "translated"]
+
+
+def test_translation_filters_receive_django_lazy_values(monkeypatch):
+    import sys
+    from types import ModuleType
+    from django.template import Library
+    from django.utils.functional import Promise
+
+    module = ModuleType("rusty_translation_filter_tests")
+    module.register = Library()
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    @module.register.filter
+    def observes_lazy(value):
+        return "lazy" if isinstance(value, Promise) else "eager"
+
+    libraries = {**LIBRARIES, "custom": module.__name__}
+    source = '{% load i18n custom %}{% translate "Hello"|observes_lazy %}'
+    assert [
+        kind(libraries=libraries).from_string(source).render(Context())
+        for kind in [DjangoEngine, Engine]
+    ] == ["lazy", "lazy"]
