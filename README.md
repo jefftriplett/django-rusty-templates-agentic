@@ -133,6 +133,16 @@ reproducible regression. Normal correctness
 CI also rejects full Django Context construction during native loop value
 formatting. Additional loop cases feed the optional CodSpeed dashboard.
 
+`uv run python scripts/benchmark_callback_contexts.py --json-output callbacks.json`
+measures read-only, mutating, retaining and failing captured callables with small
+and large contexts, using flat and scoped templates through `from_string` and
+filesystem loaders. Flat templates with variables or filters can read an exact
+Django `Context` directly once a context dictionary has at least 64 bindings;
+this avoids importing unrelated bindings and making callable snapshots. Retained
+dictionaries are the caller's live dictionaries, as in Django. Scoped templates,
+context subclasses and request contexts keep their existing synchronization path.
+The performance workflow compares these cases with the same 15% regression gate.
+
 `engine.explain_template(source, template_name=None)` reports `mode` (`native`, `hybrid`, or
 `unsupported`) and the first native compilation blocker. For a tag blocker it
 includes `reason`, the complete `tag` token, its UTF-8 byte `span` (start, length),
