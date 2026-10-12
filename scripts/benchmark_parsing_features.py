@@ -2,6 +2,8 @@
 
 Use a release extension. Source fixtures are identical across engines and builds;
 DEBUG and loader caching vary independently. This measures synthetic templates.
+--number is a minimum batch size; short operations calibrate to at least 10ms.
+Each paired round normalizes per-operation timings across the engines.
 """
 
 import argparse
@@ -14,7 +16,7 @@ import warnings
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
-from benchmark_pairs import compare_pairs, measure_pairs
+from benchmark_pairs import MEASUREMENT, MINIMUM_DURATION, compare_pairs, measure_pairs
 
 import django
 from django.conf import settings
@@ -189,7 +191,8 @@ def main():
                             operations[key] = (operation, args.number, 1)
         results, paired_ratios = measure_pairs(operations, args.repeat)
     report = dict(
-        measurement="paired-shuffled-v1",
+        measurement=MEASUREMENT,
+        minimum_duration=MINIMUM_DURATION,
         paired_ratios=paired_ratios,
         python=platform.python_version(),
         django=django.get_version(),

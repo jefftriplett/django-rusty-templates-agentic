@@ -3,6 +3,8 @@
 Run after `uv run maturin develop --release`. Optional --baseline compares
 Rusty cases to a previous JSON report and fails above --max-regression.
 Results are synthetic microseconds per iteration, not HTTP request timings.
+--number is a minimum batch size; short operations calibrate to at least 10ms.
+Each paired round normalizes per-operation timings across the engines.
 """
 
 import argparse
@@ -12,7 +14,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-from benchmark_pairs import compare_pairs, measure_pairs
+from benchmark_pairs import MEASUREMENT, MINIMUM_DURATION, compare_pairs, measure_pairs
 
 import django
 from django.conf import settings
@@ -204,7 +206,8 @@ def main():
     fixed_results, fixed_ratios = measure_pairs(fixed_operations, args.repeat)
     paired_ratios.update(fixed_ratios)
     report = {
-        "measurement": "paired-shuffled-v1",
+        "measurement": MEASUREMENT,
+        "minimum_duration": MINIMUM_DURATION,
         "paired_ratios": paired_ratios,
         "python": platform.python_version(),
         "django": django.get_version(),

@@ -2,6 +2,8 @@
 
 Use a release extension. DEBUG and loader caching vary independently; results
 are synthetic warm renders, not HTTP or allocation measurements.
+--number is a minimum batch size; short operations calibrate to at least 10ms.
+Each paired round normalizes per-operation timings across the engines.
 """
 
 import argparse
@@ -10,12 +12,12 @@ import importlib.metadata
 import json
 import platform
 import random
-import statistics
 import sys
 import tempfile
-import timeit
 from pathlib import Path
 from types import ModuleType
+
+from benchmark_pairs import MEASUREMENT, MINIMUM_DURATION, measure_pair
 
 import django
 from django.conf import settings
@@ -125,26 +127,24 @@ def main():
                                 path,
                                 arm,
                             )
-                        samples = {arm: [] for arm in engines}
-                        paired = []
-                        for _ in range(args.repeat):
-                            order = list(engines)
-                            random_order.shuffle(order)
-                            for arm in order:
-                                template = templates[arm]
-                                samples[arm].append(
-                                    timeit.timeit(
-                                        lambda: template.render(Context(values)),
-                                        number=args.number,
-                                    )
-                                    / args.number
-                                    * 1e6
+                        medians, paired = measure_pair(
+                            {
+                                arm: (
+                                    lambda template=template: template.render(
+                                        Context(values)
+                                    ),
+                                    args.number,
+                                    1,
                                 )
-                            paired.append(samples["rusty"][-1] / samples["django"][-1])
+                                for arm, template in templates.items()
+                            },
+                            args.repeat,
+                            random_order,
+                        )
                         key = f"debug={debug}/cached={cached}/{case}/{path}"
-                        for arm, times in samples.items():
-                            results[f"{key}/{arm}"] = statistics.median(times)
-                        paired_ratios[key] = statistics.median(paired)
+                        for arm, median in medians.items():
+                            results[f"{key}/{arm}"] = median
+                        paired_ratios[key] = paired
     report = {
         "python": platform.python_version(),
         "platform": platform.platform(),
@@ -168,7 +168,8 @@ def main():
         "number": args.number,
         "repeat": args.repeat,
         "microseconds": results,
-        "measurement": "paired-shuffled-v1",
+        "measurement": MEASUREMENT,
+        "minimum_duration": MINIMUM_DURATION,
         "paired_ratios": paired_ratios,
     }
     if args.json_output:
@@ -183,6 +184,7 @@ def main():
             "number",
             "repeat",
             "measurement",
+            "minimum_duration",
         ):
             if base.get(field) != report[field]:
                 raise SystemExit(f"Incompatible baseline: {field}")

@@ -1096,6 +1096,13 @@ fn render_value_in_context<'t>(value: ContentString<'t>, context: &Context) -> C
     }
 }
 
+// Keep the large encoder outside the node renderer so adding render scopes
+// cannot inline its allocation-heavy loop into each caller.
+#[inline(never)]
+fn append_large_escaped(text: &str, output: &mut String) {
+    output.push_str(&encode_quoted_attribute(text));
+}
+
 /// Skip the escape writer for plain text: its per-byte bookkeeping is more
 /// expensive than scanning once and appending the unchanged slice in bulk.
 fn append_escaped(text: &str, output: &mut String) {
@@ -1103,7 +1110,7 @@ fn append_escaped(text: &str, output: &mut String) {
     // Its Cow encoder still borrows unchanged text, and borrowing the Python
     // input avoids the source copy even when an escaped fragment is required.
     if text.len() >= 1024 {
-        output.push_str(&encode_quoted_attribute(text));
+        append_large_escaped(text, output);
         return;
     }
     match text

@@ -5,8 +5,40 @@ import statistics
 import timeit
 
 
-def measure_pairs(operations, repeat):
-    """Operations map full case keys to (callable, number, unit scale)."""
+MINIMUM_DURATION = 0.01
+MEASUREMENT = "paired-shuffled-v2"
+
+
+def measure_pair(
+    operations, repeat, order_generator, minimum_duration=MINIMUM_DURATION
+):
+    """Calibrate short batches, then measure per-operation paired ratios."""
+    numbers = {}
+    for arm, (operation, number, _) in operations.items():
+        if minimum_duration:
+            elapsed = min(timeit.timeit(operation, number=number) for _ in range(3))
+            number = max(number, int(number * minimum_duration / elapsed) + 1)
+        numbers[arm] = number
+    samples = {arm: [] for arm in operations}
+    paired = []
+    for _ in range(repeat):
+        order = list(operations)
+        order_generator.shuffle(order)
+        for arm in order:
+            operation, _, scale = operations[arm]
+            number = numbers[arm]
+            samples[arm].append(
+                timeit.timeit(operation, number=number) / number * scale * 1e6
+            )
+        paired.append(samples["rusty"][-1] / samples["django"][-1])
+    return (
+        {arm: statistics.median(times) for arm, times in samples.items()},
+        statistics.median(paired),
+    )
+
+
+def measure_pairs(operations, repeat, minimum_duration=MINIMUM_DURATION):
+    """Operations map full case keys to (callable, minimum number, unit scale)."""
     groups = {}
     for key, operation in operations.items():
         arm = "rusty" if "/rusty/" in key else "django"
@@ -18,20 +50,14 @@ def measure_pairs(operations, repeat):
     for pair, arms in groups.items():
         if set(arms) != {"rusty", "django"}:
             raise ValueError(f"Missing paired engine: {pair}")
-        samples = {arm: [] for arm in arms}
-        paired = []
-        for _ in range(repeat):
-            order = list(arms)
-            order_generator.shuffle(order)
-            for arm in order:
-                _, (operation, number, scale) = arms[arm]
-                samples[arm].append(
-                    timeit.timeit(operation, number=number) / number * scale * 1e6
-                )
-            paired.append(samples["rusty"][-1] / samples["django"][-1])
-        for arm, times in samples.items():
-            results[arms[arm][0]] = statistics.median(times)
-        ratios[pair] = statistics.median(paired)
+        medians, ratios[pair] = measure_pair(
+            {arm: operation for arm, (_, operation) in arms.items()},
+            repeat,
+            order_generator,
+            minimum_duration,
+        )
+        for arm, median in medians.items():
+            results[arms[arm][0]] = median
     return results, ratios
 
 
@@ -39,6 +65,8 @@ def compare_pairs(base, report, max_regression):
     """Reject incompatible measurements and retain the normalized threshold."""
     if base.get("measurement") != report["measurement"]:
         raise SystemExit("Incompatible baseline: measurement")
+    if base.get("minimum_duration") != report.get("minimum_duration"):
+        raise SystemExit("Incompatible baseline: minimum duration")
     if base["paired_ratios"].keys() != report["paired_ratios"].keys():
         raise SystemExit("Incompatible baseline: paired cases")
     failures = []
