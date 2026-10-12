@@ -4,6 +4,8 @@ Use a release extension. DEBUG and loader caching vary independently; results
 are synthetic warm renders, not HTTP or allocation measurements.
 --number is a minimum batch size; short operations calibrate to at least 10ms.
 Each paired round normalizes per-operation timings across the engines.
+Each case runs in a fresh process so earlier fixtures cannot alter its allocator
+or template caches; Django and Rusty remain paired within that process.
 """
 
 import argparse
@@ -14,11 +16,15 @@ import platform
 import os
 import random
 import sys
+import subprocess
 import tempfile
 from pathlib import Path
 from types import ModuleType
 
-from benchmark_pairs import MEASUREMENT, MINIMUM_DURATION, measure_pair
+if __package__:
+    from .benchmark_pairs import MEASUREMENT, MINIMUM_DURATION, measure_pair
+else:
+    from benchmark_pairs import MEASUREMENT, MINIMUM_DURATION, measure_pair
 
 import django
 from django.conf import settings
@@ -61,6 +67,96 @@ def fixtures():
     return cases
 
 
+ISOLATION = "fresh-process-per-case-v1"
+
+
+def case_keys(cases):
+    return [
+        f"debug={debug}/cached={cached}/{case}/{path}"
+        for debug in (False, True)
+        for cached in (False, True)
+        for case in cases
+        for path in ("loaded", "from_string")
+    ]
+
+
+def isolated_report(keys, number, repeat):
+    """Start a fresh interpreter for each case, pairing both engines inside it."""
+    combined = None
+    with tempfile.TemporaryDirectory(prefix="rusty-output-reports-") as directory:
+        for index, key in enumerate(keys):
+            output = Path(directory, f"{index}.json")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--only-case",
+                    key,
+                    "--number",
+                    str(number),
+                    "--repeat",
+                    str(repeat),
+                    "--json-output",
+                    str(output),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            report = json.loads(output.read_text())
+            expected = {f"{key}/django", f"{key}/rusty"}
+            if set(report["microseconds"]) != expected or set(
+                report["paired_ratios"]
+            ) != {key}:
+                raise ValueError(f"Unexpected child cases: {key}")
+            if combined is None:
+                combined = {**report, "microseconds": {}, "paired_ratios": {}}
+            for field, value in report.items():
+                if (
+                    field not in ("microseconds", "paired_ratios")
+                    and combined[field] != value
+                ):
+                    raise ValueError(f"Incompatible child report: {field}")
+            if key in combined["paired_ratios"]:
+                raise ValueError(f"Duplicate child case: {key}")
+            combined["microseconds"].update(report["microseconds"])
+            combined["paired_ratios"].update(report["paired_ratios"])
+    if combined is None:
+        raise ValueError("No benchmark cases")
+    return combined
+
+
+def finish_report(report, args):
+    if args.json_output:
+        args.json_output.write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report, indent=2))
+    if args.baseline:
+        base = json.loads(args.baseline.read_text())
+        for field in (
+            "python",
+            "django",
+            "fixture_sha256",
+            "number",
+            "repeat",
+            "measurement",
+            "minimum_duration",
+            "allocator_mmap_threshold",
+            "isolation",
+        ):
+            if base.get(field) != report[field]:
+                raise SystemExit(f"Incompatible baseline: {field}")
+        if base["microseconds"].keys() != report["microseconds"].keys():
+            raise SystemExit("Incompatible baseline: cases")
+        if base["paired_ratios"].keys() != report["paired_ratios"].keys():
+            raise SystemExit("Incompatible baseline: paired cases")
+        failures = []
+        for key, value in report["paired_ratios"].items():
+            ratio = value / base["paired_ratios"][key]
+            if ratio > 1 + args.max_regression:
+                failures.append(f"{key}: {ratio:.2f}x relative to Django")
+        if failures:
+            raise SystemExit("Performance regression:\n" + "\n".join(failures))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--number", type=int, default=20)
@@ -68,9 +164,17 @@ def main():
     parser.add_argument("--json-output", type=Path)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--max-regression", type=float, default=0.15)
+    parser.add_argument(
+        "--only-case", choices=case_keys(fixtures()), help=argparse.SUPPRESS
+    )
     args = parser.parse_args()
     if min(args.number, args.repeat) <= 0:
         parser.error("number and repeat must be positive")
+    if args.only_case is None:
+        finish_report(
+            isolated_report(case_keys(fixtures()), args.number, args.repeat), args
+        )
+        return
     if not settings.configured:
         settings.configure(USE_I18N=False, SECRET_KEY="output-benchmark")
     module = ModuleType("rusty_output_benchmark_tags")
@@ -89,6 +193,19 @@ def main():
             "part.html": "part:{{ value }}{{ i }}",
         }
     )
+    fixture_sha256 = hashlib.sha256(
+        json.dumps(
+            {
+                "sources": sources,
+                "values": {name: values for name, (_, values) in cases.items()},
+                "types": {
+                    name: {key: type(value).__name__ for key, value in values.items()}
+                    for name, (_, values) in cases.items()
+                },
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
     results = {}
     paired_ratios = {}
     random_order = random.Random(0)
@@ -98,6 +215,9 @@ def main():
         loader = ("django.template.loaders.filesystem.Loader", [directory])
         for debug in (False, True):
             for cached in (False, True):
+                prefix = f"debug={debug}/cached={cached}/"
+                if not args.only_case.startswith(prefix):
+                    continue
                 options = dict(
                     debug=debug,
                     libraries={"output": module.__name__},
@@ -110,12 +230,17 @@ def main():
                     "rusty": Engine(**options),
                 }
                 for case, (source, values) in cases.items():
+                    if not args.only_case.startswith(f"{prefix}{case}/"):
+                        continue
                     expected = (
                         engines["django"]
                         .get_template(case + ".html")
                         .render(Context(values))
                     )
                     for path in ("loaded", "from_string"):
+                        key = f"{prefix}{case}/{path}"
+                        if key != args.only_case:
+                            continue
                         templates = {
                             arm: engine.get_template(case + ".html")
                             if path == "loaded"
@@ -152,56 +277,16 @@ def main():
         "platform": platform.platform(),
         "django": django.get_version(),
         "rusty_version": importlib.metadata.version("django-rusty-templates-agentic"),
-        "fixture_sha256": hashlib.sha256(
-            json.dumps(
-                {
-                    "sources": sources,
-                    "values": {name: values for name, (_, values) in cases.items()},
-                    "types": {
-                        name: {
-                            key: type(value).__name__ for key, value in values.items()
-                        }
-                        for name, (_, values) in cases.items()
-                    },
-                },
-                sort_keys=True,
-            ).encode()
-        ).hexdigest(),
+        "fixture_sha256": fixture_sha256,
         "number": args.number,
         "repeat": args.repeat,
         "microseconds": results,
         "measurement": MEASUREMENT,
+        "isolation": ISOLATION,
         "minimum_duration": MINIMUM_DURATION,
         "paired_ratios": paired_ratios,
     }
-    if args.json_output:
-        args.json_output.write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps(report, indent=2))
-    if args.baseline:
-        base = json.loads(args.baseline.read_text())
-        for field in (
-            "python",
-            "django",
-            "fixture_sha256",
-            "number",
-            "repeat",
-            "measurement",
-            "minimum_duration",
-            "allocator_mmap_threshold",
-        ):
-            if base.get(field) != report[field]:
-                raise SystemExit(f"Incompatible baseline: {field}")
-        if base["microseconds"].keys() != results.keys():
-            raise SystemExit("Incompatible baseline: cases")
-        failures = []
-        if base["paired_ratios"].keys() != paired_ratios.keys():
-            raise SystemExit("Incompatible baseline: paired cases")
-        for key, value in paired_ratios.items():
-            ratio = value / base["paired_ratios"][key]
-            if ratio > 1 + args.max_regression:
-                failures.append(f"{key}: {ratio:.2f}x relative to Django")
-        if failures:
-            raise SystemExit("Performance regression:\n" + "\n".join(failures))
+    finish_report(report, args)
 
 
 if __name__ == "__main__":
