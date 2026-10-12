@@ -4,7 +4,7 @@ Django Rusty Templates (Agentic) is a fork of [Lily's Django Rusty Templates lib
 
 The distribution is named `django-rusty-templates-agentic` to respect the original project's PyPI namespace. It is intended as a drop-in replacement while upstream develops: Python imports remain `django_rusty_templates`, and the Django backend remains `django_rusty_templates.RustyTemplates`. Lily and the upstream contributors retain credit for the original library; see [LICENSE](LICENSE).
 
-Template compatibility is tested against Django 5.2, 6.0, and 6.1. Django 6 requires Python 3.12 or newer. Supported templates, including `extends` and `block`, compile and execute inheritance in Rust in both debug modes. Rust manages block overrides, `block.super`, inheritance history, render state, and block scopes; ordinary variables read native context storage. Python contexts are exported at callback, signal, loader, and unsupported-template boundaries. A compatibility bridge preserves mixed native/custom-template inheritance. Partial templates and fully custom Python tag compilers use Django's parser/node interoperability layer. Django 6.2 development support is tested against a pinned `main` checkout; its `now` format expressions also use the interoperability layer. See [CONTRIBUTING.md](CONTRIBUTING.md) for local conformance checks.
+Template compatibility is tested against Django 5.2, 6.0, and 6.1. Django 6 requires Python 3.12 or newer. Supported templates, including `extends` and `block`, compile and execute inheritance in Rust in both debug modes. Rust manages block overrides, `block.super`, inheritance history, render state, and block scopes; ordinary variables read native context storage. Python contexts are exported at callback, signal, loader, and unsupported-template boundaries. A compatibility bridge preserves mixed native/custom-template inheritance. Partial templates and fully custom Python tag compilers use Django's parser/node interoperability layer. With debug disabled, mixed templates compile supported loops, conditions, variables, includes, URLs and standard helper tags into Rust regions. Opaque custom nodes execute against the original live Django Context at explicit AST boundaries; mixed inheritance keeps its Django block protocol. Debug mode retains Django node rendering for mixed templates. Django 6.2 development support is tested against a pinned `main` checkout; its `now` format expressions also use the interoperability layer. See [CONTRIBUTING.md](CONTRIBUTING.md) for local conformance checks.
 
 To measure inheritance compilation separately from warm rendering and uncached loading plus rendering, run `maturin develop --release` followed by `.venv/bin/python scripts/benchmark_inheritance.py`. The benchmark checks output equality and compares Django, native compilation, and the hybrid parser path on a synthetic template; it does not measure application request latency.
 
@@ -118,7 +118,8 @@ For detailed instructions on setting up your development environment and contrib
 ### Loop rendering regressions
 
 `uv run python scripts/benchmark_loop_values.py --json-output results.json`
-measures integer loops, text-only loops, and repeated variables against Django.
+measures integer loops, text-only loops, repeated variables, and mixed component
+loops against Django.
 It checks output before timing and covers `from_string`, warm loaded rendering,
 and loading plus rendering with explicit cached/uncached loaders and both debug
 settings. Build the extension with `uv run maturin develop --release` first.
@@ -127,14 +128,20 @@ These are synthetic timings, not HTTP request measurements.
 The Render performance PR workflow builds the PR base and candidate in release
 mode on the same runner with the same Python dependencies. It saves both reports
 and fails if a Rusty case slows by more than 15% relative to its matching Django
-control. Timing failures should be rerun
-to distinguish runner noise from a reproducible regression. Normal correctness
+control. Timing failures should be rerun to distinguish runner noise from a
+reproducible regression. Normal correctness
 CI also rejects full Django Context construction during native loop value
 formatting. Additional loop cases feed the optional CodSpeed dashboard.
 
-`engine.explain_template(source)` reports `mode` (`native`, `hybrid`, or
+`engine.explain_template(source, template_name=None)` reports `mode` (`native`, `hybrid`, or
 `unsupported`) and the first native compilation blocker. For a tag blocker it
 includes `reason`, the complete `tag` token, its UTF-8 byte `span` (start, length),
 and its one-based `line`. Version-specific variable syntax reports no tag
 location. Inspection loads tag libraries but does not compile a Python fallback
 tree or render the template; a native report does not imply zero Python callbacks.
+
+Mixed templates expose the original nodes through `template.nodelist` for Django
+inspection and direct indexing. `template.nodelist.rendering_nodes` contains the
+compiled runtime regions. Inspecting Python nodes does not mean their render
+methods execute; the component regression tests disable those methods to verify
+Rust dispatch. Region source spans preserve UTF-8 offsets without rewriting tags.

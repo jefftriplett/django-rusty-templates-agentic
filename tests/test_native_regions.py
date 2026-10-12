@@ -11,9 +11,9 @@ def test_regions_preserve_variable_inspection_and_debug_nodes(debug):
     source = "<p>{{ first }} / {{ second }}</p>"
     template = compile_template(source, Engine(debug=debug))
     assert len(template.nodelist.get_nodes_by_type(VariableNode)) == 2
-    assert len(template.nodelist.get_nodes_by_type(NativeRegionNode)) == (
-        0 if debug else 1
-    )
+    assert len(
+        template.nodelist.rendering_nodes.get_nodes_by_type(NativeRegionNode)
+    ) == (0 if debug else 1)
     assert template.render(Context({"first": "<b>", "second": "Café"})) == (
         "<p>&lt;b&gt; / Café</p>"
     )
@@ -70,8 +70,8 @@ def test_structural_regions_preserve_nested_scopes_and_empty_branches(debug, row
     template = compile_template(source, Engine(debug=debug))
     assert template.render(Context(values)) == expected
     if not debug:
-        assert len(template.nodelist) == 1
-        region = template.nodelist[0]
+        assert len(template.nodelist.rendering_nodes) == 1
+        region = template.nodelist.rendering_nodes[0]
         assert isinstance(region, NativeRegionNode)
         assert region._native is not None
         assert all(
@@ -211,7 +211,7 @@ def test_inherited_block_bodies_are_grouped():
         ]
     )
     template = compile_template(source, engine)
-    regions = template.nodelist.get_nodes_by_type(NativeRegionNode)
+    regions = template.nodelist.rendering_nodes.get_nodes_by_type(NativeRegionNode)
     assert len(regions) == 1
     assert regions[0].source == "<p>{{ first }} / {{ second }}</p>"
     assert template.render(Context({"first": "<", "second": "&"})) == (

@@ -50,30 +50,35 @@ def attach_debug(source, error, filename=None):
         error.template_debug = Template.get_exception_info(template, error, token)
 
 
-class ResolvedArgument:
-    """Expose an already resolved native argument to Django's URL node."""
-
-    def __init__(self, value):
-        self.value = value
-
-    def resolve(self, context):
-        return self.value
-
-
 def render_url(view_name, urlconf, args, kwargs, current_app):
-    from django.template import Context
-    from django.template.base import NodeList
-    from django.template.defaulttags import URLNode
+    from django.urls import reverse
 
-    # Use Django's normal URL-node render hooks so its resolver exceptions keep
-    # the same Python traceback context as other Django template URL calls.
-    context = Context(autoescape=False)
-    context.request = SimpleNamespace(current_app=current_app)
-    context.template = SimpleNamespace(engine=SimpleNamespace(debug=False))
-    node = URLNode(
-        ResolvedArgument(view_name),
-        [ResolvedArgument(value) for value in args or ()],
-        {name: ResolvedArgument(value) for name, value in (kwargs or {}).items()},
-        None,
-    )
-    return "".join([NodeList([node]).render(context)])
+    try:
+        # Arguments are already resolved in Rust. Successful reversals need no
+        # Django Context, node objects or render hooks.
+        return "".join(
+            [
+                reverse(
+                    view_name,
+                    urlconf=urlconf,
+                    args=args,
+                    kwargs=kwargs,
+                    current_app=current_app,
+                )
+            ]
+        )
+    except Exception as error:
+        # Keep Python template render frames on the cold failure path, including
+        # the original exception and resolver traceback. Do not reverse twice.
+        from django.template import Context
+        from django.template.base import Node, NodeList
+
+        failure = error
+
+        class ResolverFailure(Node):
+            def render(self, context):
+                raise failure
+
+        context = Context(autoescape=False)
+        context.template = SimpleNamespace(engine=SimpleNamespace(debug=False))
+        return "".join([NodeList([ResolverFailure()]).render(context)])

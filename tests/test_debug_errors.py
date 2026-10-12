@@ -50,3 +50,35 @@ def test_url_render_bridge_keeps_result_unsafe(monkeypatch):
     result = render_url("example", None, (), {}, None)
     assert type(result) is str
     assert result == "/a&b'"
+
+
+def test_successful_url_reversal_does_not_construct_context(monkeypatch):
+    from django.template import Context
+    from django_rusty_templates.diagnostics import render_url
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Successful URL reversal constructed a Context")
+
+    monkeypatch.setattr(Context, "_reset_dicts", unexpected)
+    monkeypatch.setattr("django.urls.reverse", lambda *args, **kwargs: "/ok/")
+    assert render_url("example", None, (), {}, None) == "/ok/"
+
+
+def test_url_failure_preserves_exception_and_reverses_once(monkeypatch):
+    from django_rusty_templates.diagnostics import render_url
+
+    error = ValueError("resolver failed")
+    calls = []
+
+    def failing_reverse(*args, **kwargs):
+        calls.append(1)
+        raise error
+
+    monkeypatch.setattr("django.urls.reverse", failing_reverse)
+    with pytest.raises(ValueError) as caught:
+        render_url("example", None, (), {}, None)
+    assert caught.value is error
+    assert len(calls) == 1
+    assert "failing_reverse" in [
+        frame.name for frame in traceback.extract_tb(error.__traceback__)
+    ]

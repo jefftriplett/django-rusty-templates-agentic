@@ -849,6 +849,7 @@ pub struct CycleId(pub(crate) usize);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tag {
+    PythonNode(PythonNode),
     Block {
         name: String,
         nodes: Arc<Vec<TokenTree>>,
@@ -907,6 +908,15 @@ pub enum Tag {
     },
     TemplateTag(TemplateTag),
     Cycle(Cycle),
+}
+
+#[derive(Clone, Debug)]
+pub struct PythonNode(pub Arc<Py<PyAny>>);
+
+impl PartialEq for PythonNode {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -1408,6 +1418,8 @@ pub struct Parser<'t, 'py> {
     block_names: HashSet<String>,
     has_extends: bool,
     pub last_tag: Option<At>,
+    pub python_nodes: HashMap<usize, (usize, PythonNode)>,
+    skip_until: usize,
 }
 
 impl<'t, 'py> Parser<'t, 'py> {
@@ -1431,6 +1443,8 @@ impl<'t, 'py> Parser<'t, 'py> {
             block_names: HashSet::new(),
             has_extends: false,
             last_tag: None,
+            python_nodes: HashMap::new(),
+            skip_until: 0,
         }
     }
 
@@ -1454,6 +1468,8 @@ impl<'t, 'py> Parser<'t, 'py> {
             block_names: HashSet::new(),
             has_extends: false,
             last_tag: None,
+            python_nodes: HashMap::new(),
+            skip_until: 0,
         }
     }
 
@@ -1491,6 +1507,14 @@ impl<'t, 'py> Parser<'t, 'py> {
     fn parse_nodes(&mut self) -> Result<Vec<TokenTree>, PyParseError> {
         let mut nodes = Vec::new();
         while let Some(token) = self.lexer.next() {
+            if token.at.0 < self.skip_until {
+                continue;
+            }
+            if let Some((end, node)) = self.python_nodes.get(&token.at.0) {
+                self.skip_until = *end;
+                nodes.push(TokenTree::Tag(Tag::PythonNode(node.clone())));
+                continue;
+            }
             let node = match token.token_type {
                 TokenType::Text => TokenTree::Text(Text::new(token.at)),
                 TokenType::Comment => continue,
@@ -1526,6 +1550,14 @@ impl<'t, 'py> Parser<'t, 'py> {
     ) -> Result<(Vec<TokenTree>, EndTag), PyParseError> {
         let mut nodes = Vec::new();
         while let Some(token) = self.lexer.next() {
+            if token.at.0 < self.skip_until {
+                continue;
+            }
+            if let Some((end, node)) = self.python_nodes.get(&token.at.0) {
+                self.skip_until = *end;
+                nodes.push(TokenTree::Tag(Tag::PythonNode(node.clone())));
+                continue;
+            }
             let node = match token.token_type {
                 TokenType::Text => TokenTree::Text(Text::new(token.at)),
                 TokenType::Comment => continue,
