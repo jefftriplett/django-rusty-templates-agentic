@@ -226,6 +226,26 @@ impl Context {
         Ok(dict)
     }
 
+    /// Callback writes already affect a caller-owned Django Context. Only
+    /// native assignment keys need refreshing before the final writeback.
+    pub(crate) fn refresh_assignments(
+        &mut self,
+        py: Python<'_>,
+        live: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let names: Vec<_> = self.assigned.iter().cloned().collect();
+        for name in names {
+            match live.get_item(&name) {
+                Ok(value) => self._insert(name, value, true),
+                Err(error) if error.is_instance_of::<PyKeyError>(py) => {
+                    self.assigned.remove(&name);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
     pub fn write_assignments(&self, py: Python<'_>, target: &Bound<'_, PyAny>) -> PyResult<()> {
         for key in &self.assigned {
             if let Some(value) = self.get(key) {
@@ -506,6 +526,11 @@ impl Context {
             .get_mut(name)
             .expect("Variable should have been pushed before");
         values.pop();
+    }
+
+    pub(crate) fn push_scope(&mut self, names: &[&str]) {
+        self.names
+            .push(names.iter().map(|name| (*name).to_string()).collect());
     }
 
     pub fn pop_variables(&mut self) {

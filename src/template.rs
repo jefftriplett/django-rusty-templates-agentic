@@ -1276,6 +1276,7 @@ pub mod django_rusty_templates {
                 template_name.as_deref(),
             );
             parser.emit_warnings = false;
+            parser.inspect_only = true;
             let parsed = parser.parse();
             match parsed {
                 Ok(_) => Ok(None),
@@ -1799,7 +1800,26 @@ pub mod django_rusty_templates {
             let previous_root = context.root_template.clone();
             let previous_cycles = std::mem::take(&mut context.cycle_indices);
             let previous_instrument = std::mem::replace(&mut context.instrument_render, true);
+            let callback_scope = if self.has_python_callbacks {
+                context
+                    .formatting_context
+                    .as_ref()
+                    .map(|live| {
+                        py.import("django_rusty_templates.compiler")?
+                            .getattr("begin_render")?
+                            .call1((live.bind(py), Py::new(py, self.clone())?))
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
             let result = self.render_chain(py, context);
+            if let Some(scope) = callback_scope {
+                let cleanup = scope.call_method0("close");
+                if result.is_ok() {
+                    cleanup?;
+                }
+            }
             context.inheritance_blocks = previous_blocks;
             context.inheritance_history = previous_history;
             context.root_template = previous_root;
@@ -1964,31 +1984,59 @@ pub mod django_rusty_templates {
                 }
             }
             if context.formatting_context.is_none() && self.has_python_callbacks {
-                let live = match &context.callback_input {
-                    Some(reference) => reference.bind(py).call0()?,
-                    None => context.django_context(py)?,
+                let direct_input =
+                    context.current_template.is_none() && context.callback_input.is_some();
+                let live = if direct_input {
+                    context
+                        .callback_input
+                        .as_ref()
+                        .expect("direct input requires a caller")
+                        .bind(py)
+                        .call0()?
+                } else {
+                    context.django_context(py)?
+                };
+                let processor_values = if direct_input
+                    && live
+                        .getattr("_processors_index")
+                        .is_ok_and(|index| !index.is_none())
+                {
+                    Some(context.as_dict(py)?)
+                } else {
+                    None
                 };
                 let scope = py
                     .import("django_rusty_templates.compiler")?
                     .getattr("begin_render")?
-                    .call1((&live, Py::new(py, self.clone())?))?;
-                let before: HashMap<String, Py<PyAny>> = live.call_method0("flatten")?.extract()?;
+                    .call1((&live, Py::new(py, self.clone())?, processor_values))?;
+                let before: Option<HashMap<String, Py<PyAny>>> = if direct_input {
+                    None
+                } else {
+                    Some(live.call_method0("flatten")?.extract()?)
+                };
                 context.formatting_context = Some(live.unbind());
                 let result = self.render_body(py, &self.nodes, context);
                 let live = context
                     .formatting_context
                     .take()
                     .expect("callback context initialized");
-                scope.call_method0("close")?;
-                let after: HashMap<String, Py<PyAny>> =
-                    live.bind(py).call_method0("flatten")?.extract()?;
-                for (name, value) in after {
-                    if before
-                        .get(&name)
-                        .is_none_or(|previous| !previous.bind(py).is(value.bind(py)))
-                    {
-                        context.insert(name, value.into_bound(py))?;
+                let cleanup = scope.call_method0("close");
+                if result.is_ok() {
+                    cleanup?;
+                }
+                if let Some(before) = before {
+                    let after: HashMap<String, Py<PyAny>> =
+                        live.bind(py).call_method0("flatten")?.extract()?;
+                    for (name, value) in after {
+                        if before
+                            .get(&name)
+                            .is_none_or(|previous| !previous.bind(py).is(value.bind(py)))
+                        {
+                            context.insert(name, value.into_bound(py))?;
+                        }
                     }
+                } else {
+                    context.refresh_assignments(py, live.bind(py))?;
                 }
                 return result;
             }
@@ -2410,6 +2458,25 @@ pub mod django_rusty_templates {
                         .getattr("template")
                         .is_ok_and(|template| !template.is_none())
                 });
+            // Opaque callbacks and native nodes can both read a caller-owned
+            // Context directly. No flatten/import/writeback is needed here.
+            if is_django_context
+                && self.has_python_callbacks
+                && processor_index.is_none()
+                && request.is_none()
+            {
+                let input = context.as_ref().expect("Django context checked");
+                let scope = py
+                    .import("django_rusty_templates.compiler")?
+                    .getattr("begin_render")?
+                    .call1((input, Py::new(py, self.clone())?))?;
+                let result = self.render_django_context(py, input.clone(), true);
+                let cleanup = scope.call_method0("close");
+                if result.is_ok() {
+                    cleanup?;
+                }
+                return result;
+            }
             // Django-owned include loops already have a live, bound context.
             // Text and variable templates need no native assignment scopes, so
             // resolve their referenced roots directly rather than flattening

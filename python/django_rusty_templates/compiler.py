@@ -6,9 +6,8 @@ It never parses the native prefix or trailing native nodes.
 """
 
 import re
-from contextlib import ExitStack
 
-from django.template.base import DebugLexer, Parser, TokenType
+from django.template.base import DebugLexer, NodeList, Parser, TokenType
 from django.template.defaulttags import load
 from django.template import Origin
 
@@ -64,8 +63,10 @@ class CompilerParser(Parser):
         self.end = byte_start
         token = self.next_token()
         assert token.token_type == TokenType.BLOCK
+        self.command_stack.append((token.contents.split()[0], token))
         try:
             node = compiler(self, token)
+            self.extend_nodelist(NodeList(), node, token)
         except Exception as error:
             error = self.error(token, error)
             error._rusty_compiler_error = True
@@ -76,8 +77,7 @@ class CompilerParser(Parser):
                     self.source, self.origin, error, error.token
                 )
             raise error
-        node.token = token
-        node.origin = self.origin
+        self.command_stack.pop()
         # delete_first_token() deliberately doesn't use next_token() in Django.
         # The first still-pending token provides the exact consumed boundary.
         end = self.tokens[-1]._rusty_start if self.tokens else len(self._source_bytes)
@@ -116,10 +116,38 @@ class CompilerParser(Parser):
         return native_error
 
 
-def begin_render(context, template):
-    """Bind callbacks to this template and reset render state for this render."""
-    stack = ExitStack()
-    stack.enter_context(context.render_context.push_state(template))
-    if context.template is None:
-        stack.enter_context(context.bind_template(template))
-    return stack
+class _RenderScope:
+    """The binding/push-state portion of Template.render, without processors.
+
+    The native public render entry point has already evaluated processors.
+    Keeping this scope explicit avoids evaluating them again on RequestContext.
+    """
+
+    def __init__(self, context, template, processor_values):
+        self.context = context
+        self.template = context.template
+        self.render_template = context.render_context.template
+        self.processor_index = None
+        self.processor_values = None
+        context.render_context.template = template
+        context.render_context.push()
+        if context.template is None:
+            context.template = template
+            context.template_name = template.name
+            index = getattr(context, "_processors_index", None)
+            if index is not None and processor_values is not None:
+                self.processor_index = index
+                self.processor_values = context.dicts[index]
+                context.dicts[index] = processor_values
+
+    def close(self):
+        context = self.context
+        if self.processor_index is not None:
+            context.dicts[self.processor_index] = self.processor_values
+        context.template = self.template
+        context.render_context.template = self.render_template
+        context.render_context.pop()
+
+
+def begin_render(context, template, processor_values=None):
+    return _RenderScope(context, template, processor_values)

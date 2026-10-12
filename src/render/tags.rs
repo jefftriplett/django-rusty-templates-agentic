@@ -1407,6 +1407,7 @@ impl Render for Include {
                 } else {
                     None
                 };
+                context.push_scope(&names);
                 for (key, value) in names.iter().zip(values) {
                     if let Some(live) = &context.formatting_context {
                         live.bind(py).set_item(key, &value)?;
@@ -1416,9 +1417,7 @@ impl Render for Include {
                 let rendered = include
                     .render(py, context, self.template_at(), template)
                     .map(|content| Cow::Owned(content.into_owned()));
-                for key in names {
-                    context.pop_variable(key);
-                }
+                context.pop_variables();
                 if let Some(scope) = scope {
                     scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
                 }

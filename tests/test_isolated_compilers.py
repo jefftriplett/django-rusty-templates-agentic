@@ -33,6 +33,7 @@ def libraries(monkeypatch):
     @module.register.tag("capture")
     def capture(parser, token):
         calls.append(token)
+        token._parser_origin = parser.origin
         parser.capture_count = getattr(parser, "capture_count", 0) + 1
         parser.extra_data["captures"] = parser.capture_count
         expression = parser.compile_filter(token.split_contents()[1])
@@ -86,6 +87,8 @@ def test_native_outer_parse_preserves_scopes_and_node_identity(
     assert len(calls) == 1
     assert parse_spans == [(("endcapture",), 2)]
     assert calls[0].lineno == 2
+    assert calls[0]._parser_origin.name == str(tmp_path / "custom.html")
+    assert calls[0]._parser_origin.template_name == "custom.html"
     assert (
         calls[0].position
         == (
@@ -318,3 +321,145 @@ def test_render_exception_restores_input_context_state(libraries):
     assert context.template is None
     assert len(context.render_context.dicts) == before
     assert error.template_debug["during"] == "{% broken %}"
+
+
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("body", ["{{ value }}", "{% if value %}{{ value }}"])
+def test_unclosed_opaque_block_matches_django(libraries, debug, body):
+    from django.template import TemplateSyntaxError
+
+    _, modules, calls = libraries
+    source = "Café\n{% load custom %}{% capture value %}" + body
+    with pytest.raises(TemplateSyntaxError) as expected:
+        DjangoEngine(libraries=modules, debug=debug).from_string(source)
+    calls.clear()
+    with pytest.raises(TemplateSyntaxError) as caught:
+        Engine(libraries=modules, debug=debug).from_string(source)
+    assert str(caught.value) == str(expected.value)
+    assert len(calls) == 1
+    if debug:
+        assert (
+            caught.value.template_debug["during"]
+            == expected.value.template_debug["during"]
+        )
+
+
+def test_skip_past_unclosed_tag_matches_django(libraries):
+    from django.template import TemplateSyntaxError
+    from django.template.base import TextNode
+
+    library, modules, _ = libraries
+    calls = []
+
+    @library.tag("skip")
+    def skip(parser, token):
+        calls.append(token)
+        parser.skip_past("endskip")
+        return TextNode("")
+
+    skip.rusty_isolated_compiler = True
+    source = "{% load custom %}{% skip %}ignored"
+    with pytest.raises(TemplateSyntaxError) as expected:
+        DjangoEngine(libraries=modules, debug=True).from_string(source)
+    calls.clear()
+    with pytest.raises(TemplateSyntaxError) as caught:
+        Engine(libraries=modules, debug=True).from_string(source)
+    assert str(caught.value) == str(expected.value)
+    assert len(calls) == 1
+    assert caught.value.template_debug["during"] == "{% skip %}"
+
+
+def test_callback_replaces_native_assignment_before_writeback(libraries):
+    _, modules, _ = libraries
+    source = "{% load custom %}{% now 'Y' as captured %}{% capture value %}{{ captured }}{% endcapture %}{{ captured }}"
+    expected_context = Context({"value": "after"})
+    expected = (
+        DjangoEngine(libraries=modules).from_string(source).render(expected_context)
+    )
+    context = Context({"value": "after"})
+    actual = Engine(libraries=modules).from_string(source).render(context)
+    assert actual == expected == "1:afterafter"
+    assert context["captured"] == expected_context["captured"] == "after"
+
+
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("parent_callback", [False, True])
+def test_native_parent_loop_includes_opaque_child_with_scoped_assignments(
+    tmp_path, libraries, debug, parent_callback
+):
+    _, modules, _ = libraries
+    parent = "{% for value in values %}{% include 'child.html' %}{{ captured }}{{ value }}|{% endfor %}"
+    if parent_callback:
+        parent = "{% load custom %}{% capture 'root' %}{% endcapture %}" + parent
+    child = "{% load custom %}{% capture value %}{{ captured }}-{{ forloop.counter }}{% endcapture %}"
+    (tmp_path / "parent.html").write_text(parent)
+    (tmp_path / "child.html").write_text(child)
+    options = dict(dirs=[str(tmp_path)], libraries=modules, debug=debug)
+    data = {"values": ["a", "b"]}
+    expected = DjangoEngine(**options).get_template("parent.html").render(Context(data))
+    actual = Engine(**options).get_template("parent.html").render(Context(data))
+    assert actual == expected
+    assert actual == (
+        "1:1:a-1roota|1:b-2rootb|" if parent_callback else "1:a-1a|1:b-2b|"
+    )
+
+
+def test_request_context_processors_run_once_and_keep_caller_precedence(
+    libraries, monkeypatch
+):
+    from django.http import HttpRequest
+    from django.template import RequestContext
+
+    _, modules, _ = libraries
+    module = sys.modules[modules["custom"]]
+    calls = []
+
+    def processor(request):
+        calls.append(request)
+        return {"value": "processor", "from_processor": "ready"}
+
+    module.processor = processor
+    options = dict(
+        libraries=modules, context_processors=[module.__name__ + ".processor"]
+    )
+    source = "{% load custom %}{% capture from_processor %}{{ captured }}:{{ value }}{% endcapture %}"
+    request = HttpRequest()
+    reference_context = RequestContext(request)
+    reference_context.push({"value": "caller"})
+    expected = DjangoEngine(**options).from_string(source).render(reference_context)
+    calls.clear()
+    context = RequestContext(request)
+    context.push({"value": "caller"})
+    original = context.dicts[context._processors_index]
+    actual = Engine(**options).from_string(source).render(context)
+    assert actual == expected == "1:ready:caller"
+    assert calls == [request]
+    assert context.dicts[context._processors_index] is original
+    assert context.template is None
+
+
+def test_invalid_compiler_result_is_not_replayed(libraries):
+    library, modules, _ = libraries
+    calls = []
+
+    @library.tag("invalid")
+    def invalid(parser, token):
+        calls.append(token)
+        return None
+
+    invalid.rusty_isolated_compiler = True
+    source = "{% load custom %}{% invalid %}"
+    with pytest.raises(AttributeError) as expected:
+        DjangoEngine(libraries=modules).from_string(source)
+    calls.clear()
+    with pytest.raises(AttributeError) as caught:
+        Engine(libraries=modules).from_string(source)
+    assert str(caught.value) == str(expected.value)
+    assert len(calls) == 1
+
+
+def test_syntax_diagnostic_does_not_invoke_opted_in_compiler(libraries):
+    _, modules, calls = libraries
+    source = "{% load custom %}{% capture value %}body{% endcapture %}"
+    Engine(libraries=modules)._syntax_diagnostic(source, None, None)
+    assert calls == []

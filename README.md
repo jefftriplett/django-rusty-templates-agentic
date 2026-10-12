@@ -167,13 +167,15 @@ Opt in only when the compiler uses the parser within its consumed span. The
 adapter supports nested `parse()`, `compile_filter()`, `next_token()`,
 `prepend_token()`, `delete_first_token()`, loaded tags and filters, custom parser
 attributes, and `extra_data`. It preserves tokens, line numbers, DEBUG positions,
-origins, compiled node identities, and Django context scopes during rendering.
+origin source names and template names, compiled node identities, and Django
+context scopes during rendering.
 Native nodes surrounding the custom span never enter Django's parser. A load
 inside the opaque body also makes its filters available to following native
 nodes.
 
 Leave the compiler unannotated when it inspects prior native nodes, depends on
-`command_stack` outside its own body, rewrites future tokens, returns inheritance
+`command_stack` outside its own body, reads `parser.origin.loader`, rewrites
+future tokens, returns inheritance
 or `must_be_first` nodes, or changes how native built-in tags compile. The full
 Django parser remains the default for such compilers. Templates sharing
 inheritance, named-cycle, or partial registries also retain the compatibility
