@@ -443,6 +443,30 @@ impl Evaluate for TagElement {
 }
 
 impl Render for TokenTree {
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> super::RenderIntoResult {
+        match self {
+            Self::Text(text) => output.push_str(template.content(text.at)),
+            Self::Tag(tag) => return tag.render_into(py, template, context, output),
+            Self::Variable(variable) => {
+                if let Some(value) = resolve_output_variable(variable, py, template, context)? {
+                    value.render_into(context, output)?;
+                }
+            }
+            Self::ForVariable(variable) => {
+                return variable.render_into(py, template, context, output);
+            }
+            Self::Filter(filter) => return filter.render_into(py, template, context, output),
+            _ => output.push_str(&self.render(py, template, context)?),
+        }
+        Ok(())
+    }
+
     fn render<'t>(
         &self,
         py: Python<'_>,

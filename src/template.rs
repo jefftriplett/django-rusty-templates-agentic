@@ -2080,6 +2080,18 @@ pub mod django_rusty_templates {
             nodes: &[TokenTree],
             context: &mut Context,
         ) -> RenderResult<'a> {
+            let mut output = String::with_capacity(self.template.len());
+            self.render_body_into(py, nodes, context, &mut output)?;
+            Ok(Cow::Owned(output))
+        }
+
+        pub(crate) fn render_body_into(
+            &self,
+            py: Python<'_>,
+            nodes: &[TokenTree],
+            context: &mut Context,
+            output: &mut String,
+        ) -> crate::render::RenderIntoResult {
             let python_blocks = if self.has_inheritance() && context.formatting_context.is_some() {
                 Some(self.compiled_blocks(py)?.unbind())
             } else {
@@ -2097,10 +2109,9 @@ pub mod django_rusty_templates {
                 self.engine.string_if_invalid.clone(),
             );
             let result = (|| {
-                let mut rendered = String::with_capacity(self.template.len());
                 let template = TemplateString(&self.template);
                 for node in nodes {
-                    match node.render(py, template, context) {
+                    match node.render_into(py, template, context, output) {
                         Err(PyRenderError::PyErr(error)) => {
                             if self.engine.debug.load(Ordering::Relaxed) {
                                 let _ = (|| -> PyResult<()> {
@@ -2119,10 +2130,10 @@ pub mod django_rusty_templates {
                             return Err(error.into());
                         }
                         Err(error) => return Err(self.render_error(error).into()),
-                        Ok(output) => rendered.push_str(&output),
+                        Ok(()) => {}
                     }
                 }
-                Ok(Cow::Owned(rendered))
+                Ok(())
             })();
             context.string_if_invalid = previous_invalid;
             context.python_blocks = previous_python_blocks;
