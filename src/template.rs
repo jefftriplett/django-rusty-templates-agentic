@@ -2108,31 +2108,34 @@ pub mod django_rusty_templates {
                 &mut context.string_if_invalid,
                 self.engine.string_if_invalid.clone(),
             );
-            let result = (|| {
+            let result = context.join_scope(|context| {
                 let template = TemplateString(&self.template);
-                match nodes.render_into(py, template, context, output) {
-                    Err(PyRenderError::PyErr(error)) => {
-                        if self.engine.debug.load(Ordering::Relaxed) {
-                            let _ = (|| -> PyResult<()> {
-                                py.import("django_rusty_templates.diagnostics")?
-                                    .getattr("attach_debug")?
-                                    .call1((
-                                        self.template.as_ref(),
-                                        error.value(py),
-                                        self.filename
-                                            .as_ref()
-                                            .map(|path| path.to_string_lossy().into_owned()),
-                                    ))?;
-                                Ok(())
-                            })();
+                for (index, node) in nodes.iter().enumerate() {
+                    context.join_index = index;
+                    match node.render_into(py, template, context, output) {
+                        Err(PyRenderError::PyErr(error)) => {
+                            if self.engine.debug.load(Ordering::Relaxed) {
+                                let _ = (|| -> PyResult<()> {
+                                    py.import("django_rusty_templates.diagnostics")?
+                                        .getattr("attach_debug")?
+                                        .call1((
+                                            self.template.as_ref(),
+                                            error.value(py),
+                                            self.filename
+                                                .as_ref()
+                                                .map(|path| path.to_string_lossy().into_owned()),
+                                        ))?;
+                                    Ok(())
+                                })();
+                            }
+                            return Err(error.into());
                         }
-                        return Err(error.into());
+                        Err(error) => return Err(self.render_error(error).into()),
+                        Ok(()) => {}
                     }
-                    Err(error) => return Err(self.render_error(error).into()),
-                    Ok(()) => {}
                 }
                 Ok(())
-            })();
+            });
             context.string_if_invalid = previous_invalid;
             context.python_blocks = previous_python_blocks;
             context.current_template = previous_template;

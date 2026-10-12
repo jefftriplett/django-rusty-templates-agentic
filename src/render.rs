@@ -120,27 +120,7 @@ where
     }
 }
 
-impl<T: Render> Render for Vec<T> {
-    fn render<'t>(
-        &self,
-        py: Python<'_>,
-        template: TemplateString<'t>,
-        context: &mut Context,
-    ) -> RenderResult<'t> {
-        self.as_slice().render(py, template, context)
-    }
-    fn render_into(
-        &self,
-        py: Python<'_>,
-        template: TemplateString<'_>,
-        context: &mut Context,
-        output: &mut String,
-    ) -> RenderIntoResult {
-        self.as_slice().render_into(py, template, context, output)
-    }
-}
-
-impl<T> Render for [T]
+impl<T> Render for Vec<T>
 where
     T: Render,
 {
