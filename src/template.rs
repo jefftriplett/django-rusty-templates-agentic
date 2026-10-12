@@ -2214,11 +2214,6 @@ pub mod django_rusty_templates {
             self.inspection_nodes
                 .0
                 .get_or_try_init(py, || {
-                    let base = py.import("django.template.base")?;
-                    let tokens = base
-                        .getattr("Lexer")?
-                        .call1((self.template.as_ref(),))?
-                        .call_method0("tokenize")?;
                     let libraries = PyDict::new(py);
                     for (name, library) in &self.engine.libraries {
                         libraries.set_item(name, library)?;
@@ -2227,10 +2222,16 @@ pub mod django_rusty_templates {
                     for library in &self.engine.template_builtins {
                         builtins.append(library.bind(py))?;
                     }
-                    Ok(base
-                        .getattr("Parser")?
-                        .call1((tokens, libraries, builtins, self.origin()))?
-                        .call_method0("parse")?
+                    Ok(py
+                        .import("django_rusty_templates.inspection")?
+                        .getattr("build_nodelist")?
+                        .call1((
+                            self.template.as_ref(),
+                            libraries,
+                            builtins,
+                            self.origin(),
+                            self.engine.debug.load(Ordering::Relaxed),
+                        ))?
                         .unbind())
                 })
                 .map(|nodes| nodes.bind(py).clone())
