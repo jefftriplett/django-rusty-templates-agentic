@@ -1075,6 +1075,13 @@ impl<'t, 'py> Content<'t, 'py> {
             }
             Self::Py(content) => resolve_python(content, context)?,
             Self::String(content) => content,
+            Self::Float(content) if context.format_values => {
+                return Python::attach(|py| {
+                    Content::Py(pyo3::types::PyFloat::new(py, content).into_any())
+                        .render(context)
+                        .map(|output| Cow::Owned(output.into_owned()))
+                });
+            }
             Self::Float(content) => return Ok(content.to_string().into()),
             Self::Int(content) => return Ok(content.to_string().into()),
             Self::Bool(true) => return Ok(Cow::Borrowed("True")),

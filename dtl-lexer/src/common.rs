@@ -66,7 +66,15 @@ pub fn lex_variable(byte: usize, rest: &str) -> (At, usize, &str) {
                 _ => {}
             },
             _ if in_text.is_some() => {}
-            c if !c.is_xid_continue() && c != '.' && c != '|' && c != ':' && c != '-' => break,
+            c if !c.is_xid_continue()
+                && c != '.'
+                && c != '|'
+                && c != ':'
+                && c != '-'
+                && c != '+' =>
+            {
+                break;
+            }
             _ => {}
         }
         end += c.len_utf8();
@@ -161,6 +169,34 @@ pub fn lex_translated<'t>(
         let at = (start, byte - start);
         Err(LexerError::IncompleteTranslatedString { at: at.into() })
     }
+}
+
+/// Django 6 accepts signed exponents and plus signs in numeric expressions.
+pub fn lex_numeric_modern(byte: usize, rest: &str) -> (At, usize, &str) {
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E')))
+        .unwrap_or(rest.len());
+    ((byte, end), byte + end, &rest[end..])
+}
+
+pub fn trim_variable_modern(variable: &str) -> &str {
+    match variable.find(|c: char| !c.is_xid_continue() && !matches!(c, '.' | '-' | '+')) {
+        Some(end) => &variable[..end],
+        None => variable,
+    }
+}
+
+pub fn check_variable_attrs_modern(variable: &str, start: usize) -> Result<(), LexerError> {
+    let mut offset = 0;
+    for part in variable.split('.') {
+        if part.starts_with('_') || part.contains('-') || part.contains('+') {
+            return Err(LexerError::InvalidVariableName {
+                at: (start + offset, part.len()).into(),
+            });
+        }
+        offset += part.len() + 1;
+    }
+    Ok(())
 }
 
 pub fn lex_numeric(byte: usize, rest: &str) -> (At, usize, &str) {

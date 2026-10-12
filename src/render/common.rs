@@ -456,7 +456,7 @@ impl Render for TokenTree {
                 TranslatedText::new(text.at).render(py, template, context)
             }
             Self::Int(n) => Ok(n.to_string().into()),
-            Self::Float(f) => Ok(f.to_string().into()),
+            Self::Float(f) => Content::Float(*f).render(context).map_err(Into::into),
             Self::Tag(tag) => tag.render(py, template, context),
             Self::Variable(variable) => {
                 match resolve_output_variable(variable, py, template, context)? {

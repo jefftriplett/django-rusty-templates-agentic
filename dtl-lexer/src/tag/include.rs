@@ -89,6 +89,11 @@ impl<'t> IncludeLexer<'t> {
         }
     }
 
+    pub fn with_modern_syntax(mut self, modern: bool) -> Self {
+        self.lexer = self.lexer.with_modern_syntax(modern);
+        self
+    }
+
     pub fn lex_template(&mut self) -> Result<Option<IncludeTemplateToken>, IncludeLexerError> {
         let token = match self.lexer.next() {
             Some(token) => token?,

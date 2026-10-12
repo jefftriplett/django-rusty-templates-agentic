@@ -28,7 +28,7 @@ impl<'t> IntoTemplateString<'t> for &'t str {
 }
 
 pub struct PartsIterator<'t> {
-    variable: &'t str,
+    variable: Option<&'t str>,
     start: usize,
 }
 
@@ -36,23 +36,16 @@ impl<'t> Iterator for PartsIterator<'t> {
     type Item = (&'t str, At);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.variable.is_empty() {
-            return None;
-        }
-
-        match self.variable.find('.') {
+        let variable = self.variable.take()?;
+        match variable.find('.') {
             Some(index) => {
-                let part = &self.variable[..index];
+                let part = &variable[..index];
                 let at = (self.start, index);
                 self.start += index + 1;
-                self.variable = &self.variable[index + 1..];
+                self.variable = Some(&variable[index + 1..]);
                 Some((part, at))
             }
-            None => {
-                let part = self.variable;
-                self.variable = "";
-                Some((part, (self.start, part.len())))
-            }
+            None => Some((variable, (self.start, variable.len()))),
         }
     }
 }
@@ -70,7 +63,10 @@ impl<'t> Variable {
     pub fn parts(&self, template: TemplateString<'t>) -> impl Iterator<Item = (&'t str, At)> {
         let start = self.at.0;
         let variable = template.content(self.at);
-        PartsIterator { variable, start }
+        PartsIterator {
+            variable: Some(variable),
+            start,
+        }
     }
 }
 

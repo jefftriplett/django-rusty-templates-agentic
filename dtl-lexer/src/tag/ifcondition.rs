@@ -1,7 +1,7 @@
 use crate::TemplateContent;
 use crate::common::{
-    LexerError, NextChar, lex_literal_filters, lex_numeric, lex_text, lex_translated, lex_variable,
-    text_content_at, translated_text_content_at,
+    LexerError, NextChar, lex_literal_filters, lex_numeric, lex_numeric_modern, lex_text,
+    lex_translated, lex_variable, text_content_at, translated_text_content_at,
 };
 use crate::tag::TagParts;
 use crate::types::{At, TemplateString};
@@ -62,6 +62,7 @@ impl<'t> TemplateContent<'t> for IfConditionToken {
 }
 
 pub struct IfConditionLexer<'t> {
+    modern: bool,
     rest: &'t str,
     byte: usize,
 }
@@ -69,9 +70,15 @@ pub struct IfConditionLexer<'t> {
 impl<'t> IfConditionLexer<'t> {
     pub fn new(template: TemplateString<'t>, parts: TagParts) -> Self {
         Self {
+            modern: false,
             rest: template.content(parts.at),
             byte: parts.at.0,
         }
+    }
+
+    pub fn with_modern_syntax(mut self, modern: bool) -> Self {
+        self.modern = modern;
+        self
     }
 
     fn lex_condition(&mut self) -> Result<IfConditionToken, LexerError> {
@@ -86,6 +93,7 @@ impl<'t> IfConditionLexer<'t> {
             }
             '"' => self.lex_text(&mut chars, '"')?,
             '\'' => self.lex_text(&mut chars, '\'')?,
+            '+' if self.modern => self.lex_numeric(),
             '0'..='9' | '-' => self.lex_numeric(),
             _ => self.lex_variable(),
         };
@@ -114,7 +122,11 @@ impl<'t> IfConditionLexer<'t> {
     }
 
     fn lex_numeric(&mut self) -> IfConditionToken {
-        let (at, byte, rest) = lex_numeric(self.byte, self.rest);
+        let (at, byte, rest) = if self.modern {
+            lex_numeric_modern(self.byte, self.rest)
+        } else {
+            lex_numeric(self.byte, self.rest)
+        };
         self.rest = rest;
         self.byte = byte;
         IfConditionToken {

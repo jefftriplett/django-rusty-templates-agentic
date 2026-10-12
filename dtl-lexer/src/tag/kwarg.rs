@@ -3,8 +3,8 @@ use thiserror::Error;
 use unicode_xid::UnicodeXID;
 
 use crate::common::{
-    LexerError, NextChar, get_all_at, lex_numeric, lex_text, lex_translated, lex_variable,
-    text_content_at, translated_text_content_at,
+    LexerError, NextChar, get_all_at, lex_numeric, lex_numeric_modern, lex_text, lex_translated,
+    lex_variable, text_content_at, translated_text_content_at,
 };
 use crate::tag::TagParts;
 use crate::tag::common::TagElementTokenType;
@@ -55,6 +55,7 @@ pub enum TagElementKwargLexerError {
 }
 
 pub struct TagElementKwargLexer<'t> {
+    modern: bool,
     rest: &'t str,
     byte: usize,
 }
@@ -62,13 +63,23 @@ pub struct TagElementKwargLexer<'t> {
 impl<'t> TagElementKwargLexer<'t> {
     pub fn new(template: TemplateString<'t>, parts: TagParts) -> Self {
         Self {
+            modern: false,
             rest: template.content(parts.at),
             byte: parts.at.0,
         }
     }
 
+    pub fn with_modern_syntax(mut self, modern: bool) -> Self {
+        self.modern = modern;
+        self
+    }
+
     fn lex_numeric(&mut self, kwarg: Option<At>) -> TagElementKwargToken {
-        let (at, byte, rest) = lex_numeric(self.byte, self.rest);
+        let (at, byte, rest) = if self.modern {
+            lex_numeric_modern(self.byte, self.rest)
+        } else {
+            lex_numeric(self.byte, self.rest)
+        };
         self.rest = rest;
         self.byte = byte;
         TagElementKwargToken {
@@ -205,6 +216,7 @@ impl Iterator for TagElementKwargLexer<'_> {
             }
             '"' => self.lex_text(&mut chars, '"', kwarg),
             '\'' => self.lex_text(&mut chars, '\'', kwarg),
+            '+' if self.modern => Ok(self.lex_numeric(kwarg)),
             '0'..='9' | '-' => Ok(self.lex_numeric(kwarg)),
             _ => self.lex_variable_or_filter(kwarg),
         };
