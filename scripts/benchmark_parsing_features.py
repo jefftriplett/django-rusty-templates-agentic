@@ -36,6 +36,9 @@ def sources():
         "flat": variables,
         "literal_syntax": ".. 1e+5 2E-3 {# {{ object..name }} #}" + variables,
         "static": "{% load static %}" + "{% static path %}" * 20,
+        "custom_late_large": "{% load marker %}{% if enabled %}"
+        + "{{ value }}" * 1000
+        + "{% marker %}{% endif %}",
         "cache": "{% load cache %}{% cache 0 parsing-benchmark %}"
         + variables
         + "{% endcache %}",
@@ -88,6 +91,8 @@ def main():
     def marker(parser, token):
         return Marker()
 
+    marker.rusty_isolated_compiler = True
+
     libraries = {
         name: "django.templatetags." + name
         for name in ["static", "cache", "i18n", "l10n", "tz"]
@@ -96,6 +101,7 @@ def main():
     fixtures = sources()
     values = {
         "value": "<&>",
+        "enabled": True,
         "path": "app/main.css",
         "object": {"": {"name": "ok"}},
         "format": "Y",
