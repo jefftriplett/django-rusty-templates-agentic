@@ -1456,8 +1456,8 @@ pub struct Parser<'t, 'py> {
     pub python_nodes: HashMap<usize, (usize, PythonNode)>,
     skip_until: usize,
     pub compiler_parser: Option<Py<PyAny>>,
-    compiler_loads: Vec<String>,
-    registered_compilers: HashMap<String, Bound<'py, PyAny>>,
+    compiler_loads: Vec<At>,
+    registered_compilers: Option<HashMap<String, Bound<'py, PyAny>>>,
 }
 
 impl<'t, 'py> Parser<'t, 'py> {
@@ -1489,7 +1489,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             skip_until: 0,
             compiler_parser: None,
             compiler_loads: Vec::new(),
-            registered_compilers: HashMap::new(),
+            registered_compilers: None,
         }
     }
 
@@ -1521,7 +1521,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             skip_until: 0,
             compiler_parser: None,
             compiler_loads: Vec::new(),
-            registered_compilers: HashMap::new(),
+            registered_compilers: None,
         }
     }
 
@@ -2793,11 +2793,12 @@ impl<'t, 'py> Parser<'t, 'py> {
     }
 
     fn parse_load(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
-        let load_source = self.template.content(at).to_string();
         if let Some(parser) = &self.compiler_parser {
-            parser.bind(self.py).call_method1("load", (&load_source,))?;
+            parser
+                .bind(self.py)
+                .call_method1("load", (self.template.content(at),))?;
         }
-        self.compiler_loads.push(load_source);
+        self.compiler_loads.push(at);
         let tokens: Vec<_> = LoadLexer::new(self.template, parts).collect();
         let mut rev = tokens.iter().rev();
         if let (Some(last), Some(prev)) = (rev.next(), rev.next())
@@ -2951,9 +2952,12 @@ impl<'t, 'py> Parser<'t, 'py> {
                     self.warning_origin.as_deref(),
                     self.origin,
                 ))?;
-            for source in &self.compiler_loads {
-                parser.call_method1("load", (source,))?;
+            for span in &self.compiler_loads {
+                parser.call_method1("load", (self.template.content(*span),))?;
             }
+            // Ordinary native templates never need a second tag registry.
+            // Snapshot only once, before an opaque compiler can replace tags.
+            self.registered_compilers = Some(self.get_tags(&parser)?);
             self.compiler_parser = Some(parser.unbind());
         }
         let parser = self
@@ -2970,7 +2974,8 @@ impl<'t, 'py> Parser<'t, 'py> {
         for (name, tag) in tags {
             if self
                 .registered_compilers
-                .get(&name)
+                .as_ref()
+                .and_then(|registered| registered.get(&name))
                 .is_none_or(|registered| !registered.is(&tag))
             {
                 self.register_tag(&name, tag)?;
@@ -2981,8 +2986,9 @@ impl<'t, 'py> Parser<'t, 'py> {
     }
 
     fn register_tag(&mut self, name: &str, tag: Bound<'py, PyAny>) -> PyResult<()> {
-        self.registered_compilers
-            .insert(name.to_string(), tag.clone());
+        if let Some(registered) = &mut self.registered_compilers {
+            registered.insert(name.to_string(), tag.clone());
+        }
         // End markers are recognized even without a matching opening tag. Reading
         // their names does not validate or compile the tag's callable.
         if let Ok(code) = tag.getattr("__code__") {

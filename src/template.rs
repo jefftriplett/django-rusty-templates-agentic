@@ -1251,6 +1251,8 @@ pub mod django_rusty_templates {
                     template_name.as_deref(),
                 )
             })?;
+            let has_python_callbacks =
+                parser.compiler_parser.is_some() || !parser.python_nodes.is_empty();
             Ok(Template {
                 template: Arc::from(source),
                 filename,
@@ -1266,7 +1268,7 @@ pub mod django_rusty_templates {
                 partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
                 python_renderer: None,
                 has_inheritance: false,
-                has_python_callbacks: false,
+                has_python_callbacks,
             })
         }
 
@@ -1717,6 +1719,8 @@ pub mod django_rusty_templates {
                     compiler.bind(py).getattr("extra_data").map(Bound::unbind)
                 })?;
             }
+            let has_python_callbacks =
+                parser.compiler_parser.is_some() || !parser.python_nodes.is_empty();
             Ok(Self {
                 template: Arc::from(template),
                 filename: Some(filename),
@@ -1730,7 +1734,7 @@ pub mod django_rusty_templates {
                 partial_data,
                 python_renderer,
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
-                has_python_callbacks: Self::nodes_have_callbacks(&nodes),
+                has_python_callbacks,
                 nodes: Arc::new(nodes),
                 engine,
             })
@@ -1799,6 +1803,8 @@ pub mod django_rusty_templates {
                     compiler.bind(py).getattr("extra_data").map(Bound::unbind)
                 })?;
             }
+            let has_python_callbacks =
+                parser.compiler_parser.is_some() || !parser.python_nodes.is_empty();
             Ok(Self {
                 template: Arc::from(template),
                 filename: None,
@@ -1812,7 +1818,7 @@ pub mod django_rusty_templates {
                 partial_data,
                 python_renderer,
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
-                has_python_callbacks: Self::nodes_have_callbacks(&nodes),
+                has_python_callbacks,
                 nodes: Arc::new(nodes),
                 engine,
             })
@@ -1904,7 +1910,8 @@ pub mod django_rusty_templates {
             self.native_partials();
             Self {
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
-                has_python_callbacks: Self::nodes_have_callbacks(&nodes),
+                has_python_callbacks: self.has_python_callbacks
+                    && Self::nodes_have_callbacks(&nodes),
                 nodes,
                 inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
                 django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),

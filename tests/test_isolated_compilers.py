@@ -613,3 +613,31 @@ def test_readonly_exception_annotation_failure_does_not_replay_compiler(
     assert type(caught.value) is type(expected.value)
     assert str(caught.value) == str(expected.value)
     assert len(calls) == 1
+
+
+def test_first_opaque_snapshot_preserves_replacement_of_native_generated_tag(
+    libraries, monkeypatch
+):
+    from django.template.base import TextNode
+
+    library, modules, _ = libraries
+
+    @library.simple_tag(name="simple")
+    def simple():
+        return "before"
+
+    @library.tag("replace")
+    def replace(parser, token):
+        def replacement(parser, token):
+            return TextNode("after")
+
+        replacement.rusty_isolated_compiler = True
+        parser.tags["simple"] = replacement
+        return TextNode("")
+
+    replace.rusty_isolated_compiler = True
+    monkeypatch.setattr(
+        interop, "compile_template", lambda *args: pytest.fail("fallback")
+    )
+    source = "{% load custom %}{% simple %}{% replace %}{% simple %}"
+    assert Engine(libraries=modules).from_string(source).render() == "beforeafter"
