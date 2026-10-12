@@ -9,6 +9,7 @@ import hashlib
 import importlib.metadata
 import json
 import platform
+import random
 import statistics
 import sys
 import tempfile
@@ -86,6 +87,8 @@ def main():
         }
     )
     results = {}
+    paired_ratios = {}
+    random_order = random.Random(0)
     with tempfile.TemporaryDirectory(prefix="rusty-output-") as directory:
         for name, source in sources.items():
             Path(directory, name).write_text(source)
@@ -110,25 +113,38 @@ def main():
                         .render(Context(values))
                     )
                     for path in ("loaded", "from_string"):
-                        for arm, engine in engines.items():
-                            template = (
-                                engine.get_template(case + ".html")
-                                if path == "loaded"
-                                else engine.from_string(source)
-                            )
+                        templates = {
+                            arm: engine.get_template(case + ".html")
+                            if path == "loaded"
+                            else engine.from_string(source)
+                            for arm, engine in engines.items()
+                        }
+                        for arm, template in templates.items():
                             assert template.render(Context(values)) == expected, (
                                 case,
                                 path,
                                 arm,
                             )
-                            samples = timeit.repeat(
-                                lambda: template.render(Context(values)),
-                                number=args.number,
-                                repeat=args.repeat,
-                            )
-                            results[
-                                f"debug={debug}/cached={cached}/{case}/{path}/{arm}"
-                            ] = statistics.median(samples) / args.number * 1e6
+                        samples = {arm: [] for arm in engines}
+                        paired = []
+                        for _ in range(args.repeat):
+                            order = list(engines)
+                            random_order.shuffle(order)
+                            for arm in order:
+                                template = templates[arm]
+                                samples[arm].append(
+                                    timeit.timeit(
+                                        lambda: template.render(Context(values)),
+                                        number=args.number,
+                                    )
+                                    / args.number
+                                    * 1e6
+                                )
+                            paired.append(samples["rusty"][-1] / samples["django"][-1])
+                        key = f"debug={debug}/cached={cached}/{case}/{path}"
+                        for arm, times in samples.items():
+                            results[f"{key}/{arm}"] = statistics.median(times)
+                        paired_ratios[key] = statistics.median(paired)
     report = {
         "python": platform.python_version(),
         "platform": platform.platform(),
@@ -152,25 +168,31 @@ def main():
         "number": args.number,
         "repeat": args.repeat,
         "microseconds": results,
+        "measurement": "paired-shuffled-v1",
+        "paired_ratios": paired_ratios,
     }
     if args.json_output:
         args.json_output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
     if args.baseline:
         base = json.loads(args.baseline.read_text())
-        for field in ("python", "django", "fixture_sha256", "number", "repeat"):
+        for field in (
+            "python",
+            "django",
+            "fixture_sha256",
+            "number",
+            "repeat",
+            "measurement",
+        ):
             if base.get(field) != report[field]:
                 raise SystemExit(f"Incompatible baseline: {field}")
         if base["microseconds"].keys() != results.keys():
             raise SystemExit("Incompatible baseline: cases")
         failures = []
-        for key, value in results.items():
-            if not key.endswith("/rusty"):
-                continue
-            control = key.removesuffix("/rusty") + "/django"
-            ratio = (value / base["microseconds"][key]) / (
-                results[control] / base["microseconds"][control]
-            )
+        if base["paired_ratios"].keys() != paired_ratios.keys():
+            raise SystemExit("Incompatible baseline: paired cases")
+        for key, value in paired_ratios.items():
+            ratio = value / base["paired_ratios"][key]
             if ratio > 1 + args.max_regression:
                 failures.append(f"{key}: {ratio:.2f}x relative to Django")
         if failures:
