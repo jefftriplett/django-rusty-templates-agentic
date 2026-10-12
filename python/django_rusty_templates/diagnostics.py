@@ -101,3 +101,19 @@ def format_now(format_string, escape):
     tzinfo = timezone.get_current_timezone() if settings.USE_TZ else None
     formatted = date(datetime.now(tz=tzinfo), format_string)
     return conditional_escape(formatted) if escape else formatted
+
+
+def warn_double_dot(source, offset, origin):
+    """Match Django 6.1's variable-tag deprecation without invoking its parser."""
+    import warnings
+    from django.utils.deprecation import RemovedInDjango2028Warning
+
+    line = source[:offset].count("\n") + 1
+    warnings.warn(
+        "Support for double-dot lookups '..' which maps to a "
+        "lookup of the empty string is deprecated.\n"
+        f"  Template: {origin or '<unknown source>'}\n"
+        f"  Line: {line}",
+        RemovedInDjango2028Warning,
+        stacklevel=2,
+    )

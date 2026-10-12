@@ -61,7 +61,7 @@ use dtl_lexer::tag::{TagLexerError, TagParts, lex_tag};
 use dtl_lexer::types::{At, TemplateString};
 use dtl_lexer::variable::{
     Argument as ArgumentToken, FilterLexer, VariableLexerError, VariableToken,
-    lex_variable_or_filter,
+    lex_variable_or_filter_with_syntax,
 };
 use dtl_lexer::{START_TAG_LEN, TemplateContent};
 
@@ -503,7 +503,9 @@ fn parse_if_condition(
     parts: TagParts,
     at: At,
 ) -> Result<IfCondition, ParseError> {
-    let mut lexer = IfConditionLexer::new(parser.template, parts).peekable();
+    let mut lexer = IfConditionLexer::new(parser.template, parts)
+        .with_modern_syntax(parser.engine.django_series >= (6, 0))
+        .peekable();
     if lexer.peek().is_none() {
         return Err(ParseError::MissingBooleanExpression { at: at.into() });
     }
@@ -640,7 +642,8 @@ fn parse_for_loop(
     parts: TagParts,
     at: At,
 ) -> Result<(ForIterable, ForNames, bool), ParseError> {
-    let mut lexer = ForLexer::new(parser.template, parts);
+    let mut lexer = ForLexer::new(parser.template, parts)
+        .with_modern_syntax(parser.engine.django_series >= (6, 0));
     let mut variable_names = Vec::new();
     while let Some(token) = lexer.lex_variable_name() {
         variable_names.push(token?);
@@ -1420,6 +1423,8 @@ pub struct Parser<'t, 'py> {
     block_names: HashSet<String>,
     has_extends: bool,
     pub last_tag: Option<At>,
+    pub warning_origin: Option<String>,
+    pub emit_warnings: bool,
     pub python_nodes: HashMap<usize, (usize, PythonNode)>,
     skip_until: usize,
 }
@@ -1445,6 +1450,8 @@ impl<'t, 'py> Parser<'t, 'py> {
             block_names: HashSet::new(),
             has_extends: false,
             last_tag: None,
+            warning_origin: origin.map(str::to_string),
+            emit_warnings: true,
             python_nodes: HashMap::new(),
             skip_until: 0,
         }
@@ -1470,6 +1477,8 @@ impl<'t, 'py> Parser<'t, 'py> {
             block_names: HashSet::new(),
             has_extends: false,
             last_tag: None,
+            warning_origin: None,
+            emit_warnings: true,
             python_nodes: HashMap::new(),
             skip_until: 0,
         }
@@ -1520,13 +1529,11 @@ impl<'t, 'py> Parser<'t, 'py> {
             let node = match token.token_type {
                 TokenType::Text => TokenTree::Text(Text::new(token.at)),
                 TokenType::Comment => continue,
-                TokenType::Variable => self
-                    .parse_filter_expression(
-                        token.content(self.template),
-                        token.at,
-                        token.trimmed_at().0,
-                    )?
-                    .into(),
+                TokenType::Variable => self.parse_variable_output(
+                    token.content(self.template),
+                    token.at,
+                    token.trimmed_at().0,
+                )?,
                 TokenType::Tag => match self.parse_tag(token.content(self.template), token.at)? {
                     Either::Left(token_tree) => token_tree,
                     Either::Right(end_tag) => {
@@ -1563,13 +1570,11 @@ impl<'t, 'py> Parser<'t, 'py> {
             let node = match token.token_type {
                 TokenType::Text => TokenTree::Text(Text::new(token.at)),
                 TokenType::Comment => continue,
-                TokenType::Variable => self
-                    .parse_filter_expression(
-                        token.content(self.template),
-                        token.at,
-                        token.trimmed_at().0,
-                    )?
-                    .into(),
+                TokenType::Variable => self.parse_variable_output(
+                    token.content(self.template),
+                    token.at,
+                    token.trimmed_at().0,
+                )?,
                 TokenType::Tag => match self.parse_tag(token.content(self.template), token.at)? {
                     Either::Left(token_tree) => token_tree,
                     Either::Right(end_tag) => {
@@ -1604,6 +1609,33 @@ impl<'t, 'py> Parser<'t, 'py> {
             at: start_at.into(),
         }
         .into())
+    }
+
+    fn parse_variable_output(
+        &self,
+        source: &str,
+        at: At,
+        start: usize,
+    ) -> Result<TokenTree, PyParseError> {
+        let expression = self.parse_filter_expression(source, at, start)?;
+        if self.emit_warnings && self.engine.django_series >= (6, 1) {
+            let mut root = &expression;
+            while let TagElement::Filter(filter) = root {
+                root = &filter.left;
+            }
+            if matches!(root, TagElement::Variable(_) | TagElement::ForVariable(_))
+                && source
+                    .split('|')
+                    .next()
+                    .is_some_and(|root| root.contains(".."))
+            {
+                self.py
+                    .import("django_rusty_templates.diagnostics")?
+                    .getattr("warn_double_dot")?
+                    .call1((self.template.0, at.0, self.warning_origin.as_deref()))?;
+            }
+        }
+        Ok(expression.into())
     }
 
     fn parse_variable_reference(&self, at: At) -> Either<Variable, ForVariable> {
@@ -1671,7 +1703,8 @@ impl<'t, 'py> Parser<'t, 'py> {
             (
                 TagElement::TranslatedText(Text::new(translated_text_content_at(at))),
                 at,
-                FilterLexer::new(rest, byte)?,
+                FilterLexer::new(rest, byte)?
+                    .with_modern_syntax(self.engine.django_series >= (6, 0)),
             )
         } else if let Some(quote @ ('"' | '\'')) = trimmed.chars().next() {
             let mut chars = trimmed.chars();
@@ -1680,10 +1713,16 @@ impl<'t, 'py> Parser<'t, 'py> {
             (
                 TagElement::Text(Text::new(text_content_at(at))),
                 at,
-                FilterLexer::new(rest, byte)?,
+                FilterLexer::new(rest, byte)?
+                    .with_modern_syntax(self.engine.django_series >= (6, 0)),
             )
         } else {
-            let Some((token, at, filters)) = lex_variable_or_filter(trimmed, start)? else {
+            let Some((token, at, filters)) = lex_variable_or_filter_with_syntax(
+                trimmed,
+                start,
+                self.engine.django_series >= (6, 0),
+            )?
+            else {
                 return Err(ParseError::EmptyVariable { at: at.into() });
             };
             let value = match token {
@@ -1918,6 +1957,7 @@ impl<'t, 'py> Parser<'t, 'py> {
 
     fn parse_regroup(&self, parts: TagParts) -> Result<TokenTree, PyParseError> {
         let tokens = TagElementKwargLexer::new(self.template, parts)
+            .with_modern_syntax(self.engine.django_series >= (6, 0))
             .collect::<Result<Vec<_>, _>>()
             .map_err(ParseError::from)?;
         let error = crate::template::django_rusty_templates::TemplateSyntaxError::new_err;
@@ -1968,6 +2008,7 @@ impl<'t, 'py> Parser<'t, 'py> {
 
     fn parse_ifchanged(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
         let values = TagElementKwargLexer::new(self.template, parts)
+            .with_modern_syntax(self.engine.django_series >= (6, 0))
             .map(|token| token.map_err(ParseError::from)?.parse(self))
             .collect::<Result<Vec<_>, _>>()?;
         let end = EndTagType::Custom("endifchanged".to_string());
@@ -1994,6 +2035,7 @@ impl<'t, 'py> Parser<'t, 'py> {
 
     fn parse_with(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
         let tokens = TagElementKwargLexer::new(self.template, parts)
+            .with_modern_syntax(self.engine.django_series >= (6, 0))
             .collect::<Result<Vec<_>, _>>()
             .map_err(ParseError::from)?;
         let mut assignments = Vec::new();
@@ -2044,9 +2086,13 @@ impl<'t, 'py> Parser<'t, 'py> {
     fn parse_filter_block(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
         // The synthetic numeric input aligns every real filter span with the source.
         let expression = format!("0|{}", self.template.content(parts.at));
-        let (_, _, lexer) = lex_variable_or_filter(&expression, parts.at.0 - 2)
-            .map_err(ParseError::from)?
-            .expect("the synthetic input is nonempty");
+        let (_, _, lexer) = lex_variable_or_filter_with_syntax(
+            &expression,
+            parts.at.0 - 2,
+            self.engine.django_series >= (6, 0),
+        )
+        .map_err(ParseError::from)?
+        .expect("the synthetic input is nonempty");
         let mut filters = Vec::new();
         for token in lexer {
             let token = token.map_err(ParseError::from)?;
@@ -2085,6 +2131,7 @@ impl<'t, 'py> Parser<'t, 'py> {
 
     fn parse_widthratio(&self, parts: TagParts) -> Result<TokenTree, PyParseError> {
         let mut tokens = TagElementKwargLexer::new(self.template, parts)
+            .with_modern_syntax(self.engine.django_series >= (6, 0))
             .collect::<Result<Vec<_>, _>>()
             .map_err(ParseError::from)?;
         let asvar =
@@ -2110,6 +2157,7 @@ impl<'t, 'py> Parser<'t, 'py> {
 
     fn parse_firstof(&mut self, parts: TagParts) -> Result<TokenTree, PyParseError> {
         let mut tokens = TagElementKwargLexer::new(self.template, parts.clone())
+            .with_modern_syntax(self.engine.django_series >= (6, 0))
             .collect::<Result<Vec<_>, _>>()
             .map_err(ParseError::from)?;
 
@@ -2138,7 +2186,9 @@ impl<'t, 'py> Parser<'t, 'py> {
 
     fn parse_cycle(&mut self, parts: TagParts) -> Result<Cycle, ParseError> {
         let at = parts.at;
-        let tokens = TagElementLexer::new(self.template, parts).collect::<Result<Vec<_>, _>>()?;
+        let tokens = TagElementLexer::new(self.template, parts)
+            .with_modern_syntax(self.engine.django_series >= (6, 0))
+            .collect::<Result<Vec<_>, _>>()?;
 
         let tokens = match tokens.as_slice() {
             [] => return Err(ParseError::MissingCycleArguments { at: at.into() }),
@@ -2498,8 +2548,9 @@ impl<'t, 'py> Parser<'t, 'py> {
         let mut prev_at = parts.at;
         let mut seen_kwargs: HashMap<&str, At> = HashMap::new();
         let params_count = context.params.len();
-        let mut tokens =
-            TagElementKwargLexer::new(self.template, parts).collect::<Result<Vec<_>, _>>()?;
+        let mut tokens = TagElementKwargLexer::new(self.template, parts)
+            .with_modern_syntax(self.engine.django_series >= (6, 0))
+            .collect::<Result<Vec<_>, _>>()?;
         let asvar = extract_as_variable(&mut tokens, &self.template)?;
         for (index, token) in tokens.iter().enumerate() {
             match token.kwarg {
@@ -2898,7 +2949,8 @@ impl<'t, 'py> Parser<'t, 'py> {
     }
 
     fn parse_url(&self, at: At, parts: TagParts) -> Result<TokenTree, ParseError> {
-        let mut lexer = TagElementKwargLexer::new(self.template, parts);
+        let mut lexer = TagElementKwargLexer::new(self.template, parts)
+            .with_modern_syntax(self.engine.django_series >= (6, 0));
         let Some(view_token) = lexer.next() else {
             return Err(ParseError::UrlTagNoArguments { at: at.into() });
         };
@@ -2936,7 +2988,8 @@ impl<'t, 'py> Parser<'t, 'py> {
     }
 
     fn parse_include(&self, at: At, parts: TagParts) -> Result<TokenTree, ParseError> {
-        let mut lexer = IncludeLexer::new(self.template, parts);
+        let mut lexer = IncludeLexer::new(self.template, parts)
+            .with_modern_syntax(self.engine.django_series >= (6, 0));
         let Some(template_token) = lexer.lex_template()? else {
             return Err(ParseError::MissingArgument { at: at.into() });
         };

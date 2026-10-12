@@ -26,7 +26,6 @@ pub mod django_rusty_templates {
     use crate::render::types::{Context, PyContext};
     use crate::render::{Render, RenderResult};
     use crate::utils::PyResultMethods;
-    use dtl_lexer::core::{Lexer, TokenType};
     use dtl_lexer::types::TemplateString;
 
     import_exception!(django.core.exceptions, ImproperlyConfigured);
@@ -682,6 +681,7 @@ pub mod django_rusty_templates {
         builtins: Vec<String>,
         pub template_builtins: Vec<Py<PyAny>>,
         pub autoescape: bool,
+        pub django_series: (u8, u8),
         loaded_context_processors: Vec<Py<PyAny>>,
         pub libraries: HashMap<String, Py<PyAny>>,
     }
@@ -739,6 +739,7 @@ pub mod django_rusty_templates {
                 builtins: Vec::new(),
                 template_builtins: Vec::new(),
                 autoescape: false,
+                django_series: (5, 2),
                 loaded_context_processors: Vec::new(),
                 libraries: HashMap::new(),
             }
@@ -978,7 +979,13 @@ pub mod django_rusty_templates {
                         .map(Bound::unbind)
                 })
                 .collect::<PyResult<Vec<_>>>()?;
+            let version = py.import("django")?.getattr("VERSION")?;
+            let django_series = (
+                version.get_item(0)?.extract()?,
+                version.get_item(1)?.extract()?,
+            );
             let engine = Engine {
+                django_series,
                 dirs: Mutex::new(dirs),
                 app_dirs,
                 context_processors: processors,
@@ -1135,17 +1142,13 @@ pub mod django_rusty_templates {
             for key in ["reason", "tag", "span", "line"] {
                 report.set_item(key, py.None())?;
             }
-            if let Some(reason) = python_variable_syntax_reason(py, source)? {
-                report.set_item("mode", "hybrid")?;
-                report.set_item("reason", reason)?;
-                return Ok(report);
-            }
             let mut parser = Parser::new(
                 py,
                 TemplateString(source),
                 self.engine.clone(),
                 template_name.as_deref(),
             );
+            parser.emit_warnings = false;
             match parser.parse() {
                 Ok(_) => {}
                 Err(crate::parse::PyParseError::PyErr(error))
@@ -1244,13 +1247,14 @@ pub mod django_rusty_templates {
             filename: Option<PathBuf>,
             template_name: Option<String>,
         ) -> PyResult<Option<String>> {
-            let parsed = Parser::new(
+            let mut parser = Parser::new(
                 py,
                 TemplateString(source),
                 self.engine.clone(),
                 template_name.as_deref(),
-            )
-            .parse();
+            );
+            parser.emit_warnings = false;
+            let parsed = parser.parse();
             match parsed {
                 Ok(_) => Ok(None),
                 Err(crate::parse::PyParseError::PyErr(error))
@@ -1539,9 +1543,6 @@ pub mod django_rusty_templates {
             "Fully custom tag",
             "partialdef",
             "partial",
-            "Django 6.1 variable lookup",
-            "Django 6.0 signed exponent",
-            "Django 6.2 now expressions",
         ]
         .iter()
         .any(|tag| error.value(py).to_string() == format!("not yet implemented: {tag}"))
@@ -1598,83 +1599,6 @@ pub mod django_rusty_templates {
         }
     }
 
-    fn python_variable_syntax_reason(
-        py: Python<'_>,
-        source: &str,
-    ) -> PyResult<Option<&'static str>> {
-        if !source.contains("..")
-            && !source.contains("e+")
-            && !source.contains("E+")
-            && !source.contains("e-")
-            && !source.contains("E-")
-        {
-            return Ok(None);
-        }
-        let version = py.import("django")?.getattr("VERSION")?;
-        let series = (
-            version.get_item(0)?.extract::<u8>()?,
-            version.get_item(1)?.extract::<u8>()?,
-        );
-        if series < (6, 0) {
-            return Ok(None);
-        }
-        let template = TemplateString(source);
-        let mut comment = false;
-        for token in Lexer::new(template) {
-            if !matches!(token.token_type, TokenType::Variable | TokenType::Tag) {
-                continue;
-            }
-            let content = token.content(template);
-            if matches!(token.token_type, TokenType::Tag) {
-                let name = content.split_whitespace().next();
-                if name == Some("endcomment") {
-                    comment = false;
-                    continue;
-                }
-                if comment {
-                    continue;
-                }
-                if name == Some("comment") {
-                    comment = true;
-                    continue;
-                }
-            } else if comment {
-                continue;
-            }
-            let mut quote = None;
-            let mut escaped = false;
-            let bytes = content.as_bytes();
-            for (index, &byte) in bytes.iter().enumerate() {
-                if let Some(end) = quote {
-                    if escaped {
-                        escaped = false;
-                    } else if byte == b'\\' {
-                        escaped = true;
-                    } else if byte == end {
-                        quote = None;
-                    }
-                    continue;
-                }
-                if matches!(byte, b'\'' | b'"') {
-                    quote = Some(byte);
-                    continue;
-                }
-                if series >= (6, 1) && byte == b'.' && bytes.get(index + 1) == Some(&b'.') {
-                    return Ok(Some("Django 6.1 variable lookup"));
-                }
-                if matches!(byte, b'e' | b'E')
-                    && index > 0
-                    && bytes[index - 1].is_ascii_digit()
-                    && matches!(bytes.get(index + 1), Some(b'+' | b'-'))
-                    && bytes.get(index + 2).is_some_and(u8::is_ascii_digit)
-                {
-                    return Ok(Some("Django 6.0 signed exponent"));
-                }
-            }
-        }
-        Ok(None)
-    }
-
     impl Template {
         pub fn new(
             py: Python<'_>,
@@ -1689,14 +1613,9 @@ pub mod django_rusty_templates {
                 engine.clone(),
                 Some(template_name),
             );
+            parser.warning_origin = Some(filename.to_string_lossy().into_owned());
             let mut python_renderer = None;
-            let parsed = if let Some(reason) = python_variable_syntax_reason(py, template)? {
-                Err(crate::parse::PyParseError::PyErr(
-                    PyNotImplementedError::new_err(format!("not yet implemented: {reason}")),
-                ))
-            } else {
-                parser.parse()
-            };
+            let parsed = parser.parse();
             let nodes = match parsed {
                 Ok(nodes) => nodes,
                 Err(crate::parse::PyParseError::PyErr(error))
@@ -1752,13 +1671,7 @@ pub mod django_rusty_templates {
         ) -> PyResult<Self> {
             let mut parser = Parser::new(py, TemplateString(&template), engine.clone(), None);
             let mut python_renderer = None;
-            let parsed = if let Some(reason) = python_variable_syntax_reason(py, &template)? {
-                Err(crate::parse::PyParseError::PyErr(
-                    PyNotImplementedError::new_err(format!("not yet implemented: {reason}")),
-                ))
-            } else {
-                parser.parse()
-            };
+            let parsed = parser.parse();
             let nodes = match parsed {
                 Ok(nodes) => nodes,
                 Err(crate::parse::PyParseError::PyErr(error))

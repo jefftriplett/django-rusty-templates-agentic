@@ -4,8 +4,9 @@ use thiserror::Error;
 use unicode_xid::UnicodeXID;
 
 use crate::common::{
-    LexerError, NextChar, check_variable_attrs, lex_numeric, lex_text, lex_translated,
-    lex_variable_argument, trim_variable,
+    LexerError, NextChar, check_variable_attrs, check_variable_attrs_modern, lex_numeric,
+    lex_numeric_modern, lex_text, lex_translated, lex_variable_argument, trim_variable,
+    trim_variable_modern,
 };
 use crate::types::{At, TemplateString};
 use crate::{END_TRANSLATE_LEN, QUOTE_LEN, START_TRANSLATE_LEN, TemplateContent};
@@ -92,13 +93,25 @@ pub fn lex_variable_or_filter(
     variable: &str,
     start: usize,
 ) -> Result<Option<(VariableToken, At, FilterLexer<'_>)>, VariableLexerError> {
+    lex_variable_or_filter_with_syntax(variable, start, false)
+}
+
+pub fn lex_variable_or_filter_with_syntax(
+    variable: &str,
+    start: usize,
+    modern: bool,
+) -> Result<Option<(VariableToken, At, FilterLexer<'_>)>, VariableLexerError> {
     let rest = variable.trim_start();
     if rest.trim().is_empty() {
         return Ok(None);
     }
 
     let start = start + variable.len() - rest.len();
-    let content = trim_variable(rest);
+    let content = if modern {
+        trim_variable_modern(rest)
+    } else {
+        trim_variable(rest)
+    };
 
     if content.is_empty() {
         let at = (start, rest.trim().len());
@@ -112,23 +125,29 @@ pub fn lex_variable_or_filter(
     if let Ok(num) = content.parse::<BigInt>() {
         token_type = VariableToken::Int(num);
     } else if let Ok(num) = content.parse::<f64>()
-        && num.is_finite()
+        && (num.is_finite() || (modern && content.bytes().any(|byte| byte.is_ascii_digit())))
+        && (!modern || !content.ends_with('.'))
     {
         token_type = VariableToken::Float(num);
     } else {
-        check_variable_attrs(content, start)?;
+        if modern {
+            check_variable_attrs_modern(content, start)?;
+        } else {
+            check_variable_attrs(content, start)?;
+        }
         token_type = VariableToken::Variable;
     }
 
     Ok(Some((
         token_type,
         at,
-        FilterLexer::new(&rest[end..], start + end)?,
+        FilterLexer::new(&rest[end..], start + end)?.with_modern_syntax(modern),
     )))
 }
 
 #[derive(Debug)]
 pub struct FilterLexer<'t> {
+    modern: bool,
     rest: &'t str,
     byte: usize,
 }
@@ -143,6 +162,7 @@ impl<'t> FilterLexer<'t> {
         }
         let Some(offset) = pipe else {
             return Ok(Self {
+                modern: false,
                 rest: "",
                 byte: start + variable.len(),
             });
@@ -156,10 +176,16 @@ impl<'t> FilterLexer<'t> {
             })
         } else {
             Ok(Self {
+                modern: false,
                 rest: rest.trim_end(),
                 byte: start + offset + variable.len() - rest.len(),
             })
         }
+    }
+
+    pub fn with_modern_syntax(mut self, modern: bool) -> Self {
+        self.modern = modern;
+        self
     }
 
     fn lex_text(
@@ -198,14 +224,29 @@ impl<'t> FilterLexer<'t> {
     }
 
     fn lex_numeric(&mut self) -> Argument {
-        let (at, byte, rest) = lex_numeric(self.byte, self.rest);
+        let (at, byte, rest) = if self.modern {
+            lex_numeric_modern(self.byte, self.rest)
+        } else {
+            lex_numeric(self.byte, self.rest)
+        };
         self.rest = rest;
         self.byte = byte;
         Argument::Numeric(at)
     }
 
     fn lex_variable_argument(&mut self) -> Result<Argument, VariableLexerError> {
-        match lex_variable_argument(self.byte, self.rest) {
+        let token = if self.modern {
+            let content = trim_variable_modern(self.rest);
+            check_variable_attrs_modern(content, self.byte)?;
+            Ok((
+                (self.byte, content.len()),
+                self.byte + content.len(),
+                &self.rest[content.len()..],
+            ))
+        } else {
+            lex_variable_argument(self.byte, self.rest)
+        };
+        match token {
             Ok((at, byte, rest)) => {
                 self.byte = byte;
                 self.rest = rest;
@@ -288,6 +329,7 @@ impl<'t> FilterLexer<'t> {
             }
             '\'' => self.lex_text(&mut chars, '\'')?,
             '"' => self.lex_text(&mut chars, '"')?,
+            '+' if self.modern => self.lex_numeric(),
             '0'..='9' | '-' => self.lex_numeric(),
             _ => self.lex_variable_argument()?,
         }))
