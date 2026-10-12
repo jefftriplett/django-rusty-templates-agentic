@@ -20,6 +20,7 @@ use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyType};
 use super::inheritance::{BlockEntry, BlockMarker};
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::parse::CycleId;
+use crate::render::RenderResult;
 use crate::template::django_rusty_templates::{Engine, Template, get_template, select_template};
 use crate::utils::PyResultMethods;
 use dtl_lexer::types::{At, TemplateString};
@@ -763,6 +764,23 @@ impl Context {
         } else {
             self.insert(key, value)
         }
+    }
+
+    pub fn render_partial(&mut self, py: Python<'_>, body: &Template) -> RenderResult<'static> {
+        if let Some(context) = &self.formatting_context {
+            let output = py
+                .import("django_rusty_templates.inheritance")?
+                .getattr("render_partial_body")?
+                .call1((Py::new(py, body.clone())?, context.bind(py)))?
+                .extract()?;
+            return Ok(Cow::Owned(output));
+        }
+        let previous = std::mem::replace(&mut self.changed_states, vec![HashMap::new()]);
+        let output = body
+            .render(py, self)
+            .map(|output| Cow::Owned(output.into_owned()));
+        self.changed_states = previous;
+        output
     }
 
     pub fn merge_render_state(

@@ -806,6 +806,13 @@ impl PartialEq for SimpleBlockTag {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct PartialDefinition {
+    pub name: String,
+    pub nodes: Arc<Vec<TokenTree>>,
+    pub span: At,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Now {
     pub format: String,
     pub expression: Option<TagElement>,
@@ -854,6 +861,14 @@ pub struct CycleId(pub(crate) usize);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tag {
+    PartialDef {
+        definition: PartialDefinition,
+        inline: bool,
+    },
+    Partial {
+        name: String,
+        at: At,
+    },
     PythonNode(PythonNode),
     Block {
         name: String,
@@ -983,6 +998,7 @@ impl TokenTree {
     pub fn child_nodes(&self) -> Vec<&[Self]> {
         match self {
             Self::Tag(Tag::Block { nodes, .. }) => vec![nodes],
+            Self::Tag(Tag::PartialDef { definition, .. }) => vec![&definition.nodes],
             Self::Tag(
                 Tag::Extends { nodes, .. }
                 | Tag::Autoescape { nodes, .. }
@@ -1421,6 +1437,7 @@ pub struct Parser<'t, 'py> {
     named_cycles: HashMap<String, Cycle>,
     last_cycle: Option<CycleId>,
     block_names: HashSet<String>,
+    partial_names: HashSet<String>,
     has_extends: bool,
     pub last_tag: Option<At>,
     pub warning_origin: Option<String>,
@@ -1448,6 +1465,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             named_cycles: HashMap::new(),
             last_cycle: None,
             block_names: HashSet::new(),
+            partial_names: HashSet::new(),
             has_extends: false,
             last_tag: None,
             warning_origin: origin.map(str::to_string),
@@ -1475,6 +1493,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             named_cycles: HashMap::new(),
             last_cycle: None,
             block_names: HashSet::new(),
+            partial_names: HashSet::new(),
             has_extends: false,
             last_tag: None,
             warning_origin: None,
@@ -1845,6 +1864,38 @@ impl<'t, 'py> Parser<'t, 'py> {
         .into())
     }
 
+    fn argument_spans(&self, parts: TagParts) -> Vec<At> {
+        let content = self.template.content(parts.at);
+        let mut tokens = Vec::new();
+        let mut start = None;
+        let mut quote = None;
+        let mut escaped = false;
+        for (offset, character) in content.char_indices() {
+            if let Some(end) = quote {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == end {
+                    quote = None;
+                }
+            } else if matches!(character, '\'' | '"') {
+                start.get_or_insert(offset);
+                quote = Some(character);
+            } else if character.is_whitespace() {
+                if let Some(begin) = start.take() {
+                    tokens.push((parts.at.0 + begin, offset - begin));
+                }
+            } else {
+                start.get_or_insert(offset);
+            }
+        }
+        if let Some(begin) = start {
+            tokens.push((parts.at.0 + begin, content.len() - begin));
+        }
+        tokens
+    }
+
     fn parse_now(&mut self, parts: TagParts) -> Result<Now, PyParseError> {
         let version = self.py.import("django")?.getattr("VERSION")?;
         let series = (
@@ -1852,34 +1903,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             version.get_item(1)?.extract::<u8>()?,
         );
         if series >= (6, 2) {
-            let content = self.template.content(parts.at);
-            let mut tokens = Vec::new();
-            let mut start = None;
-            let mut quote = None;
-            let mut escaped = false;
-            for (offset, character) in content.char_indices() {
-                if let Some(end) = quote {
-                    if escaped {
-                        escaped = false;
-                    } else if character == '\\' {
-                        escaped = true;
-                    } else if character == end {
-                        quote = None;
-                    }
-                } else if matches!(character, '\'' | '"') {
-                    start.get_or_insert(offset);
-                    quote = Some(character);
-                } else if character.is_whitespace() {
-                    if let Some(begin) = start.take() {
-                        tokens.push((parts.at.0 + begin, offset - begin));
-                    }
-                } else {
-                    start.get_or_insert(offset);
-                }
-            }
-            if let Some(begin) = start {
-                tokens.push((parts.at.0 + begin, content.len() - begin));
-            }
+            let mut tokens = self.argument_spans(parts.clone());
             let asvar = if tokens.len() == 3 && self.template.content(tokens[1]) == "as" {
                 let target = tokens.pop();
                 tokens.pop();
@@ -2394,6 +2418,29 @@ impl<'t, 'py> Parser<'t, 'py> {
             "comment" => Either::Left(TokenTree::Tag(Tag::Comment(
                 self.parse_comment(at, tag.parts)?,
             ))),
+            "partialdef" if self.engine.django_series >= (6, 0) => {
+                Either::Left(self.parse_partialdef(at, tag.parts)?)
+            }
+            "partial" if self.engine.django_series >= (6, 0) => {
+                let tokens = self.argument_spans(tag.parts);
+                let [name] = tokens.as_slice() else {
+                    return Err(
+                        crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
+                            "'partial' tag requires a single argument",
+                        )
+                        .into(),
+                    );
+                };
+                Either::Left(TokenTree::Tag(Tag::Partial {
+                    name: self.template.content(*name).to_string(),
+                    at,
+                }))
+            }
+            "endpartialdef" if self.engine.django_series >= (6, 0) => Either::Right(EndTag {
+                end: EndTagType::Custom("endpartialdef".to_string()),
+                at,
+                parts: Some(tag.parts),
+            }),
             "now" => Either::Left(TokenTree::Tag(Tag::Now(self.parse_now(tag.parts)?))),
             "templatetag" => Either::Left(TokenTree::Tag(Tag::TemplateTag(
                 lex_templatetag(self.template, tag.parts).map_err(ParseError::from)?,
@@ -2443,6 +2490,42 @@ impl<'t, 'py> Parser<'t, 'py> {
                 }
             }
         })
+    }
+
+    fn parse_partialdef(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
+        use crate::template::django_rusty_templates::TemplateSyntaxError;
+        let tokens = self.argument_spans(parts);
+        let (name, inline) = match tokens.as_slice() {
+            [] => return Err(TemplateSyntaxError::new_err("'partialdef' tag requires a name").into()),
+            [name] => (self.template.content(*name).to_string(), false),
+            [name, inline] if self.template.content(*inline) == "inline" => (self.template.content(*name).to_string(), true),
+            [_, _] => return Err(TemplateSyntaxError::new_err("The 'inline' argument does not have any parameters; either use 'inline' or remove it completely.").into()),
+            _ => return Err(TemplateSyntaxError::new_err("'partialdef' tag takes at most 2 arguments").into()),
+        };
+        let (nodes, end) = self.parse_until(
+            vec![EndTagType::Custom("endpartialdef".to_string())],
+            Cow::Borrowed("partialdef"),
+            at,
+        )?;
+        let close = self.template.content((end.at.0 + 2, end.at.1 - 4)).trim();
+        if close != "endpartialdef" && close != format!("endpartialdef {name}") {
+            return Err(TemplateSyntaxError::new_err("Invalid endpartialdef name").into());
+        }
+        if !self.partial_names.insert(name.clone()) {
+            return Err(TemplateSyntaxError::new_err(format!(
+                "Partial '{name}' is already defined in the '{}' template.",
+                self.warning_origin.as_deref().unwrap_or("<unknown source>")
+            ))
+            .into());
+        }
+        Ok(TokenTree::Tag(Tag::PartialDef {
+            definition: PartialDefinition {
+                name,
+                nodes: Arc::new(nodes),
+                span: (at.0, end.at.0 + end.at.1 - at.0),
+            },
+            inline,
+        }))
     }
 
     fn parse_block(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
