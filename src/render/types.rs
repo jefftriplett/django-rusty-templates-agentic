@@ -1070,27 +1070,18 @@ fn render_value_in_context<'t>(value: ContentString<'t>, context: &Context) -> C
 /// Skip the escape writer for plain text: its per-byte bookkeeping is more
 /// expensive than scanning once and appending the unchanged slice in bulk.
 fn append_escaped(text: &str, output: &mut String) {
+    // The library's append writer regresses large values on some platforms.
+    // Its Cow encoder still borrows unchanged text, and borrowing the Python
+    // input avoids the source copy even when an escaped fragment is required.
+    if text.len() >= 1024 {
+        output.push_str(&encode_quoted_attribute(text));
+        return;
+    }
     match text
         .bytes()
-        .position(|byte| matches!(byte, b'&' | b'<' | b'>' | b'\"' | b'\''))
+        .position(|byte| matches!(byte, b'&' | b'<' | b'>' | b'"' | b'\''))
     {
         Some(first) => {
-            // Reserve the final encoded length, rather than growing against
-            // the shorter input length as each escape is appended. Besides
-            // avoiding inner-loop reallocations, this keeps large buffers from
-            // growing to a larger capacity than an owned escaped fragment.
-            if text.len() >= 1024 {
-                let extra: usize = text.as_bytes()[first..]
-                    .iter()
-                    .map(|byte| match byte {
-                        b'&' => 4,
-                        b'<' | b'>' => 3,
-                        b'"' | b'\'' => 5,
-                        _ => 0,
-                    })
-                    .sum();
-                output.reserve(text.len() + extra);
-            }
             output.push_str(&text[..first]);
             encode_quoted_attribute_to_string(&text[first..], output);
         }
