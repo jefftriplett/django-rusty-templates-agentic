@@ -148,3 +148,21 @@ def test_stock_cache_inspection_preserves_django_nodes():
     nodes = template.nodelist.get_nodes_by_type(CacheNode)
     assert len(nodes) == 1
     assert nodes[0].fragment_name == "component"
+
+
+@pytest.mark.parametrize("options", ["", "noop", 'context "different"'])
+def test_translated_literal_is_not_translated_twice(monkeypatch, options):
+    from django.utils import translation
+
+    def gettext(message):
+        return {"original": "translated", "translated": "translated twice"}.get(
+            message, message
+        )
+
+    monkeypatch.setattr(translation._trans, "gettext", gettext)
+    source = '{% load i18n %}{% translate _("original") ' + options + " %}"
+    outputs = [
+        kind(libraries=LIBRARIES).from_string(source).render(Context())
+        for kind in [DjangoEngine, Engine]
+    ]
+    assert outputs == ["translated", "translated"]

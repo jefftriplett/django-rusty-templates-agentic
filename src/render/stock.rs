@@ -117,7 +117,13 @@ impl Render for StockNode {
                     .as_ref()
                     .map(|expression| value(expression, py, template, context))
                     .transpose()?;
-                let resolved = root.resolve(
+                // Django compiles _("literal") into a translation promise.
+                // TranslateNode's noop/context options do not retranslate it.
+                let literal = match root {
+                    TagElement::TranslatedText(text) => Some(TagElement::Text(*text)),
+                    _ => None,
+                };
+                let resolved = literal.as_ref().unwrap_or(root).resolve(
                     py,
                     template,
                     context,
@@ -127,8 +133,12 @@ impl Render for StockNode {
                 let initial = match resolved {
                     Some(content) => service.getattr("translate")?.call1((
                         content.to_py(py),
-                        noop,
-                        message_context,
+                        if literal.is_some() { false } else { *noop },
+                        if literal.is_some() {
+                            None
+                        } else {
+                            message_context
+                        },
                     ))?,
                     None => {
                         let name = match root {
