@@ -30,6 +30,15 @@ static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static MARK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
+// Django's value formatter reads only these flags. Rendering a number must
+// not materialize the template variables, loop dictionaries or block callbacks.
+#[pyclass(frozen, get_all)]
+struct ValueFormattingContext {
+    autoescape: bool,
+    use_l10n: Option<bool>,
+    use_tz: Option<bool>,
+}
+
 #[derive(Clone)]
 pub struct ForLoop {
     count: usize,
@@ -296,6 +305,21 @@ impl Context {
             context.setattr("request", request)?;
         }
         Ok(context)
+    }
+
+    fn value_formatting_context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(context) = &self.formatting_context {
+            return Ok(context.bind(py).clone());
+        }
+        Ok(Bound::new(
+            py,
+            ValueFormattingContext {
+                autoescape: self.autoescape,
+                use_l10n: self.use_l10n,
+                use_tz: self.use_tz,
+            },
+        )?
+        .into_any())
     }
 
     pub fn get(&self, key: &str) -> Option<&Py<PyAny>> {
@@ -1027,7 +1051,7 @@ impl<'t, 'py> Content<'t, 'py> {
                 let py = content.py();
                 let rendered = RENDER_VALUE
                     .import(py, "django.template.base", "render_value_in_context")?
-                    .call1((content, context.django_context(py)?))?;
+                    .call1((content, context.value_formatting_context(py)?))?;
                 return Ok(Cow::Owned(rendered.extract()?));
             }
             Self::Py(content) => resolve_python(content, context)?,

@@ -1085,6 +1085,62 @@ pub mod django_rusty_templates {
             select_template(self.engine.clone(), py, template_name_list)
         }
 
+        /// Inspect native compilation without compiling a Python fallback tree.
+        /// Custom tag libraries can execute registration code during inspection.
+        fn explain_template<'py>(
+            &self,
+            py: Python<'py>,
+            source: &str,
+        ) -> PyResult<Bound<'py, PyDict>> {
+            let report = PyDict::new(py);
+            report.set_item("mode", "native")?;
+            for key in ["reason", "tag", "span", "line"] {
+                report.set_item(key, py.None())?;
+            }
+            if needs_python_variable_syntax(py, source)? {
+                report.set_item("mode", "hybrid")?;
+                report.set_item("reason", "version-specific Django variable syntax")?;
+                return Ok(report);
+            }
+            let mut parser = Parser::new(py, TemplateString(source), self.engine.clone(), None);
+            match parser.parse() {
+                Ok(_) => {}
+                Err(crate::parse::PyParseError::PyErr(error))
+                    if error.is_instance_of::<PyNotImplementedError>(py) =>
+                {
+                    report.set_item(
+                        "mode",
+                        if can_compile_python_fallback(py, &error) {
+                            "hybrid"
+                        } else {
+                            "unsupported"
+                        },
+                    )?;
+                    report.set_item("reason", error.value(py).to_string())?;
+                    if let Some(at) = parser.last_tag {
+                        let token = TemplateString(source).content(at);
+                        report.set_item("tag", token)?;
+                        report.set_item("span", (at.0, at.1))?;
+                        report.set_item(
+                            "line",
+                            source[..at.0].bytes().filter(|b| *b == b'\n').count() + 1,
+                        )?;
+                    }
+                }
+                Err(error) => {
+                    return Err(canonical_parse_error(
+                        py,
+                        error,
+                        self.engine.clone(),
+                        source,
+                        None,
+                        None,
+                    ));
+                }
+            }
+            Ok(report)
+        }
+
         fn _syntax_diagnostic(
             &self,
             py: Python<'_>,
@@ -1388,6 +1444,20 @@ pub mod django_rusty_templates {
         python_renderer: Option<Arc<Py<PyAny>>>,
     }
 
+    fn can_compile_python_fallback(py: Python<'_>, error: &PyErr) -> bool {
+        [
+            "block",
+            "extends",
+            "Fully custom tag",
+            "partialdef",
+            "partial",
+            "Django 6.1 variable lookup",
+            "Django 6.2 now expressions",
+        ]
+        .iter()
+        .any(|tag| error.value(py).to_string() == format!("not yet implemented: {tag}"))
+    }
+
     fn canonical_parse_error(
         py: Python<'_>,
         error: crate::parse::PyParseError,
@@ -1481,19 +1551,7 @@ pub mod django_rusty_templates {
                 Ok(nodes) => nodes,
                 Err(crate::parse::PyParseError::PyErr(error))
                     if error.is_instance_of::<PyNotImplementedError>(py)
-                        && [
-                            "block",
-                            "extends",
-                            "Fully custom tag",
-                            "partialdef",
-                            "partial",
-                            "Django 6.1 variable lookup",
-                            "Django 6.2 now expressions",
-                        ]
-                        .iter()
-                        .any(|tag| {
-                            error.value(py).to_string() == format!("not yet implemented: {tag}")
-                        }) =>
+                        && can_compile_python_fallback(py, &error) =>
                 {
                     python_renderer = Some(Arc::new(
                         py.import("django_rusty_templates.interop")?
@@ -1557,19 +1615,7 @@ pub mod django_rusty_templates {
                 Ok(nodes) => nodes,
                 Err(crate::parse::PyParseError::PyErr(error))
                     if error.is_instance_of::<PyNotImplementedError>(py)
-                        && [
-                            "block",
-                            "extends",
-                            "Fully custom tag",
-                            "partialdef",
-                            "partial",
-                            "Django 6.1 variable lookup",
-                            "Django 6.2 now expressions",
-                        ]
-                        .iter()
-                        .any(|tag| {
-                            error.value(py).to_string() == format!("not yet implemented: {tag}")
-                        }) =>
+                        && can_compile_python_fallback(py, &error) =>
                 {
                     python_renderer = Some(Arc::new(
                         py.import("django_rusty_templates.interop")?

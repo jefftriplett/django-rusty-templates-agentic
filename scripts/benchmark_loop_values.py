@@ -1,0 +1,119 @@
+"""Compare loop rendering across engines and template loading paths.
+
+Run after `uv run maturin develop --release`. Optional --baseline compares
+Rusty cases to a previous JSON report and fails above --max-regression.
+Results are synthetic microseconds per iteration, not HTTP request timings.
+"""
+
+import argparse
+import json
+import platform
+import statistics
+import timeit
+from pathlib import Path
+
+import django
+from django.conf import settings
+from django.template import Context, Engine as DjangoEngine
+
+from django_rusty_templates import Engine
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--number", type=int, default=200)
+    parser.add_argument("--repeat", type=int, default=7)
+    parser.add_argument("--iterations", type=int, default=100)
+    parser.add_argument("--json-output", type=Path)
+    parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--max-regression", type=float, default=0.20)
+    args = parser.parse_args()
+    if min(args.number, args.repeat, args.iterations) <= 0:
+        parser.error("number, repeat and iterations must be positive")
+    if not settings.configured:
+        settings.configure(USE_I18N=False, SECRET_KEY="benchmark")
+    results = {}
+    values = {"values": list(range(args.iterations))}
+    for debug in [False, True]:
+        for shape, body in [
+            ("text", "x"),
+            ("one", "{{ i }}"),
+            ("two", "{{ i }}{{ i }}"),
+        ]:
+            source = "{% for i in values %}" + body + "{% endfor %}"
+            expected = "".join(
+                "x" if shape == "text" else str(i) * (1 if shape == "one" else 2)
+                for i in values["values"]
+            )
+            loader = ("django.template.loaders.locmem.Loader", {"loop.html": source})
+            for name, kind in [("rusty", Engine), ("django", DjangoEngine)]:
+                for cached in [True, False]:
+                    loaders = (
+                        [("django.template.loaders.cached.Loader", [loader])]
+                        if cached
+                        else [loader]
+                    )
+                    engine = kind(loaders=loaders, debug=debug)
+                    for path in ["loaded", "string", "load_and_render"]:
+                        template = (
+                            engine.from_string(source)
+                            if path == "string"
+                            else engine.get_template("loop.html")
+                        )
+
+                        def render():
+                            current = (
+                                engine.get_template("loop.html")
+                                if path == "load_and_render"
+                                else template
+                            )
+                            return current.render(Context(values))
+
+                        for _ in range(3):
+                            assert render() == expected
+                        samples = timeit.repeat(
+                            render, number=args.number, repeat=args.repeat
+                        )
+                        key = f"debug={debug}/cached={cached}/{shape}/{name}/{path}"
+                        results[key] = (
+                            statistics.median(samples)
+                            / args.number
+                            / args.iterations
+                            * 1e6
+                        )
+    report = {
+        "python": platform.python_version(),
+        "django": django.get_version(),
+        "platform": platform.platform(),
+        "number": args.number,
+        "repeat": args.repeat,
+        "iterations": args.iterations,
+        "microseconds_per_iteration": results,
+    }
+    if args.json_output:
+        args.json_output.write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report, indent=2))
+    if args.baseline:
+        baseline = json.loads(args.baseline.read_text())
+        for field in ["python", "django", "number", "repeat", "iterations"]:
+            if baseline[field] != report[field]:
+                raise SystemExit(f"Incompatible baseline: {field}")
+        failures = []
+        for key, value in results.items():
+            if "/rusty/" not in key:
+                continue
+            reference = baseline["microseconds_per_iteration"][key]
+            # The unchanged Django arm calibrates CPU drift between builds.
+            django_key = key.replace("/rusty/", "/django/")
+            control_ratio = (
+                results[django_key] / baseline["microseconds_per_iteration"][django_key]
+            )
+            ratio = (value / reference) / control_ratio
+            if ratio > 1 + args.max_regression:
+                failures.append(f"{key}: {ratio:.2f}x baseline relative to Django")
+        if failures:
+            raise SystemExit("Performance regression:\n" + "\n".join(failures))
+
+
+if __name__ == "__main__":
+    main()
