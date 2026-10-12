@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Avoid reparsing flat templates during inspection and add first-render performance checks. ([#125](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/125), [#127](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/127))
+Parse stock Django tag libraries in Rust, avoid reparsing flat templates during inspection, and add first-render performance checks. ([#125](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/125), [#126](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/126), [#127](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/127))
 
 ## 2026.10.7
 
