@@ -1097,18 +1097,27 @@ fn render_value_in_context<'t>(value: ContentString<'t>, context: &Context) -> C
 }
 
 // Keep the large encoder outside the node renderer so adding render scopes
-// cannot inline its allocation-heavy loop into each caller.
+// cannot inline its encoding loop into each caller.
 #[inline(never)]
 fn append_large_escaped(text: &str, output: &mut String) {
-    output.push_str(&encode_quoted_attribute(text));
+    let extra: usize = text
+        .bytes()
+        .map(|byte| match byte {
+            b'&' => 4,
+            b'<' | b'>' => 3,
+            b'"' | b'\'' => 5,
+            _ => 0,
+        })
+        .sum();
+    output.reserve(text.len() + extra);
+    encode_quoted_attribute_to_string(text, output);
 }
 
 /// Skip the escape writer for plain text: its per-byte bookkeeping is more
 /// expensive than scanning once and appending the unchanged slice in bulk.
 fn append_escaped(text: &str, output: &mut String) {
-    // The library's append writer regresses large values on some platforms.
-    // Its Cow encoder still borrows unchanged text, and borrowing the Python
-    // input avoids the source copy even when an escaped fragment is required.
+    // Scan plain text in bulk; reserve the complete encoded size before
+    // using the append writer so dense escaping cannot repeatedly grow it.
     if text.len() >= 1024 {
         let bytes = text.as_bytes();
         if memchr::memchr3(b'&', b'<', b'>', bytes).is_none()

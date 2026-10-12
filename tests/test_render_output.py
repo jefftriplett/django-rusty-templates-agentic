@@ -244,3 +244,12 @@ def test_large_escape_scan_matches_django(engine_options, length, suffix, charac
     assert render(Engine, source, values, engine_options) == render(
         DjangoEngine, source, values, engine_options
     )
+
+
+def test_dense_large_escaping_appends_after_existing_output(engine_options):
+    value = "<>&\"'é🚀" * 1024
+    source = "prefix:{{ value }}|{{ value }}:tail"
+    values = {"value": value}
+    assert render(Engine, source, values, engine_options) == render(
+        DjangoEngine, source, values, engine_options
+    )
