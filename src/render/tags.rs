@@ -726,6 +726,18 @@ impl Render for Tag {
         context: &mut Context,
     ) -> RenderResult<'t> {
         Ok(match self {
+            Self::Stock { node, at } => {
+                node.render(py, template, context).inspect_err(|error| {
+                    if let PyRenderError::PyErr(error) = error
+                        && !error
+                            .value(py)
+                            .hasattr("_rusty_token_span")
+                            .unwrap_or(false)
+                    {
+                        let _ = error.value(py).setattr("_rusty_token_span", at);
+                    }
+                })?
+            }
             Self::PartialDef { definition, inline } => {
                 if *inline {
                     let owner = context
