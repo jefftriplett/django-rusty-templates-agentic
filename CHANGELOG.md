@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Parse stock Django tag libraries in Rust, avoid reparsing flat templates during inspection, and add first-render performance checks. ([#125](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/125), [#126](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/126), [#127](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/127))
+Parse stock tags and templates around opted-in custom tags faster, reduce inspection reparsing, and strengthen performance checks. ([#125](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/125), [#126](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/126), [#127](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/127), [#128](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/128))
 
 ## 2026.10.7
 
