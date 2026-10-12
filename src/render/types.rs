@@ -7,7 +7,7 @@ use std::collections::hash_map::Entry;
 use std::iter::zip;
 use std::sync::{Arc, Mutex};
 
-use html_escape::encode_quoted_attribute;
+use html_escape::{encode_quoted_attribute, encode_quoted_attribute_to_string};
 use miette::SourceSpan;
 use num_bigint::{BigInt, ToBigInt};
 use num_traits::{ToPrimitive, Zero};
@@ -1067,7 +1067,117 @@ fn render_value_in_context<'t>(value: ContentString<'t>, context: &Context) -> C
     }
 }
 
+/// Skip the escape writer for plain text: its per-byte bookkeeping is more
+/// expensive than scanning once and appending the unchanged slice in bulk.
+fn append_escaped(text: &str, output: &mut String) {
+    // The library's append writer regresses large values on some platforms.
+    // Its Cow encoder still borrows unchanged text, and borrowing the Python
+    // input avoids the source copy even when an escaped fragment is required.
+    if text.len() >= 1024 {
+        output.push_str(&encode_quoted_attribute(text));
+        return;
+    }
+    match text
+        .bytes()
+        .position(|byte| matches!(byte, b'&' | b'<' | b'>' | b'"' | b'\''))
+    {
+        Some(first) => {
+            output.push_str(&text[..first]);
+            encode_quoted_attribute_to_string(&text[first..], output);
+        }
+        None => output.push_str(text),
+    }
+}
+
+/// Borrow Python text only while its owning handle is alive. PyO3's to_cow
+/// preserves the same Unicode conversion and errors as String extraction.
+pub(crate) fn append_python_string(
+    value: &Bound<'_, PyAny>,
+    escape: bool,
+    output: &mut String,
+) -> PyResult<()> {
+    let value = value.cast::<PyString>()?.to_cow()?;
+    if escape {
+        append_escaped(&value, output);
+    } else {
+        output.push_str(&value);
+    }
+    Ok(())
+}
+
 impl<'t, 'py> Content<'t, 'py> {
+    pub fn render_into(self, context: &Context, output: &mut String) -> PyResult<()> {
+        match self {
+            Self::Py(content) => {
+                let py = content.py();
+                if content.is_exact_instance_of::<PyString>() {
+                    let autoescape =
+                        if context.format_values && context.formatting_context.is_some() {
+                            context
+                                .django_context(py)?
+                                .getattr("autoescape")?
+                                .extract()?
+                        } else {
+                            context.autoescape
+                        };
+                    return append_python_string(&content, autoescape, output);
+                }
+                if context.format_values
+                    && (context.formatting_context.is_some()
+                        || !content.is_instance_of::<PyString>())
+                {
+                    let rendered = if content.is_instance_of::<PyString>() {
+                        let autoescape: bool = context
+                            .django_context(py)?
+                            .getattr("autoescape")?
+                            .extract()?;
+                        if autoescape {
+                            CONDITIONAL_ESCAPE
+                                .import(py, "django.utils.html", "conditional_escape")?
+                                .call1((content,))?
+                        } else {
+                            content.str()?.into_any()
+                        }
+                    } else {
+                        RENDER_VALUE
+                            .import(py, "django.template.base", "render_value_in_context")?
+                            .call1((content, context.value_formatting_context(py)?))?
+                    };
+                    return append_python_string(&rendered, false, output);
+                }
+                if !context.autoescape {
+                    return append_python_string(&content.str()?.into_any(), false, output);
+                }
+                let value = if content.is_instance_of::<PyString>() {
+                    content
+                } else {
+                    content.str()?.into_any()
+                };
+                match value
+                    .getattr(intern!(py, "__html__"))
+                    .ok_or_isinstance_of::<PyAttributeError>(py)?
+                {
+                    Ok(html) => append_python_string(&html.call0()?, false, output),
+                    Err(_) => append_python_string(&value.str()?.into_any(), true, output),
+                }
+            }
+            Self::String(content) => {
+                match content {
+                    ContentString::HtmlUnsafe(text) if context.autoescape => {
+                        append_escaped(&text, output);
+                    }
+                    content => output.push_str(&content.into_raw()),
+                }
+                Ok(())
+            }
+            // Numeric formatting retains Django's localization/timezone path.
+            value => {
+                output.push_str(&value.render(context)?);
+                Ok(())
+            }
+        }
+    }
+
     pub fn render(self, context: &Context) -> PyResult<Cow<'t, str>> {
         let output = match self {
             Self::Py(content)

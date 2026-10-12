@@ -84,6 +84,17 @@ impl Context {
     }
 
     pub fn render_block(&mut self, py: Python<'_>, own: BlockEntry) -> RenderResult<'static> {
+        let mut output = String::new();
+        self.render_block_into(py, own, &mut output)?;
+        Ok(std::borrow::Cow::Owned(output))
+    }
+
+    pub fn render_block_into(
+        &mut self,
+        py: Python<'_>,
+        own: BlockEntry,
+        output: &mut String,
+    ) -> crate::render::RenderIntoResult {
         let inherited = self.inheritance_blocks.contains_key(&own.name);
         let popped = self
             .inheritance_blocks
@@ -98,8 +109,7 @@ impl Context {
         scoped.insert("block".to_string(), Bound::new(py, marker)?.into_any())?;
         let result = selected
             .owner
-            .render_body(py, &selected.nodes, &mut scoped)
-            .map(|output| std::borrow::Cow::Owned(output.into_owned()));
+            .render_body_into(py, &selected.nodes, &mut scoped, output);
         if let Some(popped) = popped {
             self.inheritance_blocks
                 .entry(own.name)

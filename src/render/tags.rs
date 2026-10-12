@@ -719,7 +719,136 @@ fn render_widthratio(
     }
 }
 
+fn render_python_node<'py>(
+    py: Python<'py>,
+    node: &crate::parse::PythonNode,
+    context: &mut Context,
+) -> PyResult<Bound<'py, PyAny>> {
+    let live = context.formatting_context.as_ref().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("Interop regions require a live Django Context")
+    })?;
+    let output = node
+        .0
+        .bind(py)
+        .call_method1("render_annotated", (live.bind(py),))
+        .inspect_err(|error| {
+            // Native and Django Origin objects differ, so Django's
+            // annotation hook may leave metadata to the owner.
+            let culprit = error
+                .value(py)
+                .getattr("_culprit_node")
+                .unwrap_or_else(|_| node.0.bind(py).clone());
+            if let Ok(token) = culprit.getattr("token") {
+                let _ = error.value(py).setattr("token", token);
+            }
+        })?;
+    context.refresh_formatting_flags(py)?;
+    Ok(output)
+}
+
 impl Render for Tag {
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> super::RenderIntoResult {
+        match self {
+            Self::PythonNode(node) => {
+                let value = render_python_node(py, node, context)?;
+                super::types::append_python_string(&value, false, output)?;
+                Ok(())
+            }
+            Self::SimpleTag(tag) => tag.render_into(py, template, context, output),
+            Self::SimpleBlockTag(tag) => tag.render_into(py, template, context, output),
+            Self::For(tag) => tag.render_into(py, template, context, output),
+            Self::If {
+                condition,
+                truthy,
+                falsey,
+            } => {
+                if condition.evaluate(py, template, context).unwrap_or(false) {
+                    truthy.render_into(py, template, context, output)
+                } else {
+                    falsey.render_into(py, template, context, output)
+                }
+            }
+            Self::Autoescape { enabled, nodes } => {
+                let previous = context.autoescape;
+                context.autoescape = enabled.into();
+                if let Some(live) = &context.formatting_context {
+                    live.bind(py).setattr("autoescape", context.autoescape)?;
+                }
+                let result = nodes.render_into(py, template, context, output);
+                context.autoescape = previous;
+                if let Some(live) = &context.formatting_context {
+                    live.bind(py).setattr("autoescape", previous)?;
+                }
+                result
+            }
+            Self::With { assignments, nodes } => {
+                let values = assignments
+                    .iter()
+                    .map(|(name, value)| {
+                        value
+                            .resolve(py, template, context, ResolveFailures::Raise)
+                            .map(|value| (name, value.unwrap_or_else(|| "".as_content()).to_py(py)))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut scoped = context.clone_ref(py);
+                let scope = if let Some(live) = &scoped.formatting_context {
+                    Some(live.bind(py).call_method0("push")?)
+                } else {
+                    None
+                };
+                let local_names = values
+                    .iter()
+                    .map(|(name, _)| (*name).clone())
+                    .collect::<Vec<_>>();
+                for (name, value) in values {
+                    scoped.insert(name.clone(), value)?;
+                }
+                let rendered = nodes.render_into(py, template, &mut scoped, output);
+                if let Some(scope) = scope {
+                    scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                }
+                context.merge_render_state(py, scoped, &local_names)?;
+                rendered
+            }
+            Self::Block { name, nodes } => {
+                if let Some(blocks) = &context.python_blocks {
+                    let value = blocks
+                        .bind(py)
+                        .get_item(name)?
+                        .call_method1("render", (context.django_context(py)?,))?;
+                    super::types::append_python_string(&value, false, output)?;
+                    Ok(())
+                } else {
+                    let owner = context
+                        .current_template
+                        .as_ref()
+                        .expect("inside a template")
+                        .clone();
+                    context.render_block_into(
+                        py,
+                        super::inheritance::BlockEntry {
+                            name: name.clone(),
+                            owner,
+                            nodes: nodes.clone(),
+                        },
+                        output,
+                    )
+                }
+            }
+            Self::Verbatim(nodes) => nodes.render_into(py, template, context, output),
+            _ => {
+                output.push_str(&self.render(py, template, context)?);
+                Ok(())
+            }
+        }
+    }
+
     fn render<'t>(
         &self,
         py: Python<'_>,
@@ -905,34 +1034,10 @@ impl Render for Tag {
                 context.reset_cycle(py, *id)?;
                 Cow::Borrowed("")
             }
-            Self::With { assignments, nodes } => {
-                let values = assignments
-                    .iter()
-                    .map(|(name, value)| {
-                        value
-                            .resolve(py, template, context, ResolveFailures::Raise)
-                            .map(|value| (name, value.unwrap_or_else(|| "".as_content()).to_py(py)))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let mut scoped = context.clone_ref(py);
-                let scope = if let Some(live) = &scoped.formatting_context {
-                    Some(live.bind(py).call_method0("push")?)
-                } else {
-                    None
-                };
-                let local_names = values
-                    .iter()
-                    .map(|(name, _)| (*name).clone())
-                    .collect::<Vec<_>>();
-                for (name, value) in values {
-                    scoped.insert(name.clone(), value)?;
-                }
-                let rendered = nodes.render(py, template, &mut scoped);
-                if let Some(scope) = scope {
-                    scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
-                }
-                context.merge_render_state(py, scoped, &local_names)?;
-                rendered?
+            Self::With { .. } => {
+                let mut output = String::new();
+                self.render_into(py, template, context, &mut output)?;
+                Cow::Owned(output)
             }
             Self::FilterBlock { filters, nodes } => {
                 let output = nodes.render(py, template, context)?;
@@ -1017,28 +1122,7 @@ impl Render for Tag {
             Self::Include(include_tag) => include_tag.render(py, template, context)?,
             Self::Load => Cow::Borrowed(""),
             Self::PythonNode(node) => {
-                let live = context.formatting_context.as_ref().ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(
-                        "Interop regions require a live Django Context",
-                    )
-                })?;
-                let output = node
-                    .0
-                    .bind(py)
-                    .call_method1("render_annotated", (live.bind(py),))
-                    .inspect_err(|error| {
-                        // Native and Django Origin objects differ, so Django's
-                        // annotation hook may leave metadata to the owner.
-                        let culprit = error
-                            .value(py)
-                            .getattr("_culprit_node")
-                            .unwrap_or_else(|_| node.0.bind(py).clone());
-                        if let Ok(token) = culprit.getattr("token") {
-                            let _ = error.value(py).setattr("token", token);
-                        }
-                    })?;
-                context.refresh_formatting_flags(py)?;
-                Cow::Owned(output.extract::<String>()?)
+                Cow::Owned(render_python_node(py, node, context)?.extract::<String>()?)
             }
             Self::QueryString(tag) => {
                 let mut args = build_args(py, template, context, &tag.args)?;
@@ -1074,13 +1158,14 @@ impl Render for Tag {
 }
 
 impl For {
-    fn render_python<'t>(
+    fn render_python_into(
         &self,
         iterable: &Bound<'_, PyAny>,
         py: Python<'_>,
-        template: TemplateString<'t>,
+        template: TemplateString<'_>,
         context: &mut Context,
-    ) -> RenderResult<'t> {
+        rendered: &mut String,
+    ) -> super::RenderIntoResult {
         let mut list: Vec<_> = match iterable.try_iter() {
             Ok(iterator) => iterator.collect(),
             Err(error) => {
@@ -1089,13 +1174,12 @@ impl For {
             }
         };
         if list.is_empty() {
-            return self.empty.render(py, template, context);
+            return self.empty.render_into(py, template, context, rendered);
         }
         if self.reversed {
             list.reverse();
         }
         context.push_for_loop(list.len());
-        let mut rendered = String::new();
         for (index, values) in list.into_iter().enumerate() {
             let values = match values {
                 Ok(values) => values,
@@ -1114,23 +1198,24 @@ impl For {
                 template,
             )?;
             context.sync_loop_context(py, index == 0)?;
-            rendered.push_str(&self.body.render(py, template, context)?);
+            self.body.render_into(py, template, context, rendered)?;
             context.increment_for_loop();
         }
         context.pop_variables();
         context.pop_for_loop();
-        Ok(Cow::Owned(rendered))
+        Ok(())
     }
 
-    fn render_string<'t>(
+    fn render_string_into(
         &self,
         string: &str,
         py: Python<'_>,
-        template: TemplateString<'t>,
+        template: TemplateString<'_>,
         context: &mut Context,
-    ) -> RenderResult<'t> {
+        rendered: &mut String,
+    ) -> super::RenderIntoResult {
         if string.is_empty() {
-            return self.empty.render(py, template, context);
+            return self.empty.render_into(py, template, context, rendered);
         }
         if self.variables.names.len() > 1 {
             return Err(RenderError::TupleUnpackError {
@@ -1141,7 +1226,6 @@ impl For {
             }
             .into());
         }
-        let mut rendered = String::new();
         let mut chars: Vec<_> = string.chars().collect();
         if self.reversed {
             chars.reverse();
@@ -1153,12 +1237,12 @@ impl For {
             let c = PyString::new(py, &c.to_string());
             context.push_variable(variable.clone(), c.into_any(), index);
             context.sync_loop_context(py, index == 0)?;
-            rendered.push_str(&self.body.render(py, template, context)?);
+            self.body.render_into(py, template, context, rendered)?;
             context.increment_for_loop();
         }
         context.pop_variables();
         context.pop_for_loop();
-        Ok(Cow::Owned(rendered))
+        Ok(())
     }
 }
 
@@ -1169,14 +1253,24 @@ impl Render for For {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> RenderResult<'t> {
+        let mut output = String::new();
+        self.render_into(py, template, context, &mut output)?;
+        Ok(Cow::Owned(output))
+    }
+
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> super::RenderIntoResult {
         let scope = if let Some(django_context) = &context.formatting_context {
-            let django_context = django_context.bind(py);
-            let scope = django_context.call_method0("push")?;
-            Some(scope)
+            Some(django_context.bind(py).call_method0("push")?)
         } else {
             None
         };
-        let result = self.render_loop(py, template, context);
+        let result = self.render_loop_into(py, template, context, output);
         if let Some(scope) = scope {
             scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
         }
@@ -1185,12 +1279,13 @@ impl Render for For {
 }
 
 impl For {
-    fn render_loop<'t>(
+    fn render_loop_into(
         &self,
         py: Python<'_>,
-        template: TemplateString<'t>,
+        template: TemplateString<'_>,
         context: &mut Context,
-    ) -> RenderResult<'t> {
+        output: &mut String,
+    ) -> super::RenderIntoResult {
         let Some(iterable) = self.iterable.iterable.resolve(
             py,
             template,
@@ -1198,13 +1293,17 @@ impl For {
             ResolveFailures::IgnoreVariableDoesNotExist,
         )?
         else {
-            return self.empty.render(py, template, context);
+            return self.empty.render_into(py, template, context, output);
         };
         match iterable {
-            Content::Py(iterable) => self.render_python(&iterable, py, template, context),
-            Content::String(s) => self.render_string(s.as_raw(), py, template, context),
+            Content::Py(iterable) => {
+                self.render_python_into(&iterable, py, template, context, output)
+            }
+            Content::String(s) => {
+                self.render_string_into(s.as_raw(), py, template, context, output)
+            }
             value @ (Content::Float(_) | Content::Int(_) | Content::Bool(_)) => {
-                self.render_python(&value.to_py(py), py, template, context)
+                self.render_python_into(&value.to_py(py), py, template, context, output)
             }
         }
     }
@@ -1564,12 +1663,13 @@ fn build_kwargs<'py>(
     Ok(py_kwargs)
 }
 
-fn store_target_var<'t>(
+fn store_target_var_into(
     _py: Python<'_>,
     context: &mut Context,
     content: Bound<'_, PyAny>,
     target_var: Option<&String>,
-) -> RenderResult<'t> {
+    rendered: &mut String,
+) -> super::RenderIntoResult {
     match target_var {
         None => {
             let output = if context.autoescape {
@@ -1579,11 +1679,12 @@ fn store_target_var<'t>(
             } else {
                 content
             };
-            Ok(Cow::Owned(output.str()?.extract::<String>()?))
+            super::types::append_python_string(&output.str()?.into_any(), false, rendered)?;
+            Ok(())
         }
         Some(target_var) => {
             context.insert(target_var.clone(), content)?;
-            Ok(Cow::Borrowed(""))
+            Ok(())
         }
     }
 }
@@ -1672,6 +1773,18 @@ impl Render for SimpleTag {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> RenderResult<'t> {
+        let mut output = String::new();
+        self.render_into(py, template, context, &mut output)?;
+        Ok(Cow::Owned(output))
+    }
+
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> super::RenderIntoResult {
         let mut args = build_args(py, template, context, &self.args)?;
         let kwargs = build_kwargs(py, template, context, &self.kwargs)?;
         let content = if self.takes_context {
@@ -1688,7 +1801,7 @@ impl Render for SimpleTag {
         } else {
             call_tag(py, &self.func, self.at, template, args, kwargs)?
         };
-        store_target_var(py, context, content, self.target_var.as_ref())
+        store_target_var_into(py, context, content, self.target_var.as_ref(), output)
     }
 }
 
@@ -1699,6 +1812,18 @@ impl Render for SimpleBlockTag {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> RenderResult<'t> {
+        let mut output = String::new();
+        self.render_into(py, template, context, &mut output)?;
+        Ok(Cow::Owned(output))
+    }
+
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> super::RenderIntoResult {
         let mut args = build_args(py, template, context, &self.args)?;
         let kwargs = build_kwargs(py, template, context, &self.kwargs)?;
 
@@ -1723,7 +1848,7 @@ impl Render for SimpleBlockTag {
         } else {
             call_tag(py, &self.func, self.at, template, args, kwargs)?
         };
-        store_target_var(py, context, content, self.target_var.as_ref())
+        store_target_var_into(py, context, content, self.target_var.as_ref(), output)
     }
 }
 
