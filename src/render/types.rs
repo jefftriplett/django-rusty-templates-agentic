@@ -347,7 +347,10 @@ impl Context {
         Ok(context)
     }
 
-    fn value_formatting_context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    pub(crate) fn value_formatting_context<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         if let Some(context) = &self.formatting_context {
             return Ok(context.bind(py).clone());
         }

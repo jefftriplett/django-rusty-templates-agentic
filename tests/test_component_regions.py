@@ -155,9 +155,27 @@ def test_relative_include_and_named_cycles_in_mixed_template(monkeypatch):
     assert engine.get_template("nested/page.html").render(Context(values)) == expected
 
 
-def test_public_nodelist_preserves_custom_node_indexing():
+def test_public_nodelist_preserves_custom_node_indexing(monkeypatch):
+    import sys
+    from types import ModuleType
+    from django.template import Library, Node
+
+    module = ModuleType("rusty_component_inspection_tests")
+    module.register = Library()
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    class Component(Node):
+        fragment_name = "component"
+
+        def render(self, context):
+            return "content"
+
+    @module.register.tag("component")
+    def compile_component(parser, token):
+        return Component()
+
     template = Engine(
-        libraries={"cache": "django.templatetags.cache"}, debug=False
-    ).from_string("{% load cache %}{% cache 1 component %}content{% endcache %}")
+        libraries={"components": module.__name__}, debug=False
+    ).from_string("{% load components %}{% component %}")
     assert template.nodelist[1].fragment_name == "component"
     assert len(template.nodelist.rendering_nodes) == 1

@@ -39,6 +39,15 @@ def sources():
         "custom_late_large": "{% load marker %}{% if enabled %}"
         + "{{ value }}" * 1000
         + "{% marker %}{% endif %}",
+        "cache": "{% load cache %}{% cache 0 parsing-benchmark %}"
+        + variables
+        + "{% endcache %}",
+        "translation": "{% load i18n %}"
+        + '{% translate "Hello" %}' * 10
+        + "{% blocktranslate with item=value %}Hello {{ item }}{% endblocktranslate %}",
+        "formatting_scopes": '{% load l10n tz i18n %}{% language "en" %}{% timezone "UTC" %}{% localtime off %}{% localize off %}'
+        + variables
+        + "{% endlocalize %}{% endlocaltime %}{% endtimezone %}{% endlanguage %}",
         "custom_late": "{% load marker %}" + variables + "{% marker %}" + variables,
     }
     if django.VERSION >= (6, 0):
@@ -84,7 +93,11 @@ def main():
 
     marker.rusty_isolated_compiler = True
 
-    libraries = {"static": "django.templatetags.static", "marker": module.__name__}
+    libraries = {
+        name: "django.templatetags." + name
+        for name in ["static", "cache", "i18n", "l10n", "tz"]
+    }
+    libraries["marker"] = module.__name__
     fixtures = sources()
     values = {
         "value": "<&>",

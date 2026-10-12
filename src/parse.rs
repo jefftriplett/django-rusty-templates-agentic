@@ -1,3 +1,6 @@
+mod stock;
+pub use stock::StockNode;
+
 use dtl_lexer::DelimitedToken;
 use num_traits::Zero;
 use std::borrow::Cow;
@@ -861,6 +864,10 @@ pub struct CycleId(pub(crate) usize);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tag {
+    Stock {
+        node: Box<StockNode>,
+        at: At,
+    },
     PartialDef {
         definition: PartialDefinition,
         inline: bool,
@@ -997,6 +1004,7 @@ impl TokenTree {
     /// Child lists used to discover inheritance blocks without a Python tree.
     pub fn child_nodes(&self) -> Vec<&[Self]> {
         match self {
+            Self::Tag(Tag::Stock { node, .. }) => node.child_nodes(),
             Self::Tag(Tag::Block { nodes, .. }) => vec![nodes],
             Self::Tag(Tag::PartialDef { definition, .. }) => vec![&definition.nodes],
             Self::Tag(
@@ -1412,6 +1420,7 @@ struct SimpleTagContext<'py> {
 
 #[derive(Clone)]
 enum TagContext<'py> {
+    Stock(stock::StockCompiler),
     Unloaded(Bound<'py, PyAny>),
     Simple(SimpleTagContext<'py>),
     Inclusion {
@@ -2454,6 +2463,14 @@ impl<'t, 'py> Parser<'t, 'py> {
                 at,
                 parts: Some(tag.parts),
             }),
+            name
+            @ ("endcache" | "endlocalize" | "endlocaltime" | "endtimezone" | "endlanguage") => {
+                Either::Right(EndTag {
+                    end: EndTagType::Custom(name.to_string()),
+                    at,
+                    parts: None,
+                })
+            }
             "now" => Either::Left(TokenTree::Tag(Tag::Now(self.parse_now(tag.parts)?))),
             "templatetag" => Either::Left(TokenTree::Tag(Tag::TemplateTag(
                 lex_templatetag(self.template, tag.parts).map_err(ParseError::from)?,
@@ -2467,6 +2484,10 @@ impl<'t, 'py> Parser<'t, 'py> {
                     Some(TagContext::Opaque(compiler)) => {
                         let compiler = compiler.clone();
                         Either::Left(self.parse_opaque(at, &compiler)?)
+                    }
+                    Some(TagContext::Stock(kind)) => {
+                        let kind = *kind;
+                        Either::Left(self.parse_stock(at, tag_name, kind, tag.parts)?)
                     }
                     Some(TagContext::Simple(context)) => {
                         Either::Left(self.parse_simple_tag(context, at, tag.parts)?)
@@ -2843,6 +2864,9 @@ impl<'t, 'py> Parser<'t, 'py> {
                     return true;
                 };
                 tags.iter().any(|(name, candidate)| {
+                    if stock::compiler(self.py, candidate).is_ok_and(|kind| kind.is_some()) {
+                        return false;
+                    }
                     let generated = candidate
                         .getattr("__code__")
                         .and_then(|code| code.getattr("co_name"))
@@ -2961,6 +2985,11 @@ impl<'t, 'py> Parser<'t, 'py> {
         name: &str,
         tag: &Bound<'py, PyAny>,
     ) -> Result<(), PyParseError> {
+        if let Some(kind) = stock::compiler(self.py, tag)? {
+            self.external_tags
+                .insert(name.to_string(), TagContext::Stock(kind));
+            return Ok(());
+        }
         let Ok(closure) = tag.getattr("__closure__") else {
             return self.register_opaque(name, tag).map_err(Into::into);
         };
