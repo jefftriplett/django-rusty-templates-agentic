@@ -3,6 +3,7 @@ pub mod common;
 pub mod filters;
 pub mod inheritance;
 pub mod lorem;
+mod stock;
 pub mod tags;
 pub mod types;
 
