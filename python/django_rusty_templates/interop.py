@@ -84,6 +84,7 @@ class NativeParser(Parser):
         self.source = source
         self.load_prefix = ""
         self.parse_depth = 0
+        self.native_leaf_cache = {}
 
     def next_token(self):
         token = super().next_token()
@@ -157,21 +158,14 @@ class NativeParser(Parser):
                     node_start = node.token._native_position[0]
                     node_end = node._native_end
                     span = node.load_prefix + self.source[node_start:node_end]
-                    if (
-                        type(node)
-                        in (
-                            SimpleNode,
-                            InclusionNode,
-                            URLNode,
-                            IncludeNode,
-                            LoadNode,
-                            CommentNode,
-                        )
-                        and self.native_engine.explain_template(
-                            span, self.origin.template_name
-                        )["mode"]
-                        == "native"
-                    ):
+                    if type(node) in (
+                        SimpleNode,
+                        InclusionNode,
+                        URLNode,
+                        IncludeNode,
+                        LoadNode,
+                        CommentNode,
+                    ) and self.native_leaf_supported(span):
                         return
                     for name in node.child_nodelists:
                         children = getattr(node, name, None)
@@ -224,6 +218,18 @@ class NativeParser(Parser):
             region.append(node)
         flush()
         return grouped
+
+    def native_leaf_supported(self, source):
+        # Repeated component snippets share a compilation probe within this
+        # template only. Include the complete load prefix in the cache key.
+        if source not in self.native_leaf_cache:
+            self.native_leaf_cache[source] = (
+                self.native_engine.explain_template(source, self.origin.template_name)[
+                    "mode"
+                ]
+                == "native"
+            )
+        return self.native_leaf_cache[source]
 
     def extend_nodelist(self, nodelist, node, token):
         # A compiler may consume a block or perform lookahead and push a token
