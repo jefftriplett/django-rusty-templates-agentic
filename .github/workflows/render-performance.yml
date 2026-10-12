@@ -20,6 +20,9 @@ on:
         type: choice
         default: all
         options: [all, output]
+      fixed_allocator:
+        type: boolean
+        default: false
       base_ref:
         type: string
         default: origin/main
@@ -52,6 +55,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - name: Install matching dependencies
         run: uv sync --python 3.13
+      - name: Fix allocator threshold for diagnostic runs
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.fixed_allocator }}
+        run: echo 'MALLOC_MMAP_THRESHOLD_=131072' >> "$GITHUB_ENV"
       - name: Build and measure PR base
         run: |
           git worktree add --detach "$RUNNER_TEMP/rusty-base" "$BASE_SHA"

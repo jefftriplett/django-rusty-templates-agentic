@@ -11,6 +11,7 @@ import hashlib
 import importlib.metadata
 import json
 import platform
+import os
 import random
 import sys
 import tempfile
@@ -146,6 +147,7 @@ def main():
                             results[f"{key}/{arm}"] = median
                         paired_ratios[key] = paired
     report = {
+        "allocator_mmap_threshold": os.environ.get("MALLOC_MMAP_THRESHOLD_"),
         "python": platform.python_version(),
         "platform": platform.platform(),
         "django": django.get_version(),
@@ -185,6 +187,7 @@ def main():
             "repeat",
             "measurement",
             "minimum_duration",
+            "allocator_mmap_threshold",
         ):
             if base.get(field) != report[field]:
                 raise SystemExit(f"Incompatible baseline: {field}")
