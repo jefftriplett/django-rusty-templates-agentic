@@ -40,6 +40,12 @@ Note: The `[dev]` dependency group is defined in `pyproject.toml` and includes a
 
 Running `just bootstrap` does it for you.
 
+## Changelog and releases
+
+After merging a PR, update `CHANGELOG.md` under **Unreleased** with a short, human-readable summary and links to the merged PRs. Keep each release summary to one sentence, or two at most.
+
+Before building release wheels or publishing, move the Unreleased changes into a section for the new version and include that update in the release PR. Check that every user-visible change since the previous release is covered, merge the release PR, then tag and publish with `just release`.
+
 ## Running tests
 
 ### Python tests with pytest
