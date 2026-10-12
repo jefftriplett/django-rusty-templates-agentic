@@ -22,7 +22,7 @@ on:
         options: [all, output]
       base_ref:
         type: string
-        default: main
+        default: origin/main
 
 permissions:
   contents: read
