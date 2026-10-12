@@ -1075,6 +1075,22 @@ fn append_escaped(text: &str, output: &mut String) {
         .position(|byte| matches!(byte, b'&' | b'<' | b'>' | b'\"' | b'\''))
     {
         Some(first) => {
+            // Reserve the final encoded length, rather than growing against
+            // the shorter input length as each escape is appended. Besides
+            // avoiding inner-loop reallocations, this keeps large buffers from
+            // growing to a larger capacity than an owned escaped fragment.
+            if text.len() >= 1024 {
+                let extra: usize = text.as_bytes()[first..]
+                    .iter()
+                    .map(|byte| match byte {
+                        b'&' => 4,
+                        b'<' | b'>' => 3,
+                        b'"' | b'\'' => 5,
+                        _ => 0,
+                    })
+                    .sum();
+                output.reserve(text.len() + extra);
+            }
             output.push_str(&text[..first]);
             encode_quoted_attribute_to_string(&text[first..], output);
         }
