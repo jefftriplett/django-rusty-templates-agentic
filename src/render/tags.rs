@@ -760,6 +760,8 @@ impl Render for Tag {
                 super::types::append_python_string(&value, false, output)?;
                 Ok(())
             }
+            Self::SimpleTag(tag) => tag.render_into(py, template, context, output),
+            Self::SimpleBlockTag(tag) => tag.render_into(py, template, context, output),
             Self::For(tag) => tag.render_into(py, template, context, output),
             Self::If {
                 condition,
@@ -1661,12 +1663,13 @@ fn build_kwargs<'py>(
     Ok(py_kwargs)
 }
 
-fn store_target_var<'t>(
+fn store_target_var_into(
     _py: Python<'_>,
     context: &mut Context,
     content: Bound<'_, PyAny>,
     target_var: Option<&String>,
-) -> RenderResult<'t> {
+    rendered: &mut String,
+) -> super::RenderIntoResult {
     match target_var {
         None => {
             let output = if context.autoescape {
@@ -1676,11 +1679,12 @@ fn store_target_var<'t>(
             } else {
                 content
             };
-            Ok(Cow::Owned(output.str()?.extract::<String>()?))
+            super::types::append_python_string(&output.str()?.into_any(), false, rendered)?;
+            Ok(())
         }
         Some(target_var) => {
             context.insert(target_var.clone(), content)?;
-            Ok(Cow::Borrowed(""))
+            Ok(())
         }
     }
 }
@@ -1769,6 +1773,18 @@ impl Render for SimpleTag {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> RenderResult<'t> {
+        let mut output = String::new();
+        self.render_into(py, template, context, &mut output)?;
+        Ok(Cow::Owned(output))
+    }
+
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> super::RenderIntoResult {
         let mut args = build_args(py, template, context, &self.args)?;
         let kwargs = build_kwargs(py, template, context, &self.kwargs)?;
         let content = if self.takes_context {
@@ -1785,7 +1801,7 @@ impl Render for SimpleTag {
         } else {
             call_tag(py, &self.func, self.at, template, args, kwargs)?
         };
-        store_target_var(py, context, content, self.target_var.as_ref())
+        store_target_var_into(py, context, content, self.target_var.as_ref(), output)
     }
 }
 
@@ -1796,6 +1812,18 @@ impl Render for SimpleBlockTag {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> RenderResult<'t> {
+        let mut output = String::new();
+        self.render_into(py, template, context, &mut output)?;
+        Ok(Cow::Owned(output))
+    }
+
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> super::RenderIntoResult {
         let mut args = build_args(py, template, context, &self.args)?;
         let kwargs = build_kwargs(py, template, context, &self.kwargs)?;
 
@@ -1820,7 +1848,7 @@ impl Render for SimpleBlockTag {
         } else {
             call_tag(py, &self.func, self.at, template, args, kwargs)?
         };
-        store_target_var(py, context, content, self.target_var.as_ref())
+        store_target_var_into(py, context, content, self.target_var.as_ref(), output)
     }
 }
 

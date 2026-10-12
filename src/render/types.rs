@@ -1067,6 +1067,21 @@ fn render_value_in_context<'t>(value: ContentString<'t>, context: &Context) -> C
     }
 }
 
+/// Skip the escape writer for plain text: its per-byte bookkeeping is more
+/// expensive than scanning once and appending the unchanged slice in bulk.
+fn append_escaped(text: &str, output: &mut String) {
+    match text
+        .bytes()
+        .position(|byte| matches!(byte, b'&' | b'<' | b'>' | b'\"' | b'\''))
+    {
+        Some(first) => {
+            output.push_str(&text[..first]);
+            encode_quoted_attribute_to_string(&text[first..], output);
+        }
+        None => output.push_str(text),
+    }
+}
+
 /// Borrow Python text only while its owning handle is alive. PyO3's to_cow
 /// preserves the same Unicode conversion and errors as String extraction.
 pub(crate) fn append_python_string(
@@ -1076,7 +1091,7 @@ pub(crate) fn append_python_string(
 ) -> PyResult<()> {
     let value = value.cast::<PyString>()?.to_cow()?;
     if escape {
-        encode_quoted_attribute_to_string(&value, output);
+        append_escaped(&value, output);
     } else {
         output.push_str(&value);
     }
@@ -1142,7 +1157,7 @@ impl<'t, 'py> Content<'t, 'py> {
             Self::String(content) => {
                 match content {
                     ContentString::HtmlUnsafe(text) if context.autoescape => {
-                        encode_quoted_attribute_to_string(&text, output);
+                        append_escaped(&text, output);
                     }
                     content => output.push_str(&content.into_raw()),
                 }

@@ -10,6 +10,7 @@ on:
       - 'scripts/benchmark_loop_values.py'
       - 'scripts/benchmark_mixed_templates.py'
       - 'scripts/benchmark_parsing_features.py'
+      - 'scripts/benchmark_render_output.py'
       - '.github/workflows/render-performance.yml'
   workflow_dispatch:
 
@@ -49,12 +50,14 @@ jobs:
           "$GITHUB_WORKSPACE/.venv/bin/python" "$GITHUB_WORKSPACE/scripts/benchmark_loop_values.py" --number 50 --repeat 7 --iterations 50 --json-output "$RUNNER_TEMP/base.json"
           "$GITHUB_WORKSPACE/.venv/bin/python" "$GITHUB_WORKSPACE/scripts/benchmark_mixed_templates.py" --number 30 --repeat 7 --json-output "$RUNNER_TEMP/mixed-base.json"
           "$GITHUB_WORKSPACE/.venv/bin/python" "$GITHUB_WORKSPACE/scripts/benchmark_parsing_features.py" --number 30 --repeat 7 --json-output "$RUNNER_TEMP/parsing-base.json"
+          "$GITHUB_WORKSPACE/.venv/bin/python" "$GITHUB_WORKSPACE/scripts/benchmark_render_output.py" --number 100 --repeat 7 --json-output "$RUNNER_TEMP/output-base.json"
       - name: Build and measure candidate
         run: |
           uv run maturin develop --release
           uv run python scripts/benchmark_loop_values.py --number 50 --repeat 7 --iterations 50 --json-output "$RUNNER_TEMP/candidate.json" --baseline "$RUNNER_TEMP/base.json" --max-regression 0.15
           uv run python scripts/benchmark_mixed_templates.py --number 30 --repeat 7 --json-output "$RUNNER_TEMP/mixed-candidate.json" --baseline "$RUNNER_TEMP/mixed-base.json" --max-regression 0.15
           uv run python scripts/benchmark_parsing_features.py --number 30 --repeat 7 --json-output "$RUNNER_TEMP/parsing-candidate.json" --baseline "$RUNNER_TEMP/parsing-base.json" --max-regression 0.15
+          uv run python scripts/benchmark_render_output.py --number 100 --repeat 7 --json-output "$RUNNER_TEMP/output-candidate.json" --baseline "$RUNNER_TEMP/output-base.json" --max-regression 0.15
       - name: Preserve measurements
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -67,3 +70,5 @@ jobs:
             ${{ runner.temp }}/mixed-candidate.json
             ${{ runner.temp }}/parsing-base.json
             ${{ runner.temp }}/parsing-candidate.json
+            ${{ runner.temp }}/output-base.json
+            ${{ runner.temp }}/output-candidate.json
