@@ -1,3 +1,4 @@
+import django
 import pytest
 from django.template import Engine as DjangoEngine, TemplateSyntaxError
 
@@ -38,3 +39,43 @@ def test_successful_compile_does_not_validate_twice(monkeypatch):
         Engine().from_string("Hello {{ value }}").render({"value": "world"})
         == "Hello world"
     )
+
+
+def test_attaching_native_diagnostic_does_not_validate_again(monkeypatch):
+    from django_rusty_templates import diagnostics
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("diagnostic attachment validated syntax again")
+
+    monkeypatch.setattr(diagnostics, "validate_syntax", unexpected)
+    diagnostic = Engine()._syntax_diagnostic("{{ value|unknown_filter }}", None, None)
+    assert diagnostic
+
+
+@pytest.mark.skipif(
+    django.VERSION < (6, 0), reason="Signed exponents require Django 6.0"
+)
+def test_compatibility_error_invokes_custom_compiler_once(monkeypatch):
+    import sys
+    from types import ModuleType
+    import django
+    from django.template import Library
+
+    module = ModuleType("rusty_failing_compiler")
+    module.register = Library()
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    calls = []
+    original = TemplateSyntaxError("custom failure")
+
+    @module.register.tag("broken")
+    def broken(parser, token):
+        calls.append(token.contents)
+        raise original
+
+    engine = Engine(libraries={"failing": module.__name__}, debug=True)
+    monkeypatch.setattr(django, "VERSION", (6, 0, 0, "final", 0))
+    with pytest.raises(TemplateSyntaxError) as caught:
+        engine.from_string("{{ 1e-5 }}{% load failing %}{% broken %}")
+    assert caught.value is original
+    assert calls == ["broken"]
+    assert original.template_debug["during"] == "{% broken %}"

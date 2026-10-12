@@ -153,6 +153,19 @@ impl Context {
             }
             return Err(TemplateSyntaxError::new_err(message).into());
         }
+        if let Some(context) = &self.formatting_context {
+            let output = py
+                .import("django_rusty_templates.inheritance")?
+                .getattr("render_native_parent")?
+                .call1((
+                    parent,
+                    current.compiled_blocks(py)?,
+                    current.origin(),
+                    context.bind(py),
+                ))?
+                .extract()?;
+            return Ok(std::borrow::Cow::Owned(output));
+        }
         let parent =
             if parent.extract::<PyRef<'_, Template>>().is_ok() || parent.hasattr("_render")? {
                 parent

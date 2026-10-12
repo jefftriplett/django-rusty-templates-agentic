@@ -109,7 +109,7 @@ class NativeParser(Parser):
             )
         # Inheritance remains visible to Django's block discovery. Other
         # opaque nodes can execute at explicit boundaries inside a Rust region.
-        return type(node) not in (BlockNode, ExtendsNode)
+        return not isinstance(node, (BlockNode, ExtendsNode))
 
     def parse(self, parse_until=None):
         self.parse_depth += 1
@@ -237,14 +237,22 @@ class NativeParser(Parser):
         end = self.tokens[-1]._native_position[0] if self.tokens else len(self.source)
         if token.contents.startswith("load ") and token.token_type.value == 2:
             self.load_prefix += "{% " + token.contents + " %}"
-        if isinstance(node, ExtendsNode):
+        if type(node) is ExtendsNode:
+            from .inheritance import NativeExtendsNode
+
+            node.__class__ = NativeExtendsNode
             node.parent_name = ParentExpression(node.parent_name)
-        if type(node) is VariableNode and not (
-            (VERSION >= (6, 1) and ".." in token.contents)
-            or (
-                VERSION >= (6, 0)
-                and any(
-                    exponent in token.contents for exponent in ("e+", "E+", "e-", "E-")
+        if (
+            not self.native_engine.debug
+            and type(node) is VariableNode
+            and not (
+                (VERSION >= (6, 1) and ".." in token.contents)
+                or (
+                    VERSION >= (6, 0)
+                    and any(
+                        exponent in token.contents
+                        for exponent in ("e+", "E+", "e-", "E-")
+                    )
                 )
             )
         ):
@@ -289,6 +297,11 @@ class InteropTemplate(Template):
         try:
             nodes = parser.parse()
             self.extra_data = parser.extra_data
+            if self.engine.debug:
+                # This compatibility tree already has Django control flow and
+                # debug tokens. Avoid compiling one native fragment per value.
+                nodes.rendering_nodes = nodes
+                return nodes
             self.compile_native_nodes(nodes)
             for partial in self.extra_data.get("partials", {}).values():
                 self.compile_native_nodes(partial.nodelist)
@@ -318,9 +331,9 @@ class InteropTemplate(Template):
         for partial in self.extra_data.get("partials", {}).values():
             if partial.origin is old_origin:
                 partial.origin = origin
-        for node in self.nodelist.rendering_nodes.get_nodes_by_type(
-            Node
-        ) + self.nodelist.get_nodes_by_type(Node):
+        # Region inspection children already contain the original nodes; a
+        # second walk of the public inspection list visits them all again.
+        for node in self.nodelist.rendering_nodes.get_nodes_by_type(Node):
             if node.origin is old_origin:
                 node.origin = origin
 
@@ -401,7 +414,7 @@ class ParentExpression:
         parent = self.expression.resolve(context)
         native = getattr(parent, "template", parent)
         if isinstance(native, NativeTemplate):
-            return native._django_template
+            return native if native._is_native else native._django_template
         return parent
 
 

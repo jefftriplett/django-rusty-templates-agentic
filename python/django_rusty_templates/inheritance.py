@@ -57,3 +57,64 @@ def render_fallback_parent(parent, blocks, context, root, history):
                 break
         with context.render_context.push_state(parent, isolated_context=False):
             return parent._render(context)
+
+
+class NativeExtendsNode(ExtendsNode):
+    """Django block adapter that uses native ancestors without inspection parses."""
+
+    def get_parent(self, context):
+        from django.template.base import Template as DjangoTemplate, Variable
+        from django.template import TemplateSyntaxError
+        from .django_rusty_templates import Template as NativeTemplate
+
+        parent = self.parent_name.resolve(context)
+        if not parent:
+            message = "Invalid template name in 'extends' tag: %r." % parent
+            if self.parent_name.filters or isinstance(self.parent_name.var, Variable):
+                message += " Got this from the '%s' variable." % self.parent_name.token
+            raise TemplateSyntaxError(message)
+        native = getattr(parent, "template", parent)
+        if isinstance(native, (DjangoTemplate, NativeTemplate)):
+            return native
+        return self.find_template(parent, context)
+
+    def render(self, context):
+        from django.template.base import TextNode
+        from .django_rusty_templates import Template as NativeTemplate
+
+        parent = self.get_parent(context)
+        block_context = context.render_context.setdefault(
+            BLOCK_CONTEXT_KEY, BlockContext()
+        )
+        block_context.add_blocks(self.blocks)
+        if isinstance(parent, NativeTemplate) and parent._is_native:
+            if not parent._has_extends:
+                block_context.add_blocks(parent._inheritance_blocks)
+        else:
+            for node in parent.nodelist:
+                if not isinstance(node, TextNode):
+                    if not isinstance(node, ExtendsNode):
+                        block_context.add_blocks(
+                            {
+                                block.name: block
+                                for block in parent.nodelist.get_nodes_by_type(
+                                    BlockNode
+                                )
+                            }
+                        )
+                    break
+        with context.render_context.push_state(parent, isolated_context=False):
+            return parent._render(context)
+
+
+def render_native_parent(parent, blocks, origin, context):
+    """Resolve a native extends node against an existing Python block context."""
+    from types import SimpleNamespace
+
+    expression = SimpleNamespace(
+        resolve=lambda context: parent, filters=[], var=None, token=""
+    )
+    node = NativeExtendsNode(NodeList(), expression)
+    node.blocks = blocks
+    node.origin = origin
+    return node.render(context)

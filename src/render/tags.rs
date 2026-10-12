@@ -1682,6 +1682,32 @@ impl Render for Now {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> RenderResult<'t> {
+        if let Some(expression) = &self.expression {
+            let format = expression
+                .resolve(
+                    py,
+                    template,
+                    context,
+                    ResolveFailures::IgnoreVariableDoesNotExist,
+                )?
+                .unwrap_or_else(|| "".as_content())
+                .to_py(py);
+            let result = py
+                .import("django_rusty_templates.diagnostics")?
+                .getattr("format_now")?
+                .call1((format, self.escape && context.autoescape))?;
+            if let Some(at) = self.asvar {
+                context.insert(template.content(at).to_string(), result)?;
+                return Ok(Cow::Borrowed(""));
+            }
+            return Ok(Cow::Owned(
+                result
+                    .cast_into::<PyString>()
+                    .map_err(PyErr::from)?
+                    .to_str()?
+                    .to_owned(),
+            ));
+        }
         let tz_mod = DJANGO_TIMEZONE
             .get_or_try_init(py, || -> Result<Py<PyAny>, PyRenderError> {
                 Ok(py.import("django.utils.timezone")?.into())

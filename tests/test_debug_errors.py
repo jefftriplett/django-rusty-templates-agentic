@@ -82,3 +82,36 @@ def test_url_failure_preserves_exception_and_reverses_once(monkeypatch):
     assert "failing_reverse" in [
         frame.name for frame in traceback.extract_tb(error.__traceback__)
     ]
+
+
+@pytest.mark.parametrize("loaded", [False, True])
+def test_native_exception_info_does_not_parse_a_compatibility_tree(monkeypatch, loaded):
+    from django.template import Engine as DjangoEngine
+    from django.template.base import DebugLexer, Template
+    from django_rusty_templates import interop
+
+    source = "first\né {{ value }}\nlast"
+    options = dict(
+        debug=True,
+        loaders=[("django.template.loaders.locmem.Loader", {"page.html": source})],
+    )
+    engine = Engine(**options)
+    template = (
+        engine.get_template("page.html") if loaded else engine.from_string(source)
+    )
+    reference = (
+        DjangoEngine(**options).get_template("page.html")
+        if loaded
+        else DjangoEngine(**options).from_string(source)
+    )
+    token = next(
+        token for token in DebugLexer(source).tokenize() if token.contents == "value"
+    )
+    error = RuntimeError("original")
+    expected = Template.get_exception_info(reference, error, token)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("debug metadata compiled a Django tree")
+
+    monkeypatch.setattr(interop, "compile_template", unexpected)
+    assert template.get_exception_info(error, token) == expected
