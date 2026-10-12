@@ -118,3 +118,23 @@ def render_native_parent(parent, blocks, origin, context):
     node.blocks = blocks
     node.origin = origin
     return node.render(context)
+
+
+def make_partial(name, template, origin, start, end):
+    """Project an already-compiled Rust body into Django's partial protocol."""
+    from django.template.base import PartialTemplate
+
+    partial = PartialTemplate(
+        NodeList([CompiledBody(template)]),
+        origin,
+        name,
+        source_start=start,
+        source_end=end,
+    )
+    partial.engine = template.engine
+    return partial
+
+
+def render_partial_body(template, context):
+    with context.render_context.push_state(template):
+        return template._render_fragment(context)

@@ -22,7 +22,7 @@ pub mod django_rusty_templates {
 
     use crate::error::{PyRenderError, RenderError};
     use crate::loaders::{AppDirsLoader, CachedLoader, FileSystemLoader, Loader, LocMemLoader};
-    use crate::parse::{Parser, Tag, TokenTree};
+    use crate::parse::{Parser, PartialDefinition, Tag, TokenTree};
     use crate::render::types::{Context, PyContext};
     use crate::render::{Render, RenderResult};
     use crate::utils::PyResultMethods;
@@ -370,6 +370,8 @@ pub mod django_rusty_templates {
                     django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
                     fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
                     native_blocks: Arc::new(OnceLock::new()),
+                    native_partials: Arc::new(OnceLock::new()),
+                    partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
                     python_renderer: Some(Arc::new(renderer.unbind())),
                 }
             };
@@ -759,6 +761,18 @@ pub mod django_rusty_templates {
                 .extract::<u8>()?
                 >= 6
         {
+            let (base, name) = template_name.split_once('#').expect("name contains #");
+            let full = get_template(engine.clone(), py, Cow::Borrowed(base))?;
+            if full.is_native() {
+                if name.is_empty() {
+                    return Ok(full);
+                }
+                let definition = full
+                    .native_partials()
+                    .get(name)
+                    .ok_or_else(|| TemplateDoesNotExist::new_err(name.to_string()))?;
+                return Ok(full.block_template(definition.nodes.clone()));
+            }
             let renderer = py
                 .import("django_rusty_templates.interop")?
                 .getattr("compile_partial")?
@@ -782,6 +796,8 @@ pub mod django_rusty_templates {
                 django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
                 fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
                 native_blocks: Arc::new(OnceLock::new()),
+                native_partials: Arc::new(OnceLock::new()),
+                partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
                 python_renderer: Some(Arc::new(renderer.unbind())),
                 nodes: Arc::new(Vec::new()),
                 has_inheritance: false,
@@ -1235,6 +1251,8 @@ pub mod django_rusty_templates {
                 django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
                 fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
                 native_blocks: Arc::new(OnceLock::new()),
+                native_partials: Arc::new(OnceLock::new()),
+                partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
                 python_renderer: None,
                 has_inheritance: false,
             })
@@ -1532,6 +1550,8 @@ pub mod django_rusty_templates {
         django_renderer: Arc<InspectionNodes>,
         fallback_blocks: Arc<InspectionNodes>,
         native_blocks: Arc<OnceLock<HashMap<String, Arc<Vec<TokenTree>>>>>,
+        native_partials: Arc<OnceLock<HashMap<String, PartialDefinition>>>,
+        partial_data: Arc<InspectionNodes>,
         has_inheritance: bool,
         python_renderer: Option<Arc<Py<PyAny>>>,
     }
@@ -1657,6 +1677,8 @@ pub mod django_rusty_templates {
                 django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
                 fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
                 native_blocks: Arc::new(OnceLock::new()),
+                native_partials: Arc::new(OnceLock::new()),
+                partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
                 python_renderer,
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
                 nodes: Arc::new(nodes),
@@ -1713,6 +1735,8 @@ pub mod django_rusty_templates {
                 django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
                 fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
                 native_blocks: Arc::new(OnceLock::new()),
+                native_partials: Arc::new(OnceLock::new()),
+                partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
                 python_renderer,
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
                 nodes: Arc::new(nodes),
@@ -1745,6 +1769,24 @@ pub mod django_rusty_templates {
                 .any(|node| matches!(node, TokenTree::Tag(Tag::Extends { .. })))
         }
 
+        pub(crate) fn native_partials(&self) -> &HashMap<String, PartialDefinition> {
+            self.native_partials.get_or_init(|| {
+                fn collect(nodes: &[TokenTree], partials: &mut HashMap<String, PartialDefinition>) {
+                    for node in nodes {
+                        if let TokenTree::Tag(Tag::PartialDef { definition, .. }) = node {
+                            partials.insert(definition.name.clone(), definition.clone());
+                        }
+                        for children in node.child_nodes() {
+                            collect(children, partials);
+                        }
+                    }
+                }
+                let mut partials = HashMap::new();
+                collect(&self.nodes, &mut partials);
+                partials
+            })
+        }
+
         pub(crate) fn native_blocks(&self) -> &HashMap<String, Arc<Vec<TokenTree>>> {
             self.native_blocks.get_or_init(|| {
                 fn collect(nodes: &[TokenTree], blocks: &mut HashMap<String, Arc<Vec<TokenTree>>>) {
@@ -1764,6 +1806,9 @@ pub mod django_rusty_templates {
         }
 
         pub(crate) fn block_template(&self, nodes: Arc<Vec<TokenTree>>) -> Self {
+            // A detached body must resolve definitions from the complete owner,
+            // including definitions outside an inherited block.
+            self.native_partials();
             Self {
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
                 nodes,
@@ -1771,6 +1816,8 @@ pub mod django_rusty_templates {
                 django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
                 fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
                 native_blocks: Arc::new(OnceLock::new()),
+                native_partials: self.native_partials.clone(),
+                partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
                 ..self.clone()
             }
         }
@@ -2086,7 +2133,38 @@ pub mod django_rusty_templates {
         fn extra_data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
             match &self.python_renderer {
                 Some(renderer) => renderer.bind(py).getattr("extra_data"),
-                None => Ok(PyDict::new(py).into_any()),
+                None => self
+                    .partial_data
+                    .0
+                    .get_or_try_init(py, || {
+                        let data = PyDict::new(py);
+                        if !self.native_partials().is_empty() {
+                            let partials = PyDict::new(py);
+                            let mut definitions: Vec<_> = self.native_partials().values().collect();
+                            definitions
+                                .sort_by_key(|definition| definition.span.0 + definition.span.1);
+                            for definition in definitions {
+                                let name = &definition.name;
+                                let body = self.block_template(definition.nodes.clone());
+                                let debug = self.engine.debug.load(Ordering::Relaxed);
+                                let start = debug
+                                    .then(|| self.template[..definition.span.0].chars().count());
+                                let end = debug.then(|| {
+                                    self.template[..definition.span.0 + definition.span.1]
+                                        .chars()
+                                        .count()
+                                });
+                                let partial = py
+                                    .import("django_rusty_templates.inheritance")?
+                                    .getattr("make_partial")?
+                                    .call1((name, Py::new(py, body)?, self.origin(), start, end))?;
+                                partials.set_item(name, partial)?;
+                            }
+                            data.set_item("partials", partials)?;
+                        }
+                        Ok(data.into_any().unbind())
+                    })
+                    .map(|data| data.bind(py).clone()),
             }
         }
 

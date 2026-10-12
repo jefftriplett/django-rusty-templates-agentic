@@ -726,6 +726,37 @@ impl Render for Tag {
         context: &mut Context,
     ) -> RenderResult<'t> {
         Ok(match self {
+            Self::PartialDef { definition, inline } => {
+                if *inline {
+                    let owner = context
+                        .current_template
+                        .as_ref()
+                        .expect("inside a template")
+                        .clone();
+                    Cow::Owned(
+                        owner
+                            .render_body(py, &definition.nodes, context)?
+                            .into_owned(),
+                    )
+                } else {
+                    Cow::Borrowed("")
+                }
+            }
+            Self::Partial { name, at } => {
+                let owner = context
+                    .current_template
+                    .as_ref()
+                    .expect("inside a template")
+                    .clone();
+                let definition = owner.native_partials().get(name).ok_or_else(|| {
+                    TemplateSyntaxError::new_err(format!(
+                        "Partial '{name}' is not defined in the current template."
+                    ))
+                    .annotate(py, *at, "here", template)
+                })?;
+                let body = owner.block_template(definition.nodes.clone());
+                Cow::Owned(context.render_partial(py, &body)?.into_owned())
+            }
             Self::Block { name, nodes } => {
                 if let Some(blocks) = &context.python_blocks {
                     Cow::Owned(
