@@ -1179,6 +1179,7 @@ impl For {
         if self.reversed {
             list.reverse();
         }
+        let mut join = super::JoinResults::default();
         context.push_for_loop(list.len());
         for (index, values) in list.into_iter().enumerate() {
             let values = match values {
@@ -1198,12 +1199,17 @@ impl For {
                 template,
             )?;
             context.sync_loop_context(py, index == 0)?;
-            self.body.render_into(py, template, context, rendered)?;
+            for (body_index, node) in self.body.iter().enumerate() {
+                join.collect(
+                    index * self.body.len() + body_index,
+                    node.render_into(py, template, context, rendered),
+                )?;
+            }
             context.increment_for_loop();
         }
         context.pop_variables();
         context.pop_for_loop();
-        Ok(())
+        join.finish(py)
     }
 
     fn render_string_into(
@@ -1232,17 +1238,23 @@ impl For {
         }
 
         let variable = &self.variables.names[0];
+        let mut join = super::JoinResults::default();
         context.push_for_loop(chars.len());
         for (index, c) in chars.into_iter().enumerate() {
             let c = PyString::new(py, &c.to_string());
             context.push_variable(variable.clone(), c.into_any(), index);
             context.sync_loop_context(py, index == 0)?;
-            self.body.render_into(py, template, context, rendered)?;
+            for (body_index, node) in self.body.iter().enumerate() {
+                join.collect(
+                    index * self.body.len() + body_index,
+                    node.render_into(py, template, context, rendered),
+                )?;
+            }
             context.increment_for_loop();
         }
         context.pop_variables();
         context.pop_for_loop();
-        Ok(())
+        join.finish(py)
     }
 }
 
@@ -1679,7 +1691,13 @@ fn store_target_var_into(
             } else {
                 content
             };
-            super::types::append_python_string(&output.str()?.into_any(), false, rendered)?;
+            if output.is_instance_of::<PyString>() {
+                // Joining uses the underlying Unicode contents even when a
+                // string subclass overrides __str__.
+                super::types::append_python_string(&output, false, rendered)?;
+            } else {
+                return Err(PyRenderError::InvalidTagResult(output.unbind()));
+            }
             Ok(())
         }
         Some(target_var) => {

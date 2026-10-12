@@ -2110,8 +2110,10 @@ pub mod django_rusty_templates {
             );
             let result = (|| {
                 let template = TemplateString(&self.template);
-                for node in nodes {
+                let mut join = crate::render::JoinResults::default();
+                for (index, node) in nodes.iter().enumerate() {
                     match node.render_into(py, template, context, output) {
+                        Err(PyRenderError::InvalidTagResult(value)) => join.push(index, value),
                         Err(PyRenderError::PyErr(error)) => {
                             if self.engine.debug.load(Ordering::Relaxed) {
                                 let _ = (|| -> PyResult<()> {
@@ -2133,7 +2135,7 @@ pub mod django_rusty_templates {
                         Ok(()) => {}
                     }
                 }
-                Ok(())
+                join.finish(py)
             })();
             context.string_if_invalid = previous_invalid;
             context.python_blocks = previous_python_blocks;

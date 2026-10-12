@@ -12,6 +12,8 @@ pub enum PyRenderError {
     PyErr(#[from] PyErr),
     #[error(transparent)]
     RenderError(#[from] RenderError),
+    #[error("Non-string tag result")]
+    InvalidTagResult(Py<PyAny>),
 }
 
 impl PyRenderError {
@@ -19,6 +21,9 @@ impl PyRenderError {
         match self {
             Self::RenderError(err) => Ok(err),
             Self::PyErr(err) => Err(err),
+            Self::InvalidTagResult(value) => {
+                Python::attach(|py| Err(crate::render::join_type_error(0, value.bind(py))?))
+            }
         }
     }
 }

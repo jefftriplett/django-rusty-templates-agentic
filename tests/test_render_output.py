@@ -106,16 +106,7 @@ def test_render_output_boundaries(engine_options, autoescape, shape):
 @pytest.mark.parametrize(
     "kind,autoescape",
     [
-        pytest.param(
-            kind,
-            autoescape,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="Existing simple-tag coercion difference, issue #134",
-            ),
-        )
-        if kind == "subclass" and not autoescape
-        else (kind, autoescape)
+        (kind, autoescape)
         for kind in ("exact", "safe", "subclass", "custom", "safe_str", "lazy")
         for autoescape in (True, False)
     ],
@@ -236,6 +227,29 @@ def test_render_output_live_formatting_flags(engine_options):
         "amount": Decimal("1234.50"),
         "instant": datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc),
     }
+    assert render(Engine, source, values, engine_options) == render(
+        DjangoEngine, source, values, engine_options
+    )
+
+
+@pytest.mark.parametrize("length", [1023, 1024, 8192])
+@pytest.mark.parametrize("suffix", ["", "&", "<", ">", '"', "'"])
+@pytest.mark.parametrize("character", ["x", "é"])
+def test_large_escape_scan_matches_django(engine_options, length, suffix, character):
+    # Include every escape byte at the end, Unicode input, and both sides of
+    # the large-string threshold so a fast no-escape scan cannot miss a tail.
+    value = character * length + suffix
+    source = "{% for i in items %}{{ value }}{% endfor %}"
+    values = {"value": value, "items": [1, 2]}
+    assert render(Engine, source, values, engine_options) == render(
+        DjangoEngine, source, values, engine_options
+    )
+
+
+def test_dense_large_escaping_appends_after_existing_output(engine_options):
+    value = "<>&\"'é🚀" * 1024
+    source = "prefix:{{ value }}|{{ value }}:tail"
+    values = {"value": value}
     assert render(Engine, source, values, engine_options) == render(
         DjangoEngine, source, values, engine_options
     )

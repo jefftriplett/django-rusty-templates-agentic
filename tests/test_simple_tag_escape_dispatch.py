@@ -56,15 +56,8 @@ class StringValue:
     "kind", ["unsafe", "safe", "lazy", "html", "str", "int", "none"]
 )
 def test_escape_protocol_matches_django(
-    tag_module, debug, cached, loaded, autoescape, kind, request
+    tag_module, debug, cached, loaded, autoescape, kind
 ):
-    if not autoescape and kind not in ("unsafe", "safe"):
-        request.applymarker(
-            pytest.mark.xfail(
-                strict=True,
-                reason="Issue #134: existing autoescape-off non-string result coercion differs from Django",
-            )
-        )
     source = "{% load escape_dispatch_tags %}{% echo value %}"
     loaders = [("django.template.loaders.locmem.Loader", {"page.html": source})]
     if cached:
@@ -163,3 +156,119 @@ for _ in range(5):
 assert TrackingModule.lookups == first
 """
     subprocess.run([sys.executable, "-c", source], check=True)
+
+
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("loaded", [False, True])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{% load escape_dispatch_tags %}{% echo value %}",
+        "{% load escape_dispatch_tags %}text{% echo value %}tail",
+        "{% load escape_dispatch_tags %}{% echo value %}{% echo other %}",
+        "{% load escape_dispatch_tags %}{% echo value %}{% if True %}ok{% endif %}",
+        "{% load escape_dispatch_tags %}{% echo value %}{% if True %}{% echo other %}{% endif %}",
+        "{% load escape_dispatch_tags %}{% autoescape off %}text{% echo value %}{% endautoescape %}",
+        "{% load escape_dispatch_tags %}{% for i in items %}text{% echo value %}{% endfor %}",
+        "{% load escape_dispatch_tags %}{% for i in items %}{% echo i %}{% endfor %}",
+        "{% load escape_dispatch_tags %}{% for i in items %}{% echo value %}{% boom %}{% endfor %}",
+        "{% load escape_dispatch_tags %}{% if True %}text{% echo value %}{% endif %}",
+        "{% load escape_dispatch_tags %}{% comment %}ignored{% endcomment %}{% echo value %}",
+        "{% load escape_dispatch_tags %}{% echo value %}{% boom %}",
+    ],
+)
+def test_join_error_metadata_and_order(tag_module, debug, cached, loaded, source):
+    records = []
+    for engine_class in (DjangoEngine, Engine):
+        events = []
+
+        @tag_module.register.simple_tag
+        def boom():
+            events.append("boom")
+            raise ValueError("later callback wins")
+
+        @tag_module.register.simple_tag(name="echo")
+        def echo(value):
+            events.append(value)
+            return value
+
+        loaders = [("django.template.loaders.locmem.Loader", {"page.html": source})]
+        if cached:
+            loaders = [("django.template.loaders.cached.Loader", loaders)]
+        engine = engine_class(
+            debug=debug,
+            loaders=loaders,
+            libraries={tag_module.__name__: tag_module.__name__},
+        )
+        template = (
+            engine.get_template("page.html") if loaded else engine.from_string(source)
+        )
+        with pytest.raises((TypeError, ValueError)) as caught:
+            template.render(
+                Context(
+                    {"value": 42, "other": None, "items": ["ok", 42]}, autoescape=False
+                )
+            )
+        message = str(caught.value)
+        if isinstance(caught.value, ValueError):
+            assert "later callback wins" in message
+            message = "later callback wins"
+        records.append((type(caught.value), message, events))
+    assert records[0] == records[1]
+
+
+@pytest.mark.parametrize("autoescape", [False, True])
+@pytest.mark.parametrize("block", [False, True])
+def test_non_string_html_and_block_tag_results(tag_module, autoescape, block):
+    class NonStringHTML:
+        def __html__(self):
+            return 42
+
+    @tag_module.register.simple_block_tag
+    def echo_block(content, value):
+        return value
+
+    source = "{% load escape_dispatch_tags %}" + (
+        "{% echo_block value %}body{% endecho_block %}" if block else "{% echo value %}"
+    )
+    records = []
+    for engine_class in (DjangoEngine, Engine):
+        template = engine_class(
+            libraries={tag_module.__name__: tag_module.__name__}
+        ).from_string(source)
+        with pytest.raises(TypeError) as caught:
+            template.render(Context({"value": NonStringHTML()}, autoescape=autoescape))
+        records.append(str(caught.value))
+    assert records[0] == records[1]
+
+
+def test_invalid_results_stay_alive_until_join_and_use_current_type_name(tag_module):
+    records = []
+    for engine_class in (DjangoEngine, Engine):
+        events = []
+
+        class Result:
+            def __del__(self):
+                events.append("dropped")
+
+        @tag_module.register.simple_tag
+        def result():
+            return Result()
+
+        @tag_module.register.simple_tag
+        def later():
+            events.append("later")
+            Result.__name__ = "RenamedResult"
+            return ""
+
+        template = engine_class(
+            libraries={tag_module.__name__: tag_module.__name__}
+        ).from_string(
+            "{% load escape_dispatch_tags %}{% result %}{% result %}{% later %}"
+        )
+        with pytest.raises(TypeError) as caught:
+            template.render(Context(autoescape=False))
+        records.append((str(caught.value), events.copy()))
+    assert records[0] == records[1]
+    assert records[0][1] == ["later", "dropped", "dropped"]
