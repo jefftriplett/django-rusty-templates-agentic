@@ -15,6 +15,7 @@ LIBRARIES = {
 
 
 @pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize(
     "source",
     [
@@ -32,13 +33,18 @@ LIBRARIES = {
         "{% load i18n %}{% blocktranslate count count=missing %}{{ count }}{% plural %}{% endblocktranslate %}",
     ],
 )
-def test_stock_tags_do_not_invoke_django_parser(monkeypatch, settings, debug, source):
+def test_stock_tags_do_not_invoke_django_parser(
+    monkeypatch, settings, debug, cached, source
+):
     settings.STATIC_URL = "/static/"
     settings.MEDIA_URL = "/media/"
+    loader = ("django.template.loaders.locmem.Loader", {"page.html": source})
     options = dict(
         debug=debug,
         libraries=LIBRARIES,
-        loaders=[("django.template.loaders.locmem.Loader", {"page.html": source})],
+        loaders=[("django.template.loaders.cached.Loader", [loader])]
+        if cached
+        else [loader],
     )
     values = dict(
         value="<&>",
