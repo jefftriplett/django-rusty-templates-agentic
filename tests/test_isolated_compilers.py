@@ -463,3 +463,77 @@ def test_syntax_diagnostic_does_not_invoke_opted_in_compiler(libraries):
     source = "{% load custom %}{% capture value %}body{% endcapture %}"
     Engine(libraries=modules)._syntax_diagnostic(source, None, None)
     assert calls == []
+
+
+@pytest.mark.parametrize("debug", [False, True])
+def test_opted_in_compiler_mixes_with_native_stock_tags(libraries, monkeypatch, debug):
+    _, modules, calls = libraries
+    modules.update(
+        {name: "django.templatetags." + name for name in ["static", "cache", "i18n"]}
+    )
+    source = (
+        "{% load custom static cache i18n %}{% static 'main.css' %}|"
+        "{% cache 0 isolated-stock %}{% language 'en' %}"
+        "{% capture value %}{{ captured }}{% endcapture %}"
+        "{% endlanguage %}{% endcache %}|{{ captured }}"
+    )
+    options = dict(libraries=modules, debug=debug)
+    expected = (
+        DjangoEngine(**options).from_string(source).render(Context({"value": "ok"}))
+    )
+    calls.clear()
+    spans = []
+    original = Parser.parse
+
+    def record(parser, parse_until=None):
+        spans.append(parse_until)
+        return original(parser, parse_until)
+
+    monkeypatch.setattr(Parser, "parse", record)
+    monkeypatch.setattr(
+        interop, "compile_template", lambda *args: pytest.fail("fallback")
+    )
+    template = Engine(**options).from_string(source)
+    assert template.render(Context({"value": "ok"})) == expected
+    assert len(calls) == 1
+    assert spans == [("endcapture",)]
+
+
+def test_unannotated_compile_func_name_does_not_bypass_preflight(libraries):
+    from django.template.base import TextNode
+
+    library, modules, calls = libraries
+
+    def compile_func(parser, token):
+        return TextNode("legacy")
+
+    library.tag("legacy", compile_func)
+    source = (
+        "{% load custom %}{% capture value %}{{ captured }}{% endcapture %}{% legacy %}"
+    )
+    template = Engine(libraries=modules).from_string(source)
+    assert len(calls) == 1
+    assert template.render(Context({"value": "ok"})) == "1:oklegacy"
+
+
+def test_dynamic_unannotated_replacement_reports_contract_error_once(libraries):
+    from django.template import TemplateSyntaxError
+    from django.template.base import TextNode
+
+    library, modules, _ = libraries
+    calls = []
+
+    @library.tag("replace")
+    def replace(parser, token):
+        calls.append(token)
+        parser.tags["late"] = lambda parser, token: TextNode("late")
+        return TextNode("")
+
+    replace.rusty_isolated_compiler = True
+    with pytest.raises(
+        TemplateSyntaxError, match="registered a compiler requiring the full parser"
+    ):
+        Engine(libraries=modules).from_string(
+            "{% load custom %}{% replace %}{% late %}"
+        )
+    assert len(calls) == 1

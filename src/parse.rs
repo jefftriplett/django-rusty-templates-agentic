@@ -2868,11 +2868,29 @@ impl<'t, 'py> Parser<'t, 'py> {
                         return false;
                     }
                     let generated = candidate
-                        .getattr("__code__")
-                        .and_then(|code| code.getattr("co_name"))
-                        .is_ok_and(|name| {
-                            name.extract::<String>()
-                                .is_ok_and(|name| name == "compile_func")
+                        .getattr("__closure__")
+                        .is_ok_and(|closure| !closure.is_none())
+                        && candidate.getattr("__code__").is_ok_and(|code| {
+                            code.getattr("co_name").is_ok_and(|name| {
+                                name.extract::<String>()
+                                    .is_ok_and(|name| name == "compile_func")
+                            }) && code.getattr("co_freevars").is_ok_and(|names| {
+                                names.extract::<Vec<String>>().is_ok_and(|names| {
+                                    [
+                                        "defaults",
+                                        "func",
+                                        "function_name",
+                                        "kwonly",
+                                        "kwonly_defaults",
+                                        "params",
+                                        "takes_context",
+                                        "varargs",
+                                        "varkw",
+                                    ]
+                                    .iter()
+                                    .all(|required| names.iter().any(|name| name == required))
+                                })
+                            })
                         });
                     let full_parser = candidate
                         .getattr("rusty_requires_full_parser")
@@ -2899,6 +2917,15 @@ impl<'t, 'py> Parser<'t, 'py> {
                 .getattr("rusty_requires_full_parser")
                 .is_ok_and(|value| value.is_truthy().unwrap_or(true))
         {
+            if self.compiler_parser.is_some() {
+                let error = crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
+                    "An isolated compiler registered a compiler requiring the full parser. Leave the registering compiler unannotated or opt its replacement in.",
+                );
+                error
+                    .value(self.py)
+                    .setattr("_rusty_compiler_error", true)?;
+                return Err(error);
+            }
             todo!("Fully custom tag")
         }
         self.external_tags
