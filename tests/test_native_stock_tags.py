@@ -174,11 +174,14 @@ def test_translated_literal_is_not_translated_twice(monkeypatch, options):
     assert outputs == ["translated", "translated"]
 
 
-def test_translation_filters_receive_django_lazy_values(monkeypatch):
+@pytest.mark.parametrize("noop", [False, True])
+@pytest.mark.parametrize("autoescape", [False, True])
+def test_translation_filters_receive_django_value_types(monkeypatch, noop, autoescape):
     import sys
     from types import ModuleType
     from django.template import Library
     from django.utils.functional import Promise
+    from django.utils.safestring import SafeData
 
     module = ModuleType("rusty_translation_filter_tests")
     module.register = Library()
@@ -188,12 +191,23 @@ def test_translation_filters_receive_django_lazy_values(monkeypatch):
     def observes_lazy(value):
         return "lazy" if isinstance(value, Promise) else "eager"
 
+    @module.register.filter
+    def observes_safe(value):
+        return "safe" if isinstance(value, SafeData) else "unsafe"
+
     libraries = {**LIBRARIES, "custom": module.__name__}
-    source = '{% load i18n custom %}{% translate "Hello"|observes_lazy %}'
+    source = (
+        '{% load i18n custom %}{% translate "Hello"|observes_safe noop %}'
+        if noop
+        else '{% load i18n custom %}{% translate "Hello"|observes_lazy %}'
+    )
+    expected = "safe" if noop else "lazy"
     assert [
-        kind(libraries=libraries).from_string(source).render(Context())
+        kind(libraries=libraries)
+        .from_string(source)
+        .render(Context(autoescape=autoescape))
         for kind in [DjangoEngine, Engine]
-    ] == ["lazy", "lazy"]
+    ] == [expected, expected]
 
 
 @pytest.mark.parametrize(

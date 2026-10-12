@@ -1,6 +1,7 @@
 """Django runtime services for stock tags whose syntax is parsed in Rust."""
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 from django.conf import settings
 from django.core.cache import InvalidCacheBackendError, caches
@@ -68,10 +69,11 @@ def cache_entry(timeout, name, vary, cache, explicit_cache):
     return backend.get(key), backend, key, timeout
 
 
-def translate(value, noop, message_context, eager):
+def translate(value, noop, message_context, eager, safe=None):
     if noop:
-        return value
-    safe = isinstance(value, SafeData)
+        return mark_safe(value) if safe else value
+    if safe is None:
+        safe = isinstance(value, SafeData)
     message = value.replace("%", "%%")
     if safe:
         message = mark_safe(message)
@@ -84,12 +86,30 @@ def translate(value, noop, message_context, eager):
     return translation.gettext(message) if eager else translation.gettext_lazy(message)
 
 
-def finish_translation(value, context):
+def render_translation(
+    value, noop, message_context, autoescape, use_l10n, use_tz, context, safe
+):
+    return finish_translation(
+        translate(value, noop, message_context, True, safe),
+        context,
+        autoescape,
+        use_l10n,
+        use_tz,
+    )
+
+
+def finish_translation(value, context, autoescape=None, use_l10n=None, use_tz=None):
     # Ordinary strings need escaping, but cannot need timezone conversion or
     # localization. Keep Django's full formatter for other filter results.
     if type(value) is str or type(value) is SafeString:
-        output = conditional_escape(value) if context.autoescape else str(value)
+        if context is not None:
+            autoescape = context.autoescape
+        output = conditional_escape(value) if autoescape else str(value)
     else:
+        if context is None:
+            context = SimpleNamespace(
+                autoescape=autoescape, use_l10n=use_l10n, use_tz=use_tz
+            )
         output = render_value_in_context(value, context)
     safe = isinstance(output, SafeData)
     output = output.replace("%%", "%")

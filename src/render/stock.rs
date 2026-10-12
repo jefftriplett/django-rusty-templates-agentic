@@ -3,11 +3,22 @@ use std::borrow::Cow;
 use super::filters::ResolveFilter;
 use dtl_lexer::types::TemplateString;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyList, PyModule, PyString};
 
 use super::types::{Content, Context};
 use super::{Render, RenderResult, Resolve, ResolveFailures};
 use crate::parse::{StockNode, TagElement};
+
+static SERVICES: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+
+fn services<'py>(py: Python<'py>) -> PyResult<&'py Bound<'py, PyModule>> {
+    Ok(SERVICES
+        .get_or_try_init(py, || {
+            py.import("django_rusty_templates.stock").map(Bound::unbind)
+        })?
+        .bind(py))
+}
 
 fn value<'py>(
     expression: &TagElement,
@@ -28,7 +39,7 @@ impl Render for StockNode {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> RenderResult<'t> {
-        let service = py.import("django_rusty_templates.stock")?;
+        let service = services(py)?;
         Ok(match self {
             Self::Static { path, target } => {
                 let path = value(path, py, template, context)?;
@@ -130,17 +141,16 @@ impl Render for StockNode {
                     ResolveFailures::IgnoreVariableDoesNotExist,
                 )?;
                 let missing = resolved.is_none();
-                let initial = match resolved {
-                    Some(content) => service.getattr("translate")?.call1((
-                        content.to_py(py),
-                        if literal.is_some() { false } else { *noop },
-                        if literal.is_some() {
-                            None
-                        } else {
-                            message_context
-                        },
-                        filters.is_empty(),
-                    ))?,
+                let safe = if matches!(root, TagElement::Text(_) | TagElement::TranslatedText(_)) {
+                    Some(true)
+                } else {
+                    None
+                };
+                let input = match resolved {
+                    Some(Content::String(text)) if safe.is_some() => {
+                        PyString::new(py, text.as_raw()).into_any()
+                    }
+                    Some(content) => content.to_py(py),
                     None => {
                         let name = match root {
                             TagElement::Variable(variable) => Some(template.content(variable.at)),
@@ -149,17 +159,46 @@ impl Render for StockNode {
                         context.invalid_value(py, name)?
                     }
                 };
-                let mut result = Some(Content::Py(initial));
-                if !(missing && !context.string_if_invalid.is_empty()) {
-                    for filter in filters {
-                        result = filter.resolve(result, py, template, context)?;
+                let noop = missing || (literal.is_none() && *noop);
+                let message_context = if literal.is_some() {
+                    None
+                } else {
+                    message_context
+                };
+                let output = if filters.is_empty() {
+                    service.getattr("render_translation")?.call1((
+                        input,
+                        noop,
+                        message_context,
+                        context.autoescape,
+                        context.use_l10n,
+                        context.use_tz,
+                        context
+                            .formatting_context
+                            .as_ref()
+                            .map(|live| live.bind(py)),
+                        safe,
+                    ))?
+                } else {
+                    let initial = service.getattr("translate")?.call1((
+                        input,
+                        noop,
+                        message_context,
+                        false,
+                        safe,
+                    ))?;
+                    let mut result = Some(Content::Py(initial));
+                    if !(missing && !context.string_if_invalid.is_empty()) {
+                        for filter in filters {
+                            result = filter.resolve(result, py, template, context)?;
+                        }
                     }
-                }
-                let result =
-                    result.map_or_else(|| py.None().into_bound(py), |content| content.to_py(py));
-                let output = service
-                    .getattr("finish_translation")?
-                    .call1((result, context.value_formatting_context(py)?))?;
+                    let result = result
+                        .map_or_else(|| py.None().into_bound(py), |content| content.to_py(py));
+                    service
+                        .getattr("finish_translation")?
+                        .call1((result, context.value_formatting_context(py)?))?
+                };
                 if let Some(target) = target {
                     context.insert(target.clone(), output)?;
                     Cow::Borrowed("")
@@ -234,7 +273,7 @@ impl StockNode {
         else {
             unreachable!("block translation renderer");
         };
-        let service = py.import("django_rusty_templates.stock")?;
+        let service = services(py)?;
         let message_context = message_context
             .as_ref()
             .map(|expression| value(expression, py, template, context))
