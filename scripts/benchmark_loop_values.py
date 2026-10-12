@@ -196,11 +196,13 @@ def main():
                         for _ in range(3):
                             assert render_fixed() == "content"
                         samples = timeit.repeat(
-                            render_fixed, number=args.number, repeat=args.repeat
+                            render_fixed,
+                            number=max(args.number, 1000),
+                            repeat=args.repeat,
                         )
                         fixed_results[
                             f"debug={debug}/cached={cached}/{shape}/{name}/{render_path}"
-                        ] = statistics.median(samples) / args.number * 1e6
+                        ] = statistics.median(samples) / max(args.number, 1000) * 1e6
     report = {
         "python": platform.python_version(),
         "django": django.get_version(),
