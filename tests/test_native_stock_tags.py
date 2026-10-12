@@ -231,3 +231,20 @@ def test_noop_translation_preserves_value_formatting(value, autoescape):
         for kind in [DjangoEngine, Engine]
     ]
     assert outputs[0] == outputs[1]
+
+
+def test_static_compiler_alias_named_as_preserves_index_error(monkeypatch):
+    import sys
+    from types import ModuleType
+    from django.template import Library
+    from django.templatetags.static import do_static
+
+    module = ModuleType("rusty_static_alias_tests")
+    module.register = Library()
+    module.register.tag("as", do_static)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    libraries = {"alias": module.__name__}
+    source = "{% load alias %}{% as 'main.css' %}"
+    for kind in [DjangoEngine, Engine]:
+        with pytest.raises(IndexError, match="list index out of range"):
+            kind(libraries=libraries).from_string(source)

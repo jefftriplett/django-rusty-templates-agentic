@@ -171,7 +171,9 @@ origin source names and template names, compiled node identities, and Django
 context scopes during rendering.
 Native nodes surrounding the custom span never enter Django's parser. A load
 inside the opaque body also makes its filters available to following native
-nodes.
+nodes. New or replacement custom compilers installed through `parser.tags` must
+opt in too; registering an incompatible compiler raises a clear error instead
+of rerunning the first compiler on the compatibility path.
 
 Leave the compiler unannotated when it inspects prior native nodes, depends on
 `command_stack` outside its own body, reads `parser.origin.loader`, rewrites
