@@ -103,10 +103,6 @@ pub struct Context {
     pub use_tz: Option<bool>,
     pub format_values: bool,
     pub instrument_render: bool,
-    // Join metadata only; ordinary rendering still appends to a shared buffer.
-    pub(crate) validate_tag_results: bool,
-    pub(crate) join_index: usize,
-    pub(crate) join_error: Option<(usize, String)>,
     pub formatting_context: Option<Py<PyAny>>,
     // Weak reference to an input Context, used only while calling Python code.
     pub callback_input: Option<Arc<Py<PyAny>>>,
@@ -129,31 +125,6 @@ pub struct Context {
 }
 
 impl Context {
-    // Restore parent metadata even when rendering fails. Child lists join
-    // independently, while ForNode joins all iterations in one scope.
-    pub(crate) fn join_scope<T>(
-        &mut self,
-        render: impl FnOnce(&mut Self) -> Result<T, crate::error::PyRenderError>,
-    ) -> Result<T, crate::error::PyRenderError> {
-        if !self.validate_tag_results {
-            return render(self);
-        }
-        let parent_index = std::mem::replace(&mut self.join_index, 0);
-        let parent_error = self.join_error.take();
-        let result = render(self).and_then(|value| {
-            if let Some((index, name)) = self.join_error.take() {
-                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                    "sequence item {index}: expected str instance, {name} found"
-                ))
-                .into());
-            }
-            Ok(value)
-        });
-        self.join_index = parent_index;
-        self.join_error = parent_error;
-        result
-    }
-
     pub fn new(
         context: HashMap<String, Py<PyAny>>,
         request: Option<Py<PyAny>>,
@@ -168,9 +139,6 @@ impl Context {
             use_tz: None,
             format_values: false,
             instrument_render: true,
-            validate_tag_results: false,
-            join_index: 0,
-            join_error: None,
             formatting_context: None,
             callback_input: None,
             inheritance_blocks: HashMap::new(),
@@ -204,9 +172,6 @@ impl Context {
             use_tz: self.use_tz,
             format_values: self.format_values,
             instrument_render: self.instrument_render,
-            validate_tag_results: self.validate_tag_results,
-            join_index: 0,
-            join_error: None,
             formatting_context: self.formatting_context.as_ref().map(|v| v.clone_ref(py)),
             callback_input: self.callback_input.clone(),
             inheritance_blocks: self.inheritance_blocks.clone(),

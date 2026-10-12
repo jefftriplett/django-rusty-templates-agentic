@@ -1179,6 +1179,7 @@ impl For {
         if self.reversed {
             list.reverse();
         }
+        let mut join = super::JoinResults::default();
         context.push_for_loop(list.len());
         for (index, values) in list.into_iter().enumerate() {
             let values = match values {
@@ -1199,16 +1200,16 @@ impl For {
             )?;
             context.sync_loop_context(py, index == 0)?;
             for (body_index, node) in self.body.iter().enumerate() {
-                if context.validate_tag_results {
-                    context.join_index = index * self.body.len() + body_index;
-                }
-                node.render_into(py, template, context, rendered)?;
+                join.collect(
+                    index * self.body.len() + body_index,
+                    node.render_into(py, template, context, rendered),
+                )?;
             }
             context.increment_for_loop();
         }
         context.pop_variables();
         context.pop_for_loop();
-        Ok(())
+        join.finish(py)
     }
 
     fn render_string_into(
@@ -1237,22 +1238,23 @@ impl For {
         }
 
         let variable = &self.variables.names[0];
+        let mut join = super::JoinResults::default();
         context.push_for_loop(chars.len());
         for (index, c) in chars.into_iter().enumerate() {
             let c = PyString::new(py, &c.to_string());
             context.push_variable(variable.clone(), c.into_any(), index);
             context.sync_loop_context(py, index == 0)?;
             for (body_index, node) in self.body.iter().enumerate() {
-                if context.validate_tag_results {
-                    context.join_index = index * self.body.len() + body_index;
-                }
-                node.render_into(py, template, context, rendered)?;
+                join.collect(
+                    index * self.body.len() + body_index,
+                    node.render_into(py, template, context, rendered),
+                )?;
             }
             context.increment_for_loop();
         }
         context.pop_variables();
         context.pop_for_loop();
-        Ok(())
+        join.finish(py)
     }
 }
 
@@ -1280,8 +1282,7 @@ impl Render for For {
         } else {
             None
         };
-        let result =
-            context.join_scope(|context| self.render_loop_into(py, template, context, output));
+        let result = self.render_loop_into(py, template, context, output);
         if let Some(scope) = scope {
             scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
         }
@@ -1694,9 +1695,8 @@ fn store_target_var_into(
                 // Joining uses the underlying Unicode contents even when a
                 // string subclass overrides __str__.
                 super::types::append_python_string(&output, false, rendered)?;
-            } else if context.join_error.is_none() {
-                let name = output.get_type().name()?.to_string();
-                context.join_error = Some((context.join_index, name));
+            } else {
+                return Err(PyRenderError::InvalidTagResult(output.unbind()));
             }
             Ok(())
         }

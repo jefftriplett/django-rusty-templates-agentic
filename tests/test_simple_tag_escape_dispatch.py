@@ -241,3 +241,34 @@ def test_non_string_html_and_block_tag_results(tag_module, autoescape, block):
             template.render(Context({"value": NonStringHTML()}, autoescape=autoescape))
         records.append(str(caught.value))
     assert records[0] == records[1]
+
+
+def test_invalid_results_stay_alive_until_join_and_use_current_type_name(tag_module):
+    records = []
+    for engine_class in (DjangoEngine, Engine):
+        events = []
+
+        class Result:
+            def __del__(self):
+                events.append("dropped")
+
+        @tag_module.register.simple_tag
+        def result():
+            return Result()
+
+        @tag_module.register.simple_tag
+        def later():
+            events.append("later")
+            Result.__name__ = "RenamedResult"
+            return ""
+
+        template = engine_class(
+            libraries={tag_module.__name__: tag_module.__name__}
+        ).from_string(
+            "{% load escape_dispatch_tags %}{% result %}{% result %}{% later %}"
+        )
+        with pytest.raises(TypeError) as caught:
+            template.render(Context(autoescape=False))
+        records.append((str(caught.value), events.copy()))
+    assert records[0] == records[1]
+    assert records[0][1] == ["later", "dropped", "dropped"]
