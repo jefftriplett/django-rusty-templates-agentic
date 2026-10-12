@@ -167,6 +167,8 @@ assert TrackingModule.lookups == first
         "{% load escape_dispatch_tags %}{% echo value %}",
         "{% load escape_dispatch_tags %}text{% echo value %}tail",
         "{% load escape_dispatch_tags %}{% echo value %}{% echo other %}",
+        "{% load escape_dispatch_tags %}{% echo value %}{% if True %}ok{% endif %}",
+        "{% load escape_dispatch_tags %}{% echo value %}{% if True %}{% echo other %}{% endif %}",
         "{% load escape_dispatch_tags %}{% autoescape off %}text{% echo value %}{% endautoescape %}",
         "{% load escape_dispatch_tags %}{% for i in items %}text{% echo value %}{% endfor %}",
         "{% load escape_dispatch_tags %}{% for i in items %}{% echo i %}{% endfor %}",

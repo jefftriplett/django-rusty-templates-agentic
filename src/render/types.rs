@@ -103,6 +103,7 @@ pub struct Context {
     pub use_tz: Option<bool>,
     pub format_values: bool,
     pub instrument_render: bool,
+    // Join metadata only; ordinary rendering still appends to a shared buffer.
     pub(crate) join_index: usize,
     pub(crate) join_error: Option<(usize, String)>,
     pub formatting_context: Option<Py<PyAny>>,
@@ -127,6 +128,8 @@ pub struct Context {
 }
 
 impl Context {
+    // Restore parent metadata even when rendering fails. Child lists join
+    // independently, while ForNode joins all iterations in one scope.
     pub(crate) fn join_scope<T>(
         &mut self,
         render: impl FnOnce(&mut Self) -> Result<T, crate::error::PyRenderError>,
