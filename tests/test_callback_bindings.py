@@ -222,3 +222,25 @@ def test_large_flat_callback_failure_restores_binding_and_keeps_original(debug):
     assert context.template is None
     assert context.render_context.template is None
     assert len(context.render_context.dicts) == depth
+
+
+@pytest.mark.parametrize("debug", [False, True])
+def test_large_flat_reentrant_render_restores_parent_template(debug):
+    context = Context({"value": "inside", **{f"key{i}": i for i in range(1000)}})
+    engine = Engine(debug=debug)
+    child = engine.from_string("{{ value }}")
+    original_depth = len(context.render_context.dicts)
+
+    def callback():
+        parent = context.template
+        render_parent = context.render_context.template
+        result = child.render(context)
+        assert context.template is parent
+        assert context.render_context.template is render_parent
+        return result
+
+    context["callback"] = callback
+    assert engine.from_string("{{ callback }}").render(context) == "inside"
+    assert context.template is None
+    assert context.render_context.template is None
+    assert len(context.render_context.dicts) == original_depth
