@@ -3,6 +3,7 @@ from types import ModuleType
 
 import pytest
 from django.template import Context, Library, Node
+from django.template.base import VariableNode
 
 from django_rusty_templates import Engine
 from django_rusty_templates.interop import NativeVariableNode
@@ -50,7 +51,8 @@ def test_custom_block_compiler_shares_context_and_renders_native_children(
     assert context["greeting"] == "second"
     assert template.render(context) == "1:&lt;|2:second"
     assert template.extra_data == {"capture": "compiled"}
-    assert len(template.nodelist.get_nodes_by_type(NativeVariableNode)) == 2
+    assert len(template.nodelist.get_nodes_by_type(VariableNode)) == 2
+    assert not template.nodelist.get_nodes_by_type(NativeVariableNode)
 
 
 class ConstantNode(Node):
