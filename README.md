@@ -145,3 +145,41 @@ inspection and direct indexing. `template.nodelist.rendering_nodes` contains the
 compiled runtime regions. Inspecting Python nodes does not mean their render
 methods execute; the component regression tests disable those methods to verify
 Rust dispatch. Region source spans preserve UTF-8 offsets without rewriting tags.
+
+### Isolating custom tag compilers
+
+Rust can keep the surrounding template native while Django compiles an opaque
+custom tag and the body it consumes. A compiler can opt in with
+`compile_tag.rusty_isolated_compiler = True` (set the attribute on the registered
+compiler function, or on a callable compiler object). For example:
+
+```python
+@register.tag("card")
+def compile_card(parser, token):
+    body = parser.parse(("endcard",))
+    parser.delete_first_token()
+    return CardNode(body)
+
+compile_card.rusty_isolated_compiler = True
+```
+
+Opt in only when the compiler uses the parser within its consumed span. The
+adapter supports nested `parse()`, `compile_filter()`, `next_token()`,
+`prepend_token()`, `delete_first_token()`, loaded tags and filters, custom parser
+attributes, and `extra_data`. It preserves tokens, line numbers, DEBUG positions,
+origins, compiled node identities, and Django context scopes during rendering.
+Native nodes surrounding the custom span never enter Django's parser. A load
+inside the opaque body also makes its filters available to following native
+nodes.
+
+Leave the compiler unannotated when it inspects prior native nodes, depends on
+`command_stack` outside its own body, rewrites future tokens, returns inheritance
+or `must_be_first` nodes, or changes how native built-in tags compile. The full
+Django parser remains the default for such compilers. Templates sharing
+inheritance, named-cycle, or partial registries also retain the compatibility
+path, even with an opted-in compiler. Mixed opted-in and unannotated custom tags
+are checked before compilation so the opted-in compiler isn't called twice.
+`Engine.explain_template()` reports custom compiler boundaries without executing
+compilers. Explicit `.nodelist` inspection of a complex template still parses a
+separate Django tree and may invoke compilers again; its nodes are distinct from
+the nodes used for rendering. Rendering never requests this inspection tree.

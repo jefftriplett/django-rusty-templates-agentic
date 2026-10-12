@@ -1012,7 +1012,18 @@ impl Render for Tag {
                 let output = node
                     .0
                     .bind(py)
-                    .call_method1("render_annotated", (live.bind(py),))?;
+                    .call_method1("render_annotated", (live.bind(py),))
+                    .inspect_err(|error| {
+                        // Native and Django Origin objects differ, so Django's
+                        // annotation hook may leave metadata to the owner.
+                        let culprit = error
+                            .value(py)
+                            .getattr("_culprit_node")
+                            .unwrap_or_else(|_| node.0.bind(py).clone());
+                        if let Ok(token) = culprit.getattr("token") {
+                            let _ = error.value(py).setattr("token", token);
+                        }
+                    })?;
                 context.refresh_formatting_flags(py)?;
                 Cow::Owned(output.extract::<String>()?)
             }

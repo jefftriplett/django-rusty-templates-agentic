@@ -1423,6 +1423,7 @@ enum TagContext<'py> {
         context: SimpleTagContext<'py>,
     },
     EndSimpleBlock,
+    Opaque(Bound<'py, PyAny>),
 }
 
 pub struct Parser<'t, 'py> {
@@ -1442,8 +1443,12 @@ pub struct Parser<'t, 'py> {
     pub last_tag: Option<At>,
     pub warning_origin: Option<String>,
     pub emit_warnings: bool,
+    pub inspect_only: bool,
     pub python_nodes: HashMap<usize, (usize, PythonNode)>,
     skip_until: usize,
+    pub compiler_parser: Option<Py<PyAny>>,
+    compiler_loads: Vec<String>,
+    registered_compilers: HashMap<String, Bound<'py, PyAny>>,
 }
 
 impl<'t, 'py> Parser<'t, 'py> {
@@ -1470,8 +1475,12 @@ impl<'t, 'py> Parser<'t, 'py> {
             last_tag: None,
             warning_origin: origin.map(str::to_string),
             emit_warnings: true,
+            inspect_only: false,
             python_nodes: HashMap::new(),
             skip_until: 0,
+            compiler_parser: None,
+            compiler_loads: Vec::new(),
+            registered_compilers: HashMap::new(),
         }
     }
 
@@ -1498,8 +1507,12 @@ impl<'t, 'py> Parser<'t, 'py> {
             last_tag: None,
             warning_origin: None,
             emit_warnings: true,
+            inspect_only: false,
             python_nodes: HashMap::new(),
             skip_until: 0,
+            compiler_parser: None,
+            compiler_loads: Vec::new(),
+            registered_compilers: HashMap::new(),
         }
     }
 
@@ -2451,6 +2464,10 @@ impl<'t, 'py> Parser<'t, 'py> {
                     self.load_tag(at, tag_name, &tag)?;
                 }
                 match self.external_tags.get(tag_name) {
+                    Some(TagContext::Opaque(compiler)) => {
+                        let compiler = compiler.clone();
+                        Either::Left(self.parse_opaque(at, &compiler)?)
+                    }
                     Some(TagContext::Simple(context)) => {
                         Either::Left(self.parse_simple_tag(context, at, tag.parts)?)
                     }
@@ -2754,7 +2771,12 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(TokenTree::Tag(Tag::SimpleBlockTag(tag)))
     }
 
-    fn parse_load(&mut self, _at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
+    fn parse_load(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
+        let load_source = self.template.content(at).to_string();
+        if let Some(parser) = &self.compiler_parser {
+            parser.bind(self.py).call_method1("load", (&load_source,))?;
+        }
+        self.compiler_loads.push(load_source);
         let tokens: Vec<_> = LoadLexer::new(self.template, parts).collect();
         let mut rev = tokens.iter().rev();
         if let (Some(last), Some(prev)) = (rev.next(), rev.next())
@@ -2795,7 +2817,121 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(TokenTree::Tag(Tag::Load))
     }
 
+    fn register_opaque(&mut self, name: &str, compiler: &Bound<'py, PyAny>) -> PyResult<()> {
+        // These tags share parse-time registries with arbitrary compilers. Keep
+        // that entire template on the compatibility path before invoking one.
+        let shared_state = Lexer::new(self.template).any(|token| {
+            token.token_type == TokenType::Tag
+                && token
+                    .content(self.template)
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|name| {
+                        matches!(
+                            name,
+                            "extends" | "block" | "cycle" | "resetcycle" | "partialdef" | "partial"
+                        )
+                    })
+        });
+        let mixed_compilers = self
+            .engine
+            .libraries
+            .values()
+            .chain(self.engine.template_builtins.iter().skip(3))
+            .any(|library| {
+                let Ok(tags) = self.get_tags(library.bind(self.py)) else {
+                    return true;
+                };
+                tags.iter().any(|(name, candidate)| {
+                    let generated = candidate
+                        .getattr("__code__")
+                        .and_then(|code| code.getattr("co_name"))
+                        .is_ok_and(|name| {
+                            name.extract::<String>()
+                                .is_ok_and(|name| name == "compile_func")
+                        });
+                    let full_parser = candidate
+                        .getattr("rusty_requires_full_parser")
+                        .is_ok_and(|value| value.is_truthy().unwrap_or(true));
+                    !generated
+                        && (full_parser
+                            || !candidate
+                                .getattr("rusty_isolated_compiler")
+                                .is_ok_and(|value| value.is_truthy().unwrap_or(false)))
+                        && Lexer::new(self.template).any(|token| {
+                            token.token_type == TokenType::Tag
+                                && token.content(self.template).split_whitespace().next()
+                                    == Some(name.as_str())
+                        })
+                })
+            });
+        if self.inspect_only
+            || mixed_compilers
+            || !compiler
+                .getattr("rusty_isolated_compiler")
+                .is_ok_and(|value| value.is_truthy().unwrap_or(false))
+            || shared_state
+            || compiler
+                .getattr("rusty_requires_full_parser")
+                .is_ok_and(|value| value.is_truthy().unwrap_or(true))
+        {
+            todo!("Fully custom tag")
+        }
+        self.external_tags
+            .insert(name.to_string(), TagContext::Opaque(compiler.clone()));
+        Ok(())
+    }
+
+    fn parse_opaque(
+        &mut self,
+        at: At,
+        compiler: &Bound<'py, PyAny>,
+    ) -> Result<TokenTree, PyParseError> {
+        if self.compiler_parser.is_none() {
+            let parser = self
+                .py
+                .import("django_rusty_templates.compiler")?
+                .getattr("CompilerParser")?
+                .call1((
+                    self.template.0,
+                    crate::template::django_rusty_templates::PyEngine {
+                        engine: self.engine.clone(),
+                    },
+                    self.warning_origin.as_deref(),
+                    self.origin,
+                ))?;
+            for source in &self.compiler_loads {
+                parser.call_method1("load", (source,))?;
+            }
+            self.compiler_parser = Some(parser.unbind());
+        }
+        let parser = self
+            .compiler_parser
+            .as_ref()
+            .expect("compiler parser initialized")
+            .bind(self.py);
+        let (node, end): (Py<PyAny>, usize) = parser
+            .call_method1("compile", (at.0, compiler))?
+            .extract()?;
+        let filters = self.get_filters(parser)?;
+        let tags = self.get_tags(parser)?;
+        self.external_filters.extend(filters);
+        for (name, tag) in tags {
+            if self
+                .registered_compilers
+                .get(&name)
+                .is_none_or(|registered| !registered.is(&tag))
+            {
+                self.register_tag(&name, tag)?;
+            }
+        }
+        self.skip_until = end;
+        Ok(TokenTree::Tag(Tag::PythonNode(PythonNode(Arc::new(node)))))
+    }
+
     fn register_tag(&mut self, name: &str, tag: Bound<'py, PyAny>) -> PyResult<()> {
+        self.registered_compilers
+            .insert(name.to_string(), tag.clone());
         // End markers are recognized even without a matching opening tag. Reading
         // their names does not validate or compile the tag's callable.
         if let Ok(code) = tag.getattr("__code__") {
@@ -2826,10 +2962,10 @@ impl<'t, 'py> Parser<'t, 'py> {
         tag: &Bound<'py, PyAny>,
     ) -> Result<(), PyParseError> {
         let Ok(closure) = tag.getattr("__closure__") else {
-            todo!("Fully custom tag")
+            return self.register_opaque(name, tag).map_err(Into::into);
         };
         let tag = if closure.is_none() {
-            todo!("Fully custom tag")
+            return self.register_opaque(name, tag).map_err(Into::into);
         } else {
             let tag_code = tag.getattr("__code__")?;
             let closure_names: Vec<String> = tag_code.getattr("co_freevars")?.extract()?;
@@ -2851,7 +2987,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                 .iter()
                 .all(|required| closure_names.iter().any(|name| name == required))
             {
-                todo!("Fully custom tag")
+                return self.register_opaque(name, tag).map_err(Into::into);
             }
             let closure_values = closure
                 .try_iter()?
