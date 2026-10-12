@@ -17,11 +17,15 @@ from types import ModuleType
 import django
 from django.conf import settings
 from django.template import Context, Engine as DjangoEngine, Library, Node
+from django.urls import path
 
 from django_rusty_templates import Engine
 
 
 def component_library():
+    urls = ModuleType("rusty_component_benchmark_urls")
+    urls.urlpatterns = [path("", lambda request: None, name="benchmark_home")]
+    sys.modules[urls.__name__] = urls
     module = ModuleType("rusty_component_benchmark")
     module.register = Library()
     sys.modules[module.__name__] = module
@@ -61,7 +65,11 @@ def main():
     if min(args.number, args.repeat, args.iterations) <= 0:
         parser.error("number, repeat and iterations must be positive")
     if not settings.configured:
-        settings.configure(USE_I18N=False, SECRET_KEY="benchmark")
+        settings.configure(
+            USE_I18N=False,
+            SECRET_KEY="benchmark",
+            ROOT_URLCONF="rusty_component_benchmark_urls",
+        )
     results = {}
     values = {"values": list(range(args.iterations))}
     libraries = component_library()
@@ -72,7 +80,7 @@ def main():
             ("two", "{{ i }}{{ i }}"),
             (
                 "components",
-                "{% badge i %}/{{ i }}/{% card i %}/{% custom i %}/{{ seen }}/{% include 'part.html' with value=i %}|",
+                "{% badge i %}/{{ i }}/{% card i %}/{% custom i %}/{{ seen }}/{% include 'part.html' with value=i %}/{% url 'benchmark_home' %}|",
             ),
         ]:
             source = (
@@ -82,7 +90,7 @@ def main():
                 + "{% endfor %}"
             )
             expected = "".join(
-                f"badge:{i}/{i}/card:{i}/custom:{i}/{i}/part:{i}|"
+                f"badge:{i}/{i}/card:{i}/custom:{i}/{i}/part:{i}//|"
                 if shape == "components"
                 else "x"
                 if shape == "text"
@@ -132,6 +140,49 @@ def main():
                             / args.iterations
                             * 1e6
                         )
+    fixed_results = {}
+    for debug in [False, True]:
+        for shape, source in [
+            ("flat", "content"),
+            (
+                "inheritance",
+                '{% extends "base.html" %}{% block content %}content{% endblock %}',
+            ),
+        ]:
+            loader = (
+                "django.template.loaders.locmem.Loader",
+                {
+                    "page.html": source,
+                    "base.html": "{% block content %}base{% endblock %}",
+                },
+            )
+            for name, kind in [("rusty", Engine), ("django", DjangoEngine)]:
+                for cached in [True, False]:
+                    loaders = (
+                        [("django.template.loaders.cached.Loader", [loader])]
+                        if cached
+                        else [loader]
+                    )
+                    engine = kind(loaders=loaders, debug=debug)
+                    for render_path in ["loaded", "load_and_render"]:
+                        template = engine.get_template("page.html")
+
+                        def render_fixed():
+                            current = (
+                                engine.get_template("page.html")
+                                if render_path == "load_and_render"
+                                else template
+                            )
+                            return current.render(Context({}))
+
+                        for _ in range(3):
+                            assert render_fixed() == "content"
+                        samples = timeit.repeat(
+                            render_fixed, number=args.number, repeat=args.repeat
+                        )
+                        fixed_results[
+                            f"debug={debug}/cached={cached}/{shape}/{name}/{render_path}"
+                        ] = statistics.median(samples) / args.number * 1e6
     report = {
         "python": platform.python_version(),
         "django": django.get_version(),
@@ -140,6 +191,7 @@ def main():
         "repeat": args.repeat,
         "iterations": args.iterations,
         "microseconds_per_iteration": results,
+        "microseconds_per_render": fixed_results,
     }
     if args.json_output:
         args.json_output.write_text(json.dumps(report, indent=2) + "\n")
@@ -150,15 +202,19 @@ def main():
             if baseline[field] != report[field]:
                 raise SystemExit(f"Incompatible baseline: {field}")
         failures = []
-        for key, value in results.items():
+        for key, value in {**results, **fixed_results}.items():
             if "/rusty/" not in key:
                 continue
-            reference = baseline["microseconds_per_iteration"][key]
+            metric = (
+                "microseconds_per_iteration"
+                if key in results
+                else "microseconds_per_render"
+            )
+            measurements = report[metric]
+            reference = baseline[metric][key]
             # The unchanged Django arm calibrates CPU drift between builds.
             django_key = key.replace("/rusty/", "/django/")
-            control_ratio = (
-                results[django_key] / baseline["microseconds_per_iteration"][django_key]
-            )
+            control_ratio = measurements[django_key] / baseline[metric][django_key]
             ratio = (value / reference) / control_ratio
             if ratio > 1 + args.max_regression:
                 failures.append(f"{key}: {ratio:.2f}x baseline relative to Django")
