@@ -2492,7 +2492,8 @@ pub mod django_rusty_templates {
             // Importing large caller contexts costs more than binding a live
             // Context for flat templates. Keep small contexts and subclasses on
             // their existing path, and scoped tags on the native scope bridge.
-            let flat_live_context = processor_index.is_none()
+            let flat_live_context = !already_bound
+                && processor_index.is_none()
                 && self
                     .nodes
                     .iter()

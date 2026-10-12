@@ -50,8 +50,10 @@ def render_case(engine, source, filename, path, mode, size, iterations, shape):
     depth = len(context.dicts)
 
     def render():
-        nonlocal counter
+        nonlocal counter, error
         counter = 0
+        if mode == "exception":
+            error = RuntimeError("benchmark callback")
         current = (
             engine.get_template(filename) if path == "load_and_render" else template
         )
