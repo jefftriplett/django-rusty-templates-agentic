@@ -18,6 +18,7 @@ use types::{Content, Context};
 
 pub type ResolveResult<'t, 'py> = Result<Option<Content<'t, 'py>>, PyRenderError>;
 pub type RenderResult<'t> = Result<Cow<'t, str>, PyRenderError>;
+pub type RenderIntoResult = Result<(), PyRenderError>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResolveFailures {
@@ -46,6 +47,19 @@ pub trait Render {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> RenderResult<'t>;
+
+    /// Append output while keeping Python-owned text alive only for the copy.
+    /// Capture boundaries can retain the default owned-result implementation.
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> RenderIntoResult {
+        output.push_str(&self.render(py, template, context)?);
+        Ok(())
+    }
 }
 
 /// Trait for evaluating an expression in a boolean context
@@ -91,6 +105,19 @@ where
             None => Ok(Cow::Borrowed("")),
         }
     }
+
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> RenderIntoResult {
+        if let Some(content) = self.resolve(py, template, context, ResolveFailures::Raise)? {
+            content.render_into(context, output)?;
+        }
+        Ok(())
+    }
 }
 
 impl<T> Render for Vec<T>
@@ -108,12 +135,22 @@ where
             1 => self[0].render(py, template, context),
             _ => {
                 let mut rendered = String::new();
-                for node in self {
-                    rendered.push_str(&node.render(py, template, context)?);
-                }
+                self.render_into(py, template, context, &mut rendered)?;
                 Ok(Cow::Owned(rendered))
             }
         }
+    }
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> RenderIntoResult {
+        for node in self {
+            node.render_into(py, template, context, output)?;
+        }
+        Ok(())
     }
 }
 
