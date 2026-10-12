@@ -2500,10 +2500,39 @@ pub mod django_rusty_templates {
                         .getattr("template")
                         .is_ok_and(|template| !template.is_none())
                 });
+            // Importing large caller contexts costs more than binding a live
+            // Context for flat templates. Keep small contexts and subclasses on
+            // their existing path, and scoped tags on the native scope bridge.
+            // Dense templates benefit from native lookup per variable; reserve
+            // this path for at least eight bindings per rendering node.
+            let flat_live_context = !already_bound
+                && processor_index.is_none()
+                && request.is_none()
+                && self
+                    .nodes
+                    .iter()
+                    .any(|node| matches!(node, TokenTree::Variable(_) | TokenTree::Filter(_)))
+                && context.as_ref().is_some_and(|input| {
+                    input.get_type().as_any().is(context_class)
+                        && input
+                            .getattr("dicts")
+                            .and_then(|dicts| dicts.cast_into::<PyList>().map_err(Into::into))
+                            .is_ok_and(|dicts| {
+                                dicts.iter().any(|dict| {
+                                    dict.cast::<PyDict>().is_ok_and(|dict| {
+                                        dict.len() >= 64 && dict.len() / 8 >= self.nodes.len()
+                                    })
+                                })
+                            })
+                })
+                && self
+                    .nodes
+                    .iter()
+                    .all(|node| !matches!(node, TokenTree::Tag(_)));
             // Opaque callbacks and native nodes can both read a caller-owned
             // Context directly. No flatten/import/writeback is needed here.
             if is_django_context
-                && self.has_python_callbacks
+                && (self.has_python_callbacks || flat_live_context)
                 && processor_index.is_none()
                 && request.is_none()
             {
