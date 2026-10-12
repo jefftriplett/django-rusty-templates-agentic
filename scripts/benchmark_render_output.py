@@ -6,6 +6,7 @@ are synthetic warm renders, not HTTP or allocation measurements.
 Each paired round normalizes per-operation timings across the engines.
 Each case runs in a fresh process so earlier fixtures cannot alter its allocator
 or template caches; Django and Rusty remain paired within that process.
+Three independent processes per case reduce sensitivity to isolated outliers.
 """
 
 import argparse
@@ -17,6 +18,7 @@ import os
 import random
 import sys
 import subprocess
+import statistics
 import tempfile
 from pathlib import Path
 from types import ModuleType
@@ -67,7 +69,7 @@ def fixtures():
     return cases
 
 
-ISOLATION = "fresh-process-per-case-v1"
+ISOLATION = "fresh-process-per-case-v2"
 
 
 def case_keys(cases):
@@ -80,48 +82,61 @@ def case_keys(cases):
     ]
 
 
-def isolated_report(keys, number, repeat):
-    """Start a fresh interpreter for each case, pairing both engines inside it."""
+def isolated_report(keys, number, repeat, process_repeats=3):
+    """Pair engines in fresh processes and take medians across independent runs."""
     combined = None
     with tempfile.TemporaryDirectory(prefix="rusty-output-reports-") as directory:
         for index, key in enumerate(keys):
-            output = Path(directory, f"{index}.json")
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(__file__).resolve()),
-                    "--only-case",
-                    key,
-                    "--number",
-                    str(number),
-                    "--repeat",
-                    str(repeat),
-                    "--json-output",
-                    str(output),
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-            )
-            report = json.loads(output.read_text())
-            expected = {f"{key}/django", f"{key}/rusty"}
-            if set(report["microseconds"]) != expected or set(
-                report["paired_ratios"]
-            ) != {key}:
-                raise ValueError(f"Unexpected child cases: {key}")
-            if combined is None:
-                combined = {**report, "microseconds": {}, "paired_ratios": {}}
-            for field, value in report.items():
-                if (
-                    field not in ("microseconds", "paired_ratios")
-                    and combined[field] != value
-                ):
-                    raise ValueError(f"Incompatible child report: {field}")
+            samples = []
+            for process in range(process_repeats):
+                output = Path(directory, f"{index}-{process}.json")
+                subprocess.run(
+                    [
+                        sys.executable,
+                        str(Path(__file__).resolve()),
+                        "--only-case",
+                        key,
+                        "--number",
+                        str(number),
+                        "--repeat",
+                        str(repeat),
+                        "--json-output",
+                        str(output),
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                )
+                report = json.loads(output.read_text())
+                expected = {f"{key}/django", f"{key}/rusty"}
+                if set(report["microseconds"]) != expected or set(
+                    report["paired_ratios"]
+                ) != {key}:
+                    raise ValueError(f"Unexpected child cases: {key}")
+                if combined is None:
+                    combined = {**report, "microseconds": {}, "paired_ratios": {}}
+                for field, value in report.items():
+                    if (
+                        field not in ("microseconds", "paired_ratios")
+                        and combined[field] != value
+                    ):
+                        raise ValueError(f"Incompatible child report: {field}")
+                samples.append(report)
             if key in combined["paired_ratios"]:
                 raise ValueError(f"Duplicate child case: {key}")
-            combined["microseconds"].update(report["microseconds"])
-            combined["paired_ratios"].update(report["paired_ratios"])
+            combined["microseconds"].update(
+                {
+                    name: statistics.median(
+                        sample["microseconds"][name] for sample in samples
+                    )
+                    for name in expected
+                }
+            )
+            combined["paired_ratios"][key] = statistics.median(
+                sample["paired_ratios"][key] for sample in samples
+            )
     if combined is None:
         raise ValueError("No benchmark cases")
+    combined["process_repeats"] = process_repeats
     return combined
 
 
@@ -141,6 +156,7 @@ def finish_report(report, args):
             "minimum_duration",
             "allocator_mmap_threshold",
             "isolation",
+            "process_repeats",
         ):
             if base.get(field) != report[field]:
                 raise SystemExit(f"Incompatible baseline: {field}")
@@ -161,6 +177,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--number", type=int, default=20)
     parser.add_argument("--repeat", type=int, default=5)
+    parser.add_argument("--process-repeats", type=int, default=3)
     parser.add_argument("--json-output", type=Path)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--max-regression", type=float, default=0.15)
@@ -168,11 +185,14 @@ def main():
         "--only-case", choices=case_keys(fixtures()), help=argparse.SUPPRESS
     )
     args = parser.parse_args()
-    if min(args.number, args.repeat) <= 0:
-        parser.error("number and repeat must be positive")
+    if min(args.number, args.repeat, args.process_repeats) <= 0:
+        parser.error("number, repeat and process-repeats must be positive")
     if args.only_case is None:
         finish_report(
-            isolated_report(case_keys(fixtures()), args.number, args.repeat), args
+            isolated_report(
+                case_keys(fixtures()), args.number, args.repeat, args.process_repeats
+            ),
+            args,
         )
         return
     if not settings.configured:
@@ -283,6 +303,7 @@ def main():
         "microseconds": results,
         "measurement": MEASUREMENT,
         "isolation": ISOLATION,
+        "process_repeats": 1,
         "minimum_duration": MINIMUM_DURATION,
         "paired_ratios": paired_ratios,
     }

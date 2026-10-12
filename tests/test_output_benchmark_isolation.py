@@ -34,7 +34,7 @@ def test_each_case_starts_a_new_interpreter_and_merges_only_its_pair(monkeypatch
         )
 
     monkeypatch.setattr(benchmark.subprocess, "run", run)
-    report = benchmark.isolated_report(keys, 20, 5)
+    report = benchmark.isolated_report(keys, 20, 5, process_repeats=1)
     assert len(calls) == 2
     assert all(command[0] == benchmark.sys.executable for command in calls)
     assert all(
@@ -72,7 +72,7 @@ def test_bad_child_reports_fail_the_benchmark(monkeypatch, change):
 
     monkeypatch.setattr(benchmark.subprocess, "run", run)
     with pytest.raises((ValueError, benchmark.subprocess.CalledProcessError)):
-        benchmark.isolated_report(keys, 20, 5)
+        benchmark.isolated_report(keys, 20, 5, process_repeats=1)
 
 
 def test_old_shared_process_baselines_are_rejected(tmp_path):
@@ -86,6 +86,7 @@ def test_old_shared_process_baselines_are_rejected(tmp_path):
         "minimum_duration": benchmark.MINIMUM_DURATION,
         "allocator_mmap_threshold": None,
         "isolation": benchmark.ISOLATION,
+        "process_repeats": 3,
         "microseconds": {"case/django": 10, "case/rusty": 5},
         "paired_ratios": {"case": 0.5},
     }
@@ -108,6 +109,7 @@ def test_isolation_preserves_regression_gate(tmp_path):
         "minimum_duration": benchmark.MINIMUM_DURATION,
         "allocator_mmap_threshold": None,
         "isolation": benchmark.ISOLATION,
+        "process_repeats": 3,
         "microseconds": {"case/django": 10, "case/rusty": 6},
         "paired_ratios": {"case": 0.6},
     }
@@ -124,7 +126,35 @@ def test_real_children_preserve_fixture_identity_across_loop_and_text_cases():
         "debug=False/cached=False/exact_8/loaded",
         "debug=True/cached=True/shallow/from_string",
     ]
-    report = benchmark.isolated_report(keys, number=1, repeat=1)
+    report = benchmark.isolated_report(keys, number=1, repeat=1, process_repeats=1)
     assert report["isolation"] == benchmark.ISOLATION
     assert set(report["paired_ratios"]) == set(keys)
     assert all(value > 0 for value in report["microseconds"].values())
+
+
+def test_independent_process_median_rejects_an_isolated_control_outlier(monkeypatch):
+    key = "debug=False/cached=False/example/loaded"
+    ratios = iter([1.2, 1.8, 1.81])
+    calls = []
+
+    def run(command, **options):
+        ratio = next(ratios)
+        calls.append(command)
+        output = Path(command[command.index("--json-output") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "isolation": benchmark.ISOLATION,
+                    "process_repeats": 1,
+                    "microseconds": {f"{key}/django": 75 / ratio, f"{key}/rusty": 75},
+                    "paired_ratios": {key: ratio},
+                }
+            )
+        )
+
+    monkeypatch.setattr(benchmark.subprocess, "run", run)
+    report = benchmark.isolated_report([key], 20, 7)
+    assert len(calls) == 3
+    assert report["paired_ratios"][key] == 1.8
+    assert report["microseconds"][f"{key}/django"] == 75 / 1.8
+    assert report["process_repeats"] == 3
