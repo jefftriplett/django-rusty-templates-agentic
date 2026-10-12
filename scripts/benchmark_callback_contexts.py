@@ -30,6 +30,10 @@ def render_case(engine, source, filename, path, mode, size, iterations, shape):
     context = Context(
         {"items": list(range(iterations)), **{f"padding_{i}": i for i in range(size)}}
     )
+    plain = shape.startswith("plain_")
+    if plain:
+        context["value"] = "value" if mode == "string" else 123
+    expected = str(context["value"]) * source.count("{{") if plain else ""
     retained = []
     error = RuntimeError("benchmark callback")
     counter = 0
@@ -65,7 +69,7 @@ def render_case(engine, source, filename, path, mode, size, iterations, shape):
             # every timed render and distort subsequent measurements.
             error.__traceback__ = None
         else:
-            assert mode != "exception" and output == ""
+            assert mode != "exception" and output == expected
         assert len(context.dicts) == depth
         retained.clear()
 
@@ -90,8 +94,10 @@ def main():
     sources = {
         "scoped": "{% for i in items %}{{ callback }}{% endfor %}",
         "flat": "{{ callback }}" * args.iterations,
+        "plain_1": "{{ value }}",
+        "plain_1000": "{{ value }}" * 1000,
     }
-    results, paired = {}, {}
+    results, plain_results, paired = {}, {}, {}
     shuffle = random.Random(133)
     with tempfile.TemporaryDirectory(prefix="rusty-callback-benchmark-") as directory:
         for shape, source in sources.items():
@@ -112,8 +118,13 @@ def main():
                 }
                 for shape, source in sources.items():
                     for path in ("string", "loaded", "load_and_render"):
-                        for size in (0, 16, 32, 64, 1000):
-                            for mode in ("read", "mutate", "retain", "exception"):
+                        plain = shape.startswith("plain_")
+                        for size in (1000,) if plain else (0, 16, 32, 64, 1000):
+                            for mode in (
+                                ("string", "integer")
+                                if plain
+                                else ("read", "mutate", "retain", "exception")
+                            ):
                                 key = f"debug={debug}/cached={cached}/{shape}_{size}_{mode}"
                                 renders = {
                                     name: render_case(
@@ -141,13 +152,17 @@ def main():
                                     }
                                     for name, sample in measured.items():
                                         samples[name].append(
-                                            sample / args.number / args.iterations * 1e6
+                                            sample
+                                            / args.number
+                                            / (1 if plain else args.iterations)
+                                            * 1e6
                                         )
                                     ratios.append(
                                         measured["rusty"] / measured["django"]
                                     )
                                 for name, values in samples.items():
-                                    results[f"{key}/{name}/{path}"] = statistics.median(
+                                    target = plain_results if plain else results
+                                    target[f"{key}/{name}/{path}"] = statistics.median(
                                         values
                                     )
                                 paired[f"{key}/{path}"] = statistics.median(ratios)
@@ -158,6 +173,7 @@ def main():
         "repeat": args.repeat,
         "iterations": args.iterations,
         "microseconds_per_callback": results,
+        "plain_microseconds_per_render": plain_results,
         "paired_ratio_vs_django": paired,
     }
     if args.json_output:

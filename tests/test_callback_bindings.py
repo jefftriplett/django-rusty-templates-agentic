@@ -244,3 +244,64 @@ def test_large_flat_reentrant_render_restores_parent_template(debug):
     assert context.template is None
     assert context.render_context.template is None
     assert len(context.render_context.dicts) == original_depth
+
+
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("value", ["value", 123])
+def test_dense_flat_templates_keep_native_context_import(monkeypatch, debug, value):
+    original_flatten = Context.flatten
+    flattened = []
+
+    def flatten(context):
+        flattened.append(context)
+        return original_flatten(context)
+
+    monkeypatch.setattr(Context, "flatten", flatten)
+    context = Context({"value": value, **{f"key{i}": i for i in range(1000)}})
+    source = "{{ value }}" * 1000
+    assert Engine(debug=debug).from_string(source).render(context) == str(value) * 1000
+    assert flattened == [context]
+
+
+@pytest.mark.parametrize("debug", [False, True])
+def test_large_sparse_dict_subclass_lookup_matches_django(debug):
+    from django.template import Engine as DjangoEngine
+
+    class Mapping(dict):
+        def __getitem__(self, key):
+            if key == "value":
+                return "live value"
+            return super().__getitem__(key)
+
+    def context():
+        return Context(
+            Mapping(value="stored value", **{f"key{i}": i for i in range(1000)})
+        )
+
+    source = "{{ value }}"
+    expected = DjangoEngine(debug=debug).from_string(source).render(context())
+    assert (
+        Engine(debug=debug).from_string(source).render(context())
+        == expected
+        == "live value"
+    )
+
+
+@pytest.mark.parametrize("debug", [False, True])
+def test_large_flat_callback_flags_apply_to_filters(debug):
+    context = Context({"values": ["<&>"], **{f"key{i}": i for i in range(1000)}})
+
+    def callback():
+        context.autoescape = False
+        context.use_l10n = False
+        context.use_tz = False
+        return ""
+
+    context["callback"] = callback
+    assert (
+        Engine(debug=debug)
+        .from_string('{{ callback }}{{ values|join:"," }}')
+        .render(context)
+        == "<&>"
+    )
+    assert context.autoescape is context.use_l10n is context.use_tz is False
