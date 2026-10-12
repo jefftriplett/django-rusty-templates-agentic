@@ -367,3 +367,37 @@ def test_warm_native_parent_does_not_cross_python_loader_bridge(monkeypatch, deb
     monkeypatch.setattr("django_rusty_templates.interop.find_template", unexpected)
     for _ in range(3):
         assert child.render(Context({"value": "<&>"})) == "child &lt;&amp;&gt;"
+
+
+def test_cached_callable_snapshots_preserve_bindings_and_scope_restoration():
+    source = "{% for item in items %}{{ capture }}:{{ value }};{% endfor %}/{{ capture }}:{{ value }}"
+    retained = []
+    context = Context(
+        {
+            "items": [1, 2],
+            "item": "outside",
+            "value": "original",
+            **{f"padding_{i}": i for i in range(100)},
+        }
+    )
+
+    def capture():
+        retained.append(context.dicts[-1])
+        if "forloop" in context:
+            context["value"] = f"changed-{context['item']}"
+        return context["item"]
+
+    context["capture"] = capture
+    template = Engine().from_string(source)
+    assert template.render(context) == "1:changed-1;2:changed-2;/outside:original"
+    assert [snapshot["item"] for snapshot in retained] == [1, 2, "outside"]
+    assert [snapshot["value"] for snapshot in retained] == [
+        "changed-1",
+        "changed-2",
+        "original",
+    ]
+    assert len({id(snapshot) for snapshot in retained}) == 3
+    assert all(snapshot["padding_99"] == 99 for snapshot in retained)
+    assert context["item"] == "outside"
+    assert context["value"] == "original"
+    assert "forloop" not in context

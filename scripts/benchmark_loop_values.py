@@ -78,6 +78,8 @@ def main():
             ("text", "x"),
             ("one", "{{ i }}"),
             ("two", "{{ i }}{{ i }}"),
+            ("captured", "{{ lookup }}"),
+            ("captured_large", "{{ lookup }}"),
             (
                 "components",
                 "{% badge i %}/{{ i }}/{% card i %}/{% custom i %}/{{ seen }}/{% include 'part.html' with value=i %}/{% url 'benchmark_home' %}|",
@@ -94,7 +96,8 @@ def main():
                 if shape == "components"
                 else "x"
                 if shape == "text"
-                else str(i) * (1 if shape == "one" else 2)
+                else str(i)
+                * (1 if shape in ("one", "captured", "captured_large") else 2)
                 for i in values["values"]
             )
             loader = (
@@ -119,6 +122,19 @@ def main():
                             if path == "string"
                             else engine.get_template("loop.html")
                         )
+                        captured = None
+                        if shape in ("captured", "captured_large"):
+                            padding = (
+                                {f"unused_{i}": i for i in range(100)}
+                                if shape == "captured_large"
+                                else {}
+                            )
+                            captured = Context({**values, **padding})
+
+                            def lookup():
+                                return captured["i"]
+
+                            captured["lookup"] = lookup
 
                         def render():
                             current = (
@@ -126,7 +142,9 @@ def main():
                                 if path == "load_and_render"
                                 else template
                             )
-                            return current.render(Context(values))
+                            return current.render(
+                                captured if captured is not None else Context(values)
+                            )
 
                         for _ in range(3):
                             assert render() == expected

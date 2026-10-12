@@ -38,7 +38,7 @@ impl Context {
                 let context = shared
                     .lock_py_attached(py)
                     .expect("context lock is not poisoned");
-                let overlay = context.as_dict(py)?;
+                let overlay = context.callback_snapshot(py)?;
                 if context.get_for_loop(0).is_some() {
                     overlay.set_item("forloop", context.loop_dictionary(py, 0)?)?;
                 }

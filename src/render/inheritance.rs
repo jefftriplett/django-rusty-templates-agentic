@@ -162,21 +162,22 @@ impl Context {
                         current.origin().into_pyobject(py)?.into_any().unbind(),
                     ));
                 }
-                let skip = PyList::empty(py);
-                for origin in &self.inheritance_history {
-                    skip.append(origin.bind(py))?;
-                }
                 let engine = &self.root_template.as_ref().unwrap_or(&current).engine;
                 let cached = parent
                     .extract::<String>()
                     .ok()
                     .and_then(|name| engine.cached_native_template(py, &name));
                 if let Some(cached) = cached {
-                    let origin = cached.origin().into_pyobject(py)?.into_any();
+                    let origin = cached.origin();
                     // Compare full origins, not just template names: aliases
                     // and same-name overrides must still honor Django skips.
-                    if !skip.contains(&origin)? {
-                        self.inheritance_history.push(Arc::new(origin.unbind()));
+                    if !self
+                        .inheritance_history
+                        .iter()
+                        .any(|previous| origin.matches(previous.bind(py)))
+                    {
+                        self.inheritance_history
+                            .push(Arc::new(origin.into_pyobject(py)?.into_any().unbind()));
                         self.add_blocks(&current);
                         if !cached.extends_parent() {
                             self.add_blocks(&Arc::new(cached.clone()));
@@ -185,6 +186,10 @@ impl Context {
                             .render_chain(py, self)
                             .map(|output| std::borrow::Cow::Owned(output.into_owned()));
                     }
+                }
+                let skip = PyList::empty(py);
+                for origin in &self.inheritance_history {
+                    skip.append(origin.bind(py))?;
                 }
                 let loaded = py
                     .import("django_rusty_templates.interop")?

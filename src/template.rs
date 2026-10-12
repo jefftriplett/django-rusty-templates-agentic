@@ -482,6 +482,24 @@ pub mod django_rusty_templates {
         loader: Option<LoaderView>,
     }
 
+    impl Origin {
+        pub(crate) fn matches(&self, other: &Bound<'_, PyAny>) -> bool {
+            if let Ok(other) = other.extract::<PyRef<'_, Self>>() {
+                return self.name == other.name && self.loader == other.loader;
+            }
+            other
+                .getattr("_native_origin")
+                .ok()
+                .and_then(|origin| {
+                    origin
+                        .extract::<PyRef<'_, Self>>()
+                        .ok()
+                        .map(|other| self.name == other.name && self.loader == other.loader)
+                })
+                .unwrap_or(false)
+        }
+    }
+
     #[pymethods]
     impl Origin {
         fn __str__(&self) -> &str {
@@ -494,12 +512,7 @@ pub mod django_rusty_templates {
             ))
         }
         fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
-            let other = other
-                .getattr("_native_origin")
-                .unwrap_or_else(|_| other.clone());
-            other
-                .extract::<PyRef<'_, Self>>()
-                .is_ok_and(|other| self.name == other.name && self.loader == other.loader)
+            self.matches(other)
         }
         #[getter]
         fn loader_name(&self, py: Python<'_>) -> Option<String> {

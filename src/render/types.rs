@@ -234,6 +234,25 @@ impl Context {
         Ok(())
     }
 
+    /// Materialize a retained callback snapshot using the immutable base and
+    /// only the bindings changed by native scopes. Python may mutate or retain
+    /// the returned dict, so every callback still gets its own copy.
+    pub(crate) fn callback_snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let mut cached = self.django_context_base.borrow_mut();
+        if cached.is_none() {
+            *cached = Some(self.as_dict(py)?.unbind());
+        }
+        let snapshot = cached.as_ref().expect("base initialized").bind(py).copy()?;
+        for name in &self.django_context_changes {
+            if let Some(value) = self.get(name) {
+                snapshot.set_item(name, value)?;
+            } else if snapshot.contains(name)? {
+                snapshot.del_item(name)?;
+            }
+        }
+        Ok(snapshot)
+    }
+
     pub fn django_context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if let Some(context) = &self.formatting_context {
             return Ok(context.bind(py).clone());
