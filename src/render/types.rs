@@ -40,6 +40,19 @@ struct ValueFormattingContext {
     use_tz: Option<bool>,
 }
 
+// Two autoescape flags and three states for each optional flag. Each adapter
+// is immutable, so retained Python references keep their original flags.
+static VALUE_FORMATTING_CONTEXTS: [PyOnceLock<Py<ValueFormattingContext>>; 18] =
+    [const { PyOnceLock::new() }; 18];
+
+fn formatting_flag_index(flag: Option<bool>) -> usize {
+    match flag {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    }
+}
+
 #[derive(Clone)]
 pub struct ForLoop {
     count: usize,
@@ -354,15 +367,21 @@ impl Context {
         if let Some(context) = &self.formatting_context {
             return Ok(context.bind(py).clone());
         }
-        Ok(Bound::new(
-            py,
-            ValueFormattingContext {
-                autoescape: self.autoescape,
-                use_l10n: self.use_l10n,
-                use_tz: self.use_tz,
-            },
-        )?
-        .into_any())
+        let index = usize::from(self.autoescape) * 9
+            + formatting_flag_index(self.use_l10n) * 3
+            + formatting_flag_index(self.use_tz);
+        VALUE_FORMATTING_CONTEXTS[index]
+            .get_or_try_init(py, || {
+                Py::new(
+                    py,
+                    ValueFormattingContext {
+                        autoescape: self.autoescape,
+                        use_l10n: self.use_l10n,
+                        use_tz: self.use_tz,
+                    },
+                )
+            })
+            .map(|context| context.bind(py).clone().into_any())
     }
 
     pub fn get(&self, key: &str) -> Option<&Py<PyAny>> {
