@@ -209,8 +209,14 @@ impl DivisibleByFilter {
 }
 
 /// Django-backed filters preserve Python protocol and escaping behavior.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DjangoFilter {
-    pub name: &'static str,
+    pub filter: Arc<Py<PyAny>>,
     pub argument: Option<Argument>,
+}
+
+impl PartialEq for DjangoFilter {
+    fn eq(&self, other: &Self) -> bool {
+        self.argument == other.argument && self.filter.as_ptr() == other.filter.as_ptr()
+    }
 }
