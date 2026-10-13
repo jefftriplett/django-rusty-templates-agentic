@@ -1807,6 +1807,26 @@ pub mod django_rusty_templates {
         }
 
         pub fn render(&self, py: Python<'_>, context: &mut Context) -> RenderResult<'_> {
+            self.with_render_scope(py, context, |context| self.render_chain(py, context))
+        }
+
+        pub(crate) fn render_into(
+            &self,
+            py: Python<'_>,
+            context: &mut Context,
+            output: &mut String,
+        ) -> crate::render::RenderIntoResult {
+            self.with_render_scope(py, context, |context| {
+                self.render_chain_into(py, context, output)
+            })
+        }
+
+        fn with_render_scope<T>(
+            &self,
+            py: Python<'_>,
+            context: &mut Context,
+            render: impl FnOnce(&mut Context) -> Result<T, PyRenderError>,
+        ) -> Result<T, PyRenderError> {
             let previous_blocks = std::mem::take(&mut context.inheritance_blocks);
             let previous_history = std::mem::take(&mut context.inheritance_history);
             let previous_root = context.root_template.clone();
@@ -1825,7 +1845,7 @@ pub mod django_rusty_templates {
             } else {
                 None
             };
-            let result = self.render_chain(py, context);
+            let result = render(context);
             if let Some(scope) = callback_scope {
                 let cleanup = scope.call_method0("close");
                 if result.is_ok() {
@@ -1978,6 +1998,27 @@ pub mod django_rusty_templates {
                     .extract()?;
                 return Ok(Cow::Owned(output));
             }
+            let mut output = String::with_capacity(self.template.len());
+            self.render_chain_into(py, context, &mut output)?;
+            Ok(Cow::Owned(output))
+        }
+
+        pub(crate) fn render_chain_into(
+            &self,
+            py: Python<'_>,
+            context: &mut Context,
+            output: &mut String,
+        ) -> crate::render::RenderIntoResult {
+            if let Some(renderer) = &self.python_renderer {
+                renderer
+                    .bind(py)
+                    .call_method1("bind_origin", (self.origin(),))?;
+                let rendered = renderer
+                    .bind(py)
+                    .call_method1("render", (context.django_context(py)?,))?;
+                crate::render::types::append_python_string(&rendered, false, output)?;
+                return Ok(());
+            }
             // Django fallbacks already signal via Template._render. Native regions
             // inside those templates are implementation details, not templates.
             if context.instrument_render {
@@ -2028,7 +2069,7 @@ pub mod django_rusty_templates {
                     Some(live.call_method0("flatten")?.extract()?)
                 };
                 context.formatting_context = Some(live.unbind());
-                let result = self.render_body(py, &self.nodes, context);
+                let result = self.render_body_into(py, &self.nodes, context, output);
                 let live = context
                     .formatting_context
                     .take()
@@ -2053,7 +2094,7 @@ pub mod django_rusty_templates {
                 }
                 return result;
             }
-            self.render_body(py, &self.nodes, context)
+            self.render_body_into(py, &self.nodes, context, output)
         }
 
         pub(crate) fn render_body<'a>(

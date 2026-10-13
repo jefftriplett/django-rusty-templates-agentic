@@ -4,7 +4,7 @@
 
 Make local performance checks less sensitive to allocator state and timing outliers, and remove performance comparisons from GitHub Actions. ([#142](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/142), [#144](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/144))
 
-Reduce tag allocations, version lookups, directory copying, and string-loop overhead. ([#154](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/154))
+Reduce rendering allocations and repeated Python lookups in tags, loops, loaders, and value formatting. ([#154](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/154), [#155](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/155))
 
 ## 2026.10.8
 
