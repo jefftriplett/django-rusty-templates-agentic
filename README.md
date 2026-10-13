@@ -125,13 +125,10 @@ and loading plus rendering with explicit cached/uncached loaders and both debug
 settings. Build the extension with `uv run maturin develop --release` first.
 These are synthetic timings, not HTTP request measurements.
 
-The Render performance PR workflow builds the PR base and candidate in release
-mode on the same runner with the same Python dependencies. It saves both reports
-and fails if a Rusty case slows by more than 15% relative to its matching Django
-control. Timing failures should be rerun to distinguish runner noise from a
-reproducible regression. Normal correctness
-CI also rejects full Django Context construction during native loop value
-formatting. Additional loop cases feed the optional CodSpeed dashboard.
+Run performance comparisons locally on a controlled machine, using matching
+Python dependencies and release builds for both revisions. GitHub Actions runs
+correctness checks, not performance comparisons. Correctness tests also reject
+full Django Context construction during native loop value formatting.
 
 `uv run python scripts/benchmark_callback_contexts.py --json-output callbacks.json`
 measures read-only, mutating, retaining and failing captured callables with small

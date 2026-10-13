@@ -45,7 +45,10 @@ Cached request rendering also retains its gains: that report's pooled Rusty/cach
 
 PR #120 removed eager native-variable compilation for mixed DEBUG templates and kept native inheritance parents on their compiled path. `tests/test_debug_mixed_templates.py` checks both loader policies, output, exception identity, source metadata, context cleanup and uncached file freshness; `tests/test_native_mixed_inheritance.py` covers native ancestors across all four DEBUG/cache configurations.
 
-The existing performance workflow compares the component fixture against each PR's base with unchanged Django controls and a 15% normalized regression threshold across all four configurations. This follow-up adds a real first-render measurement and records fixture identity and release provenance. CI artifacts retain the raw timing data. This synthetic gate supplements correctness tests; it cannot guarantee detection of every application workload regression.
+Run the component fixture locally against both revisions with matching Django
+controls, explicit DEBUG/cache settings, and recorded fixture and release
+provenance. GitHub Actions checks correctness only; hosted-runner timings are
+not used to accept or reject performance changes.
 
 ## Reproduce
 

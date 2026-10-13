@@ -23,8 +23,3 @@ jobs:
       contents: read
       actions: read
       pull-requests: write
-  benchmarks:
-    uses: ./.github/workflows/codspeed.yml
-    permissions:
-      contents: read
-      id-token: write
