@@ -35,9 +35,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  compare:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(inputs.suite == 'output' && '["output"]' || '["core", "output"]') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.base_ref || github.sha }}
     steps:
@@ -63,32 +67,30 @@ jobs:
           git worktree add --detach "$RUNNER_TEMP/rusty-base" "$BASE_SHA"
           cd "$RUNNER_TEMP/rusty-base"
           VIRTUAL_ENV="$GITHUB_WORKSPACE/.venv" "$GITHUB_WORKSPACE/.venv/bin/maturin" develop --release
-          if [[ "${{ inputs.suite }}" == output ]]; then
+          if [[ "${{ matrix.suite }}" == output ]]; then
             "$GITHUB_WORKSPACE/.venv/bin/python" "$GITHUB_WORKSPACE/scripts/benchmark_render_output.py" --number 100 --repeat 7 --json-output "$RUNNER_TEMP/output-base.json"
             exit 0
           fi
           "$GITHUB_WORKSPACE/.venv/bin/python" "$GITHUB_WORKSPACE/scripts/benchmark_loop_values.py" --number 50 --repeat 7 --iterations 50 --json-output "$RUNNER_TEMP/base.json"
           "$GITHUB_WORKSPACE/.venv/bin/python" "$GITHUB_WORKSPACE/scripts/benchmark_mixed_templates.py" --number 30 --repeat 7 --json-output "$RUNNER_TEMP/mixed-base.json"
           "$GITHUB_WORKSPACE/.venv/bin/python" "$GITHUB_WORKSPACE/scripts/benchmark_parsing_features.py" --number 30 --repeat 7 --json-output "$RUNNER_TEMP/parsing-base.json"
-          "$GITHUB_WORKSPACE/.venv/bin/python" "$GITHUB_WORKSPACE/scripts/benchmark_render_output.py" --number 100 --repeat 7 --json-output "$RUNNER_TEMP/output-base.json"
           "$GITHUB_WORKSPACE/.venv/bin/python" "$GITHUB_WORKSPACE/scripts/benchmark_callback_contexts.py" --number 15 --repeat 7 --iterations 30 --json-output "$RUNNER_TEMP/callback-base.json"
       - name: Build and measure candidate
         run: |
           uv run maturin develop --release
-          if [[ "${{ inputs.suite }}" == output ]]; then
+          if [[ "${{ matrix.suite }}" == output ]]; then
             uv run python scripts/benchmark_render_output.py --number 100 --repeat 7 --json-output "$RUNNER_TEMP/output-candidate.json" --baseline "$RUNNER_TEMP/output-base.json" --max-regression 0.15
             exit 0
           fi
           uv run python scripts/benchmark_loop_values.py --number 50 --repeat 7 --iterations 50 --json-output "$RUNNER_TEMP/candidate.json" --baseline "$RUNNER_TEMP/base.json" --max-regression 0.15
           uv run python scripts/benchmark_mixed_templates.py --number 30 --repeat 7 --json-output "$RUNNER_TEMP/mixed-candidate.json" --baseline "$RUNNER_TEMP/mixed-base.json" --max-regression 0.15
           uv run python scripts/benchmark_parsing_features.py --number 30 --repeat 7 --json-output "$RUNNER_TEMP/parsing-candidate.json" --baseline "$RUNNER_TEMP/parsing-base.json" --max-regression 0.15
-          uv run python scripts/benchmark_render_output.py --number 100 --repeat 7 --json-output "$RUNNER_TEMP/output-candidate.json" --baseline "$RUNNER_TEMP/output-base.json" --max-regression 0.15
           uv run python scripts/benchmark_callback_contexts.py --number 15 --repeat 7 --iterations 30 --json-output "$RUNNER_TEMP/callback-candidate.json" --baseline "$RUNNER_TEMP/callback-base.json" --max-regression 0.15
       - name: Preserve measurements
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: render-performance
+          name: render-performance-${{ matrix.suite }}
           path: |
             ${{ runner.temp }}/base.json
             ${{ runner.temp }}/candidate.json
@@ -100,3 +102,13 @@ jobs:
             ${{ runner.temp }}/output-candidate.json
             ${{ runner.temp }}/callback-base.json
             ${{ runner.temp }}/callback-candidate.json
+
+  compare:
+    if: always()
+    needs: measure
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every performance suite to pass
+        env:
+          SUITE_RESULT: ${{ needs.measure.result }}
+        run: test "$SUITE_RESULT" = success
