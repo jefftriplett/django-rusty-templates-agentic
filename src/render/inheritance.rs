@@ -101,7 +101,7 @@ impl Context {
             .get_mut(&own.name)
             .and_then(Vec::pop);
         let selected = popped.as_ref().unwrap_or(&own).clone();
-        let mut scoped = self.clone_ref(py);
+        let mut scoped = self.clone_scope(py);
         let marker = BlockMarker {
             entry: selected.clone(),
             inherited,

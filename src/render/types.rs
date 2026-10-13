@@ -106,9 +106,39 @@ pub enum IncludeTemplateKey {
     Vec(Vec<String>),
 }
 
+type BindingMap = HashMap<String, Vec<Py<PyAny>>>;
+
+#[derive(Debug)]
+struct SharedBindings(BindingMap);
+
+impl Clone for SharedBindings {
+    fn clone(&self) -> Self {
+        Python::attach(|py| {
+            Self(
+                self.0
+                    .iter()
+                    .map(|(key, values)| {
+                        (
+                            key.clone(),
+                            values.iter().map(|value| value.clone_ref(py)).collect(),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ScopeBindings {
+    base: Arc<SharedBindings>,
+    overlay: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct Context {
-    context: HashMap<String, Vec<Py<PyAny>>>,
+    context: BindingMap,
+    scope_bindings: Option<ScopeBindings>,
     loops: Vec<ForLoop>,
     pub request: Option<Py<PyAny>>,
     pub autoescape: bool,
@@ -147,6 +177,7 @@ impl Context {
         Self {
             request,
             context,
+            scope_bindings: None,
             autoescape,
             use_l10n: None,
             use_tz: None,
@@ -180,6 +211,7 @@ impl Context {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.iter().map(|v| v.clone_ref(py)).collect()))
                 .collect(),
+            scope_bindings: self.scope_bindings.clone(),
             autoescape: self.autoescape,
             use_l10n: self.use_l10n,
             use_tz: self.use_tz,
@@ -214,6 +246,50 @@ impl Context {
         }
     }
 
+    /// Freeze bindings once per render; child writes copy only the affected stack.
+    /// Parent writes use copy-on-write so retained callback snapshots stay valid.
+    pub(crate) fn clone_scope(&mut self, py: Python<'_>) -> Self {
+        if self.scope_bindings.is_none() {
+            self.scope_bindings = Some(ScopeBindings {
+                base: Arc::new(SharedBindings(std::mem::take(&mut self.context))),
+                overlay: false,
+            });
+        }
+        let mut scoped = self.clone_ref(py);
+        scoped
+            .scope_bindings
+            .as_mut()
+            .expect("scope initialized")
+            .overlay = true;
+        scoped
+    }
+
+    fn visible_bindings(&self) -> impl Iterator<Item = (&String, &Vec<Py<PyAny>>)> {
+        self.scope_bindings
+            .as_ref()
+            .into_iter()
+            .flat_map(|shared| shared.base.0.iter())
+            .filter(|(key, _)| !self.context.contains_key(*key))
+            .chain(self.context.iter())
+    }
+
+    fn bindings_mut(&mut self) -> &mut BindingMap {
+        if let Some(shared) = &mut self.scope_bindings
+            && !shared.overlay
+        {
+            return &mut Arc::make_mut(&mut shared.base).0;
+        }
+        &mut self.context
+    }
+
+    fn has_binding_key(&self, key: &str) -> bool {
+        self.context.contains_key(key)
+            || self
+                .scope_bindings
+                .as_ref()
+                .is_some_and(|shared| shared.base.0.contains_key(key))
+    }
+
     pub fn invalid_value<'py>(
         &self,
         py: Python<'py>,
@@ -231,7 +307,7 @@ impl Context {
 
     pub fn as_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
-        for (key, values) in &self.context {
+        for (key, values) in self.visible_bindings() {
             if let Some(value) = values.last() {
                 dict.set_item(key, value)?;
             }
@@ -298,7 +374,7 @@ impl Context {
         let mut cached_base = self.django_context_base.borrow_mut();
         if cached_base.is_none() {
             let base = PyDict::new(py);
-            for (key, values) in &self.context {
+            for (key, values) in self.visible_bindings() {
                 if let Some(value) = values.last() {
                     base.set_item(key, value)?;
                 }
@@ -385,7 +461,10 @@ impl Context {
     }
 
     pub fn get(&self, key: &str) -> Option<&Py<PyAny>> {
-        self.context.get(key)?.last()
+        if let Some(values) = self.context.get(key) {
+            return values.last();
+        }
+        self.scope_bindings.as_ref()?.base.0.get(key)?.last()
     }
 
     pub fn resolve_root<'py>(
@@ -431,8 +510,7 @@ impl Context {
 
     pub fn display(&self, py: Python<'_>) -> String {
         let context: BTreeMap<_, _> = self
-            .context
-            .iter()
+            .visible_bindings()
             .filter_map(|(k, v)| Some((k, v.last()?.bind(py))))
             .collect();
         format!("{context:?}")
@@ -444,8 +522,14 @@ impl Context {
         if self.django_context_base.get_mut().is_some() {
             self.django_context_changes.insert(key.clone());
         }
+        let inherited = self
+            .scope_bindings
+            .as_ref()
+            .filter(|shared| shared.overlay)
+            .map(|shared| shared.base.clone());
+        let py = value.py();
         let value = value.unbind();
-        match self.context.entry(key) {
+        match self.bindings_mut().entry(key) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let values = entry.get_mut();
                 if replace {
@@ -454,7 +538,16 @@ impl Context {
                 values.push(value);
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(vec![value]);
+                let mut values: Vec<_> = inherited
+                    .as_ref()
+                    .and_then(|base| base.0.get(entry.key()))
+                    .map(|values| values.iter().map(|value| value.clone_ref(py)).collect())
+                    .unwrap_or_default();
+                if replace {
+                    values.pop();
+                }
+                values.push(value);
+                entry.insert(values);
             }
         }
     }
@@ -477,7 +570,13 @@ impl Context {
     }
 
     pub(crate) fn clear_variable(&mut self, key: &str) {
-        if let Some(values) = self.context.get_mut(key) {
+        if self
+            .scope_bindings
+            .as_ref()
+            .is_some_and(|shared| shared.overlay)
+        {
+            self.context.entry(key.to_string()).or_default().clear();
+        } else if let Some(values) = self.bindings_mut().get_mut(key) {
             values.clear();
         }
         if self.django_context_base.get_mut().is_some() {
@@ -557,7 +656,7 @@ impl Context {
             self.django_context_changes.insert(name.to_string());
         }
         let values = self
-            .context
+            .bindings_mut()
             .get_mut(name)
             .expect("Variable should have been pushed before");
         values.pop();
@@ -832,8 +931,8 @@ impl Context {
     ) -> PyResult<()> {
         for name in &scoped.cycle_variables {
             if !local_names.contains(name)
-                && self.context.contains_key(name)
-                && let Some(value) = scoped.context.get(name).and_then(|values| values.last())
+                && self.has_binding_key(name)
+                && let Some(value) = scoped.get(name)
             {
                 self.insert_cycle(name.clone(), value.bind(py).clone())?;
             }

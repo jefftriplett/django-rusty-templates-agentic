@@ -140,7 +140,12 @@ per rendering node;
 this avoids importing unrelated bindings and making callable snapshots. Retained
 dictionaries are the caller's live dictionaries, as in Django. Scoped templates,
 context subclasses and request contexts keep their existing synchronization path.
-The performance workflow compares these cases with the same 15% regression gate.
+Use `--baseline` locally to compare these cases with the same 15% regression gate.
+
+`uv run python scripts/benchmark_render_output.py --json-output output.json`
+also tracks block and `with` scopes with small and large caller contexts.
+Each case runs in fresh processes with matching Django controls; use
+`--baseline` to check a later revision locally.
 
 `engine.explain_template(source, template_name=None)` reports `mode` (`native`, `hybrid`, or
 `unsupported`) and the first native compilation blocker. For a tag blocker it

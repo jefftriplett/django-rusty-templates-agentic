@@ -66,6 +66,19 @@ def fixtures():
         capture=("{% filter upper %}{{ value }}{{ value }}{% endfilter %}", values),
         asvar=("{% load output %}{% echo value as held %}{{ held }}{{ held }}", values),
     )
+    for size in (3, 1000):
+        scope_values = {f"padding_{i}": i for i in range(size)}
+        scope_values["value"] = "outer"
+        cases[f"with_scopes_{size}"] = (
+            "{% with local=value %}{{ local }}{{ value }}{% endwith %}" * 8,
+            scope_values,
+        )
+        cases[f"block_scopes_{size}"] = (
+            "".join(
+                "{% block b" + str(i) + " %}{{ value }}{% endblock %}" for i in range(8)
+            ),
+            scope_values,
+        )
     return cases
 
 
