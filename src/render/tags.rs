@@ -764,6 +764,7 @@ impl Render for Tag {
             Self::SimpleTag(tag) => tag.render_into(py, template, context, output),
             Self::SimpleBlockTag(tag) => tag.render_into(py, template, context, output),
             Self::For(tag) => tag.render_into(py, template, context, output),
+            Self::Include(tag) => tag.render_into(py, template, context, output),
             Self::If {
                 condition,
                 truthy,
@@ -1350,6 +1351,23 @@ impl<'t, 'py> IncludeTemplate<'py> {
             }
         }
     }
+
+    fn render_into(
+        &'t self,
+        py: Python<'py>,
+        context: &mut Context,
+        at: At,
+        template: TemplateString<'t>,
+        output: &mut String,
+    ) -> super::RenderIntoResult {
+        match self {
+            Self::Template(template) => template.render_into(py, context, output),
+            Self::Callable(_) => {
+                output.push_str(&self.render(py, context, at, template)?);
+                Ok(())
+            }
+        }
+    }
 }
 
 impl Include {
@@ -1509,6 +1527,18 @@ impl Render for Include {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> RenderResult<'t> {
+        let mut output = String::new();
+        self.render_into(py, template, context, &mut output)?;
+        Ok(Cow::Owned(output))
+    }
+
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> super::RenderIntoResult {
         let template_name = self.resolve_template_name(py, template, context)?;
         let include = self.get_template(template_name, py, template, context)?;
         match self.only {
@@ -1541,9 +1571,8 @@ impl Render for Include {
                     }
                     context.append(key.to_string(), value);
                 }
-                let rendered = include
-                    .render(py, context, self.template_at(), template)
-                    .map(|content| Cow::Owned(content.into_owned()));
+                let rendered =
+                    include.render_into(py, context, self.template_at(), template, output);
                 context.pop_variables();
                 if let Some(scope) = scope {
                     scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
@@ -1571,9 +1600,7 @@ impl Render for Include {
                 new_context.use_l10n = context.use_l10n;
                 new_context.use_tz = context.use_tz;
                 new_context.format_values = context.format_values;
-                include
-                    .render(py, &mut new_context, self.template_at(), template)
-                    .map(|content| Cow::Owned(content.into_owned()))
+                include.render_into(py, &mut new_context, self.template_at(), template, output)
             }
         }
     }
