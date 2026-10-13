@@ -765,6 +765,7 @@ impl Render for Tag {
             Self::SimpleBlockTag(tag) => tag.render_into(py, template, context, output),
             Self::For(tag) => tag.render_into(py, template, context, output),
             Self::Include(tag) => tag.render_into(py, template, context, output),
+            Self::InclusionTag(tag) => tag.render_into(py, template, context, output),
             Self::If {
                 condition,
                 truthy,
@@ -1757,13 +1758,16 @@ fn store_target_var_into(
     }
 }
 
-impl Render for InclusionTag {
-    fn render<'t>(
+impl InclusionTag {
+    fn render_child<'py, T, O>(
         &self,
-        py: Python<'_>,
-        template: TemplateString<'t>,
+        py: Python<'py>,
+        template: TemplateString<'_>,
         context: &mut Context,
-    ) -> RenderResult<'t> {
+        output: &mut O,
+        native: impl FnOnce(&Template, &mut Context, &mut O) -> Result<T, PyRenderError>,
+        python: impl FnOnce(Bound<'py, PyAny>, &mut O) -> Result<T, PyRenderError>,
+    ) -> Result<T, PyRenderError> {
         let mut args = build_args(py, template, context, &self.call.args)?;
         let kwargs = build_kwargs(py, template, context, &self.call.kwargs)?;
         if self.call.takes_context {
@@ -1811,16 +1815,13 @@ impl Render for InclusionTag {
             .getattr("template")
             .unwrap_or_else(|_| filename.clone());
         if let Ok(loaded) = filename.extract::<PyRef<'_, Template>>() {
-            return loaded
-                .render(py, &mut child)
-                .map(|output| Cow::Owned(output.into_owned()));
+            return native(&loaded, &mut child, output);
         }
         if filename.hasattr("render")? {
-            return Ok(Cow::Owned(
-                filename
-                    .call_method1("render", (child.django_context(py)?,))?
-                    .extract()?,
-            ));
+            return python(
+                filename.call_method1("render", (child.django_context(py)?,))?,
+                output,
+            );
         }
         let key = if let Ok(name) = filename.extract::<String>() {
             IncludeTemplateKey::String(name)
@@ -1828,9 +1829,49 @@ impl Render for InclusionTag {
             IncludeTemplateKey::Vec(filename.extract()?)
         };
         let loaded = context.get_or_insert_include(py, &self.engine, &key, self.id)?;
-        loaded
-            .render(py, &mut child)
-            .map(|output| Cow::Owned(output.into_owned()))
+        native(&loaded, &mut child, output)
+    }
+}
+
+impl Render for InclusionTag {
+    fn render<'t>(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> RenderResult<'t> {
+        self.render_child(
+            py,
+            template,
+            context,
+            &mut (),
+            |loaded, child, ()| {
+                loaded
+                    .render(py, child)
+                    .map(|output| Cow::Owned(output.into_owned()))
+            },
+            |output, ()| Ok(Cow::Owned(output.extract()?)),
+        )
+    }
+
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> super::RenderIntoResult {
+        self.render_child(
+            py,
+            template,
+            context,
+            output,
+            |loaded, child, output| loaded.render_into(py, child, output),
+            |value, output| {
+                super::types::append_python_string(&value, false, output)?;
+                Ok(())
+            },
+        )
     }
 }
 
