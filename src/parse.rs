@@ -4,6 +4,7 @@ pub use stock::StockNode;
 use dtl_lexer::DelimitedToken;
 use num_traits::Zero;
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::iter::Peekable;
 use std::sync::Arc;
@@ -14,6 +15,7 @@ use miette::{Diagnostic, SourceSpan};
 use num_bigint::BigInt;
 use pyo3::intern;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use thiserror::Error;
 
 use crate::filters::AddFilter;
@@ -203,37 +205,37 @@ impl Filter {
             });
         }
         let django_filter = match parser.template.content(at) {
-            "pluralize" => Some(("pluralize", false, true)),
-            "join" => Some(("join", true, true)),
-            "ljust" => Some(("ljust", true, true)),
-            "rjust" => Some(("rjust", true, true)),
-            "slice" => Some(("slice", true, true)),
-            "stringformat" => Some(("stringformat", true, true)),
-            "truncatechars" => Some(("truncatechars", true, true)),
-            "truncatewords" => Some(("truncatewords", true, true)),
-            "time" => Some(("time", false, true)),
-            "timesince" => Some(("timesince", false, true)),
-            "timeuntil" => Some(("timeuntil", false, true)),
-            "urlencode" => Some(("urlencode", false, true)),
-            "urlize" => Some(("urlize", false, false)),
-            "urlizetrunc" => Some(("urlizetrunc", true, true)),
-            "json_script" => Some(("json_script", false, true)),
-            "floatformat" => Some(("floatformat", false, true)),
-            "unordered_list" => Some(("unordered_list", false, false)),
-            "make_list" => Some(("make_list", false, false)),
-            "escapeseq" => Some(("escapeseq", false, false)),
-            "safeseq" => Some(("safeseq", false, false)),
-            "iriencode" => Some(("iriencode", false, false)),
-            "random" => Some(("random", false, false)),
-            "phone2numeric" => Some(("phone2numeric", false, false)),
-            "striptags" => Some(("striptags", false, false)),
-            "linebreaks" => Some(("linebreaks", false, false)),
-            "linebreaksbr" => Some(("linebreaksbr", false, false)),
-            "linenumbers" => Some(("linenumbers", false, false)),
-            "first" => Some(("first", false, false)),
+            "pluralize" => Some((0, "pluralize", false, true)),
+            "join" => Some((1, "join", true, true)),
+            "ljust" => Some((2, "ljust", true, true)),
+            "rjust" => Some((3, "rjust", true, true)),
+            "slice" => Some((4, "slice", true, true)),
+            "stringformat" => Some((5, "stringformat", true, true)),
+            "truncatechars" => Some((6, "truncatechars", true, true)),
+            "truncatewords" => Some((7, "truncatewords", true, true)),
+            "time" => Some((8, "time", false, true)),
+            "timesince" => Some((9, "timesince", false, true)),
+            "timeuntil" => Some((10, "timeuntil", false, true)),
+            "urlencode" => Some((11, "urlencode", false, true)),
+            "urlize" => Some((12, "urlize", false, false)),
+            "urlizetrunc" => Some((13, "urlizetrunc", true, true)),
+            "json_script" => Some((14, "json_script", false, true)),
+            "floatformat" => Some((15, "floatformat", false, true)),
+            "unordered_list" => Some((16, "unordered_list", false, false)),
+            "make_list" => Some((17, "make_list", false, false)),
+            "escapeseq" => Some((18, "escapeseq", false, false)),
+            "safeseq" => Some((19, "safeseq", false, false)),
+            "iriencode" => Some((20, "iriencode", false, false)),
+            "random" => Some((21, "random", false, false)),
+            "phone2numeric" => Some((27, "phone2numeric", false, false)),
+            "striptags" => Some((22, "striptags", false, false)),
+            "linebreaks" => Some((23, "linebreaks", false, false)),
+            "linebreaksbr" => Some((24, "linebreaksbr", false, false)),
+            "linenumbers" => Some((25, "linenumbers", false, false)),
+            "first" => Some((26, "first", false, false)),
             _ => None,
         };
-        if let Some((name, required, accepts_argument)) = django_filter {
+        if let Some((index, name, required, accepts_argument)) = django_filter {
             if required && right.is_none() {
                 return Err(ParseError::MissingArgument { at: at.into() });
             }
@@ -245,7 +247,7 @@ impl Filter {
                 all_at,
                 left,
                 filter: FilterType::Django(DjangoFilter {
-                    name,
+                    filter: parser.builtin_filter(index, name, at)?,
                     argument: right,
                 }),
             });
@@ -1435,6 +1437,8 @@ enum TagContext<'py> {
     Opaque(Bound<'py, PyAny>),
 }
 
+type BuiltinFilterCache = [Option<Arc<Py<PyAny>>>; 28];
+
 pub struct Parser<'t, 'py> {
     py: Python<'py>,
     template: TemplateString<'t>,
@@ -1443,6 +1447,7 @@ pub struct Parser<'t, 'py> {
     origin: Option<&'t str>,
     external_tags: HashMap<String, TagContext<'py>>,
     external_filters: HashMap<String, Bound<'py, PyAny>>,
+    builtin_filters: RefCell<Option<Box<BuiltinFilterCache>>>,
     forloop_depth: usize,
     named_cycles: HashMap<String, Cycle>,
     last_cycle: Option<CycleId>,
@@ -1475,6 +1480,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             origin,
             external_tags: HashMap::new(),
             external_filters: HashMap::new(),
+            builtin_filters: RefCell::new(None),
             forloop_depth: 0,
             named_cycles: HashMap::new(),
             last_cycle: None,
@@ -1507,6 +1513,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             origin: None,
             external_tags: HashMap::new(),
             external_filters,
+            builtin_filters: RefCell::new(None),
             forloop_depth: 0,
             named_cycles: HashMap::new(),
             last_cycle: None,
@@ -1523,6 +1530,41 @@ impl<'t, 'py> Parser<'t, 'py> {
             compiler_loads: Vec::new(),
             registered_compilers: None,
         }
+    }
+
+    fn builtin_filter(
+        &self,
+        index: usize,
+        name: &'static str,
+        at: At,
+    ) -> Result<Arc<Py<PyAny>>, ParseError> {
+        if let Some(cache) = self.builtin_filters.borrow().as_ref()
+            && let Some(filter) = &cache[index]
+        {
+            return Ok(filter.clone());
+        }
+        static DEFAULT_FILTERS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+        let lookup = (|| -> PyResult<_> {
+            let library = match self.engine.template_builtins.get(1) {
+                Some(library) => library.bind(self.py),
+                None => {
+                    DEFAULT_FILTERS.import(self.py, "django.template.defaultfilters", "register")?
+                }
+            };
+            library.getattr(intern!(self.py, "filters"))?.get_item(name)
+        })();
+        let filter = Arc::new(
+            lookup
+                .map_err(|_| ParseError::InvalidFilter {
+                    at: at.into(),
+                    filter: name.to_string(),
+                })?
+                .unbind(),
+        );
+        self.builtin_filters
+            .borrow_mut()
+            .get_or_insert_with(|| Box::new([const { None }; 28]))[index] = Some(filter.clone());
+        Ok(filter)
     }
 
     pub fn parse(&mut self) -> Result<Vec<TokenTree>, PyParseError> {

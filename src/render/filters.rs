@@ -22,7 +22,6 @@ use crate::render::{Resolve, ResolveFailures, ResolveResult};
 use dtl_lexer::types::TemplateString;
 use unicode_normalization::UnicodeNormalization;
 
-static DJANGO_FILTERS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static MARK_FILTER_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -553,10 +552,7 @@ impl ResolveFilter for DjangoFilter {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
-        let registry = DJANGO_FILTERS
-            .import(py, "django.template.defaultfilters", "register")?
-            .getattr("filters")?;
-        let filter = registry.get_item(self.name)?;
+        let filter = self.filter.bind(py);
         let value = variable.unwrap_or_else(|| "".as_content()).to_py(py);
         let safe_type = SAFEDATA.import(py, "django.utils.safestring", "SafeData")?;
         let preserve_safe = filter
