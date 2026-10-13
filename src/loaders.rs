@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -101,15 +102,15 @@ impl FileSystemLoader {
         engine: Arc<Engine>,
     ) -> Result<PyResult<Template>, LoaderError> {
         let mut tried = Vec::new();
-        let dirs = if self.uses_engine_dirs {
+        let dirs: Cow<'_, [PathBuf]> = if self.uses_engine_dirs {
             match engine.dirs(py) {
-                Ok(dirs) => dirs,
+                Ok(dirs) => Cow::Owned(dirs),
                 Err(error) => return Ok(Err(error)),
             }
         } else {
-            self.dirs.clone()
+            Cow::Borrowed(&self.dirs)
         };
-        for template_dir in &dirs {
+        for template_dir in dirs.iter() {
             let Some(path) = safe_join(template_dir, template_name) else {
                 continue;
             };

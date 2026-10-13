@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+use either::Either;
 use num_bigint::{BigInt, Sign};
 use num_traits::cast::ToPrimitive;
 use pyo3::exceptions::{
@@ -1135,7 +1136,7 @@ impl Render for Tag {
                 let output = tag
                     .func
                     .bind(py)
-                    .call(PyTuple::new(py, args)?, Some(&kwargs))?;
+                    .call(PyTuple::new(py, args)?, kwargs.as_ref())?;
                 if let Some(target) = &tag.target_var {
                     context.insert(target.clone(), output)?;
                     Cow::Borrowed("")
@@ -1232,16 +1233,18 @@ impl For {
             }
             .into());
         }
-        let mut chars: Vec<_> = string.chars().collect();
-        if self.reversed {
-            chars.reverse();
-        }
-
+        let length = string.chars().count();
+        let chars = if self.reversed {
+            Either::Right(string.chars().rev())
+        } else {
+            Either::Left(string.chars())
+        };
         let variable = &self.variables.names[0];
         let mut join = super::JoinResults::default();
-        context.push_for_loop(chars.len());
-        for (index, c) in chars.into_iter().enumerate() {
-            let c = PyString::new(py, &c.to_string());
+        let mut utf8 = [0; 4];
+        context.push_for_loop(length);
+        for (index, c) in chars.enumerate() {
+            let c = PyString::new(py, c.encode_utf8(&mut utf8));
             context.push_variable(variable.clone(), c.into_any(), index);
             context.sync_loop_context(py, index == 0)?;
             for (body_index, node) in self.body.iter().enumerate() {
@@ -1582,12 +1585,12 @@ fn call_tag<'t, 'py>(
     at: At,
     template: TemplateString<'t>,
     args: VecDeque<Bound<'py, PyAny>>,
-    kwargs: Bound<'py, PyDict>,
+    kwargs: Option<Bound<'py, PyDict>>,
 ) -> Result<Bound<'py, PyAny>, PyRenderError> {
     let func = func.bind(py);
     match func.call(
         PyTuple::new(py, args).expect("All arguments should be valid Python objects"),
-        Some(&kwargs),
+        kwargs.as_ref(),
     ) {
         Ok(content) => Ok(content),
         Err(error) => Err(error.annotate(py, at, "here", template).into()),
@@ -1666,13 +1669,16 @@ fn build_kwargs<'py>(
     template: TemplateString<'_>,
     context: &mut Context,
     kwargs: &Vec<(String, TagElement)>,
-) -> Result<Bound<'py, PyDict>, PyRenderError> {
+) -> Result<Option<Bound<'py, PyDict>>, PyRenderError> {
+    if kwargs.is_empty() {
+        return Ok(None);
+    }
     let py_kwargs = PyDict::new(py);
     for (key, value) in kwargs {
         let value = value.resolve(py, template, context, ResolveFailures::Raise)?;
         py_kwargs.set_item(key, value)?;
     }
-    Ok(py_kwargs)
+    Ok(Some(py_kwargs))
 }
 
 fn store_target_var_into(
@@ -1727,7 +1733,7 @@ impl Render for InclusionTag {
             .call
             .func
             .bind(py)
-            .call(PyTuple::new(py, args)?, Some(&kwargs))?;
+            .call(PyTuple::new(py, args)?, kwargs.as_ref())?;
         let mut values: HashMap<String, Py<PyAny>> = values.extract()?;
         if let Some(csrf) = context.get("csrf_token")
             && !csrf.is_none(py)

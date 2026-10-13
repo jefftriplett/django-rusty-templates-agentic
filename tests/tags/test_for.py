@@ -1288,3 +1288,18 @@ def test_native_forloop_length(values, reverse):
         "{% for item in values" + reverse + " %}{{ forloop.length }}{% endfor %}"
     )
     assert template.render({"values": values}) == str(len(values)) * len(values)
+
+
+@pytest.mark.parametrize("text", ["", "ASCII", "aé🙂𐍈", "é" * 128])
+@pytest.mark.parametrize("reversed_loop", [False, True])
+def test_literal_character_loop_unicode_and_counters(
+    assert_render, text, reversed_loop
+):
+    reverse = " reversed" if reversed_loop else ""
+    source = (
+        "{% for char in '" + text + "'" + reverse + " %}"
+        "{{ forloop.counter }}:{{ char }};{% empty %}empty{% endfor %}"
+    )
+    characters = reversed(text) if reversed_loop else iter(text)
+    expected = "".join(f"{index}:{char};" for index, char in enumerate(characters, 1))
+    assert_render(template=source, context={}, expected=expected or "empty")

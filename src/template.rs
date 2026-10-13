@@ -754,14 +754,7 @@ pub mod django_rusty_templates {
         py: Python<'_>,
         template_name: Cow<str>,
     ) -> PyResult<Template> {
-        if template_name.contains('#')
-            && py
-                .import("django")?
-                .getattr("VERSION")?
-                .get_item(0)?
-                .extract::<u8>()?
-                >= 6
-        {
+        if template_name.contains('#') && engine.django_series >= (6, 0) {
             let (base, name) = template_name.split_once('#').expect("name contains #");
             let full = get_template(engine.clone(), py, Cow::Borrowed(base))?;
             if full.is_native() {
@@ -1036,12 +1029,7 @@ pub mod django_rusty_templates {
             let py = slf.py();
             let template_name = template_name.unwrap_or_else(|| py.None().into_bound(py));
             if slf.getattr("__dict__")?.contains("find_template")?
-                || py
-                    .import("django")?
-                    .getattr("VERSION")?
-                    .get_item(0)?
-                    .extract::<u8>()?
-                    >= 6
+                || slf.borrow().engine.django_series >= (6, 0)
             {
                 return py
                     .import("django_rusty_templates")?
@@ -1112,13 +1100,7 @@ pub mod django_rusty_templates {
             names: Bound<'py, PyAny>,
         ) -> PyResult<Bound<'py, PyAny>> {
             let py = slf.py();
-            if py
-                .import("django")?
-                .getattr("VERSION")?
-                .get_item(0)?
-                .extract::<u8>()?
-                >= 6
-            {
+            if slf.borrow().engine.django_series >= (6, 0) {
                 let template = py
                     .import("django_rusty_templates")?
                     .getattr("_django_select_template")?
