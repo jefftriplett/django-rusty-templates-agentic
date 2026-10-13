@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Make performance checks less sensitive to allocator state and isolated timing outliers. ([#142](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/142))
+
 ## 2026.10.8
 
 Speed up template parsing and custom tags, reduce string copying and large-context rendering costs, and strengthen performance checks. Match Django’s errors and string behavior for simple-tag results. ([#125](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/125), [#126](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/126), [#127](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/127), [#128](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/128), [#135](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/135), [#136](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/136), [#137](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/137), [#139](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/139))
