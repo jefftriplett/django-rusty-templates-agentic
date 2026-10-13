@@ -119,13 +119,13 @@ $ just rust-coverage-browser
 
 Every PR runs the Ubuntu/Python 3.13 sanity job (local Python and serial Rust tests, Ruff, rustfmt, and Clippy), plus upstream template conformance against Django 5.2, 6.0, and 6.1. Same-repository, non-draft PRs receive a summary comment. These four test jobs protect stable-version compatibility without running the full OS matrix.
 
-Once this PR is merged and the workflow is present on the default branch, open **Actions → Full CI → Run workflow** and select the branch for comprehensive coverage. This manually calls the Python, Rust, lint, Django, and optional CodSpeed workflows from that same revision. After these workflow definitions exist on the default branch, the CLI equivalent is:
+Once this PR is merged and the workflow is present on the default branch, open **Actions → Full CI → Run workflow** and select the branch for comprehensive coverage. This manually calls the Python, Rust, lint, and Django workflows from that same revision. After these workflow definitions exist on the default branch, the CLI equivalent is:
 
 ```bash
 gh workflow run full.yml --ref YOUR_BRANCH --repo jefftriplett/django-rusty-templates-agentic
 ```
 
-Individual workflows remain dispatchable. `Full CI` runs the Python 3.11–3.14/3.14t and exact final 3.15.0/3.15.0t matrix across Ubuntu, macOS, and Windows, serial Rust OS coverage, cargo-shear, and Django 5.2–6.2 conformance. Python 3.15 entries use uv-managed final runtimes and Django 6.1 with `--no-sync`; Django 5.2/6.0 are excluded on 3.15. The package requires Python 3.11 or newer. CodSpeed runs only when the private repository is connected and `ENABLE_CODSPEED=true` is configured.
+Individual workflows remain dispatchable. `Full CI` runs the Python 3.11–3.14/3.14t and exact final 3.15.0/3.15.0t matrix across Ubuntu, macOS, and Windows, serial Rust OS coverage, cargo-shear, and Django 5.2–6.2 conformance. Python 3.15 entries use uv-managed final runtimes and Django 6.1 with `--no-sync`; Django 5.2/6.0 are excluded on 3.15. The package requires Python 3.11 or newer. Performance comparisons run locally on a controlled machine, never on GitHub-hosted runners.
 
 Coverage reports are retained as artifacts for seven days. **Codecov uploads remain disabled.** Wheel builds remain tag/manual only. No duplicate main-push test runs or schedules are added. The restoration PR remains unmerged until approved.
 

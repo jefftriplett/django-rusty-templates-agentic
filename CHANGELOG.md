@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Make performance checks less sensitive to allocator state and isolated timing outliers. ([#142](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/142))
+Make local performance checks less sensitive to allocator state and timing outliers, and remove performance comparisons from GitHub Actions. ([#142](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/142), [#144](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/144))
 
 ## 2026.10.8
 
