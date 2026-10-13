@@ -211,13 +211,7 @@ impl ResolveFilter for CenterFilter {
             .resolve(py, template, context, ResolveFailures::Raise)?
             .expect("missing argument in context should already have raised");
 
-        if py
-            .import("django")?
-            .getattr("VERSION")?
-            .get_item(0)?
-            .extract::<u8>()?
-            >= 6
-        {
+        if context.django_series(py)? >= (6, 0) {
             let centered = py
                 .import("django.template.defaultfilters")?
                 .getattr("center")?
@@ -519,11 +513,7 @@ impl ResolveFilter for EscapejsFilter {
         _template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
-        let version = py.import("django")?.getattr("VERSION")?;
-        let series = (
-            version.get_item(0)?.extract::<u8>()?,
-            version.get_item(1)?.extract::<u8>()?,
-        );
+        let series = context.django_series(py)?;
         let content = match variable {
             Some(content) => content
                 .resolve_string(context)?
@@ -578,14 +568,17 @@ impl ResolveFilter for DjangoFilter {
             let argument = argument.resolve(py, template, context, ResolveFailures::Raise)?;
             args.push(argument.map_or_else(|| py.None().into_bound(py), |value| value.to_py(py)));
         }
-        let kwargs = pyo3::types::PyDict::new(py);
-        if filter
+        let kwargs = if filter
             .getattr("needs_autoescape")
             .is_ok_and(|flag| flag.is_truthy().unwrap_or(false))
         {
+            let kwargs = pyo3::types::PyDict::new(py);
             kwargs.set_item("autoescape", context.autoescape)?;
-        }
-        let result = filter.call(pyo3::types::PyTuple::new(py, args)?, Some(&kwargs))?;
+            Some(kwargs)
+        } else {
+            None
+        };
+        let result = filter.call(pyo3::types::PyTuple::new(py, args)?, kwargs.as_ref())?;
         let result = if preserve_safe {
             MARK_FILTER_SAFE
                 .import(py, "django.utils.safestring", "mark_safe")?

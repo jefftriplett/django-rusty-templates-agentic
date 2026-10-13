@@ -3057,19 +3057,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                 .collect::<Result<Vec<_>, _>>()?;
 
             // Django 6.1 validates and removes implicit arguments at registration.
-            let version: (u8, u8) = (
-                self.py
-                    .import("django")?
-                    .getattr("VERSION")?
-                    .get_item(0)?
-                    .extract()?,
-                self.py
-                    .import("django")?
-                    .getattr("VERSION")?
-                    .get_item(1)?
-                    .extract()?,
-            );
-            let normalized_params = version >= (6, 1);
+            let normalized_params = self.engine.django_series >= (6, 1);
             if closure_names.contains(&"filename".to_string()) {
                 let cell = |name: &str| -> PyResult<&Bound<'py, PyAny>> {
                     let index = closure_names

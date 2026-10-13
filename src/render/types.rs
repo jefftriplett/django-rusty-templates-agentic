@@ -387,6 +387,19 @@ impl Context {
         Ok(self.get(key).map(|value| value.bind(py).clone()))
     }
 
+    /// Use the owning engine's version snapshot while rendering a template.
+    /// Standalone contexts retain Django lookup for low-level callers.
+    pub(crate) fn django_series(&self, py: Python<'_>) -> PyResult<(u8, u8)> {
+        if let Some(template) = &self.current_template {
+            return Ok(template.engine.django_series);
+        }
+        let version = py.import("django")?.getattr("VERSION")?;
+        Ok((
+            version.get_item(0)?.extract()?,
+            version.get_item(1)?.extract()?,
+        ))
+    }
+
     pub fn refresh_formatting_flags(&mut self, py: Python<'_>) -> PyResult<()> {
         if let Some(context) = &self.formatting_context {
             let context = context.bind(py);
@@ -605,13 +618,7 @@ impl Context {
                 let dict = PyDict::new(py);
                 dict.set_item("parentloop", self.loop_dictionary(py, depth + 1)?)?;
                 Self::fill_loop_dictionary(loop_, &dict)?;
-                if py
-                    .import("django")?
-                    .getattr("VERSION")?
-                    .get_item(0)?
-                    .extract::<u8>()?
-                    >= 6
-                {
+                if self.django_series(py)? >= (6, 0) {
                     dict.set_item("length", loop_.length())?;
                 }
                 Ok(dict.unbind())
@@ -655,14 +662,7 @@ impl Context {
         dict.set_item("revcounter0", for_loop.rev_counter0())?;
         dict.set_item("first", for_loop.first())?;
         dict.set_item("last", for_loop.last())?;
-        if first
-            && py
-                .import("django")?
-                .getattr("VERSION")?
-                .get_item(0)?
-                .extract::<u8>()?
-                >= 6
-        {
+        if first && self.django_series(py)? >= (6, 0) {
             dict.set_item("length", for_loop.length())?;
         }
         Ok(())
@@ -674,13 +674,7 @@ impl Context {
             let dict = PyDict::new(py);
             dict.set_item("parentloop", forloop_dict)
                 .expect("Can always set a str: dict key/value");
-            if py
-                .import("django")
-                .and_then(|django| django.getattr("VERSION"))
-                .and_then(|version| version.get_item(0))
-                .and_then(|major| major.extract::<u8>())
-                .is_ok_and(|major| major >= 6)
-            {
+            if self.django_series(py).is_ok_and(|series| series >= (6, 0)) {
                 dict.set_item("length", forloop.length())
                     .expect("Can always set a str: int key/value");
             }
