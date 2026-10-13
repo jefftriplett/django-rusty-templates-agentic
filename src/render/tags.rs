@@ -799,7 +799,7 @@ impl Render for Tag {
                             .map(|value| (name, value.unwrap_or_else(|| "".as_content()).to_py(py)))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let mut scoped = context.clone_ref(py);
+                let mut scoped = context.clone_scope(py);
                 let scope = if let Some(live) = &scoped.formatting_context {
                     Some(live.bind(py).call_method0("push")?)
                 } else {

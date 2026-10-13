@@ -9,7 +9,7 @@ from scripts import benchmark_render_output as benchmark
 
 def test_cases_cover_every_configuration_once():
     keys = benchmark.case_keys(benchmark.fixtures())
-    assert len(keys) == len(set(keys)) == 144
+    assert len(keys) == len(set(keys)) == 176
     assert "debug=False/cached=False/escaped_8192/loaded" in keys
     assert "debug=True/cached=True/safe_8192/from_string" in keys
 
@@ -125,6 +125,8 @@ def test_real_children_preserve_fixture_identity_across_loop_and_text_cases():
     keys = [
         "debug=False/cached=False/exact_8/loaded",
         "debug=True/cached=True/shallow/from_string",
+        "debug=False/cached=True/with_scopes_1000/loaded",
+        "debug=True/cached=False/block_scopes_3/from_string",
     ]
     report = benchmark.isolated_report(keys, number=1, repeat=1, process_repeats=1)
     assert report["isolation"] == benchmark.ISOLATION

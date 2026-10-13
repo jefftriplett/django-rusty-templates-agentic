@@ -77,8 +77,10 @@ def test_inheritance_compiles_and_renders_without_python_parsing(
         '{% block body %}{% cycle "a" "b" as item silent %}{% with item="local" %}{% cycle item %}{% endwith %}{{ item }}{% endblock %}',
     ],
 )
-def test_native_block_scopes_match_django(debug, source):
-    values = {"value": "<b>", "rows": ["<a>", "&"], "show": True}
+@pytest.mark.parametrize("context_size", [0, 256])
+def test_native_block_scopes_match_django(debug, source, context_size):
+    values = {f"key{i}": str(i) for i in range(context_size)}
+    values.update(value="<b>", rows=["<a>", "&"], show=True)
     expected = DjangoEngine(debug=debug).from_string(source).render(Context(values))
     template = Engine(debug=debug).from_string(source)
     assert template._is_native
