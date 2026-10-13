@@ -1520,27 +1520,14 @@ impl Include {
     }
 }
 
-impl Render for Include {
-    fn render<'t>(
-        &self,
-        py: Python<'_>,
-        template: TemplateString<'t>,
-        context: &mut Context,
-    ) -> RenderResult<'t> {
-        let mut output = String::new();
-        self.render_into(py, template, context, &mut output)?;
-        Ok(Cow::Owned(output))
-    }
-
-    fn render_into(
+impl Include {
+    fn with_include_context<T>(
         &self,
         py: Python<'_>,
         template: TemplateString<'_>,
         context: &mut Context,
-        output: &mut String,
-    ) -> super::RenderIntoResult {
-        let template_name = self.resolve_template_name(py, template, context)?;
-        let include = self.get_template(template_name, py, template, context)?;
+        render: impl FnOnce(&mut Context) -> Result<T, PyRenderError>,
+    ) -> Result<T, PyRenderError> {
         match self.only {
             false => {
                 let mut names = Vec::new();
@@ -1571,8 +1558,7 @@ impl Render for Include {
                     }
                     context.append(key.to_string(), value);
                 }
-                let rendered =
-                    include.render_into(py, context, self.template_at(), template, output);
+                let rendered = render(context);
                 context.pop_variables();
                 if let Some(scope) = scope {
                     scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
@@ -1600,9 +1586,40 @@ impl Render for Include {
                 new_context.use_l10n = context.use_l10n;
                 new_context.use_tz = context.use_tz;
                 new_context.format_values = context.format_values;
-                include.render_into(py, &mut new_context, self.template_at(), template, output)
+                render(&mut new_context)
             }
         }
+    }
+}
+
+impl Render for Include {
+    fn render<'t>(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> RenderResult<'t> {
+        let template_name = self.resolve_template_name(py, template, context)?;
+        let include = self.get_template(template_name, py, template, context)?;
+        self.with_include_context(py, template, context, |context| {
+            include
+                .render(py, context, self.template_at(), template)
+                .map(|content| Cow::Owned(content.into_owned()))
+        })
+    }
+
+    fn render_into(
+        &self,
+        py: Python<'_>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+        output: &mut String,
+    ) -> super::RenderIntoResult {
+        let template_name = self.resolve_template_name(py, template, context)?;
+        let include = self.get_template(template_name, py, template, context)?;
+        self.with_include_context(py, template, context, |context| {
+            include.render_into(py, context, self.template_at(), template, output)
+        })
     }
 }
 
