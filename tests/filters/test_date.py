@@ -5,9 +5,13 @@ https://github.com/django/django/blob/5.1/tests/template_tests/filter_tests/test
 
 from inline_snapshot import snapshot
 
-from datetime import datetime, time, timezone as dt_timezone
+import zoneinfo
+from datetime import date, datetime, time, timedelta
+from datetime import timezone as dt_timezone
+from datetime import tzinfo as datetime_tzinfo
 
 import pytest
+from django.template import engines
 from django.test import override_settings
 from django.utils import timezone, translation
 
@@ -358,3 +362,199 @@ def test_time_localtime_and_format_names(
 ):
     with override_settings(**tz_settings):
         assert_render(template, {"d": value}, expected)
+
+
+# Differential tests: the rusty engine must render exactly what Django renders.
+
+FORMAT_CHARACTERS = "aAbcdDeEfFgGhHiIjlLmMnNoOPrsStTUuwWyYzZ"
+# Specifiers that depend on the timezone and are formatted by Django.
+FALLBACK_CHARACTERS = "eIOrTUZ"
+
+UTC = dt_timezone.utc
+TOKYO = zoneinfo.ZoneInfo("Asia/Tokyo")
+
+DATETIMES = [
+    # 22:30 on the previous day in America/Chicago.
+    datetime(2026, 10, 17, 3, 30, tzinfo=UTC),
+    datetime(2026, 5, 11, 1, 1, tzinfo=TOKYO),
+    datetime(9999, 12, 31, 11, 1, tzinfo=dt_timezone(timedelta(hours=-3, minutes=-30))),
+    datetime(2024, 2, 29, 0, 0),
+    datetime(2024, 12, 30, 12, 0, 5, 7),
+    datetime(2021, 1, 3, 23, 59, 59, 999999),
+    datetime(2026, 3, 22, 12, 30),
+    datetime(1, 1, 1, 13, 7),
+]
+DATES = [
+    date(2008, 12, 29),
+    date(2010, 1, 3),
+    date(2023, 1, 1),
+    date(2000, 2, 29),
+    date(1900, 3, 1),
+    date(2026, 11, 13),
+    date(2026, 8, 21),
+    date(2026, 7, 2),
+    date(999, 6, 23),
+]
+TIMES = [time(0, 0), time(0, 1), time(12, 0), time(12, 30, 15, 250), time(23, 5)]
+
+
+def render_with(engine, template, context):
+    try:
+        return engines[engine].from_string(template).render(context)
+    except Exception as error:
+        return type(error)
+
+
+def assert_matches_django(template, context):
+    expected = render_with("django", template, context)
+    assert (template, render_with("rusty", template, context)) == (template, expected)
+
+
+@pytest.fixture
+def chicago(settings):
+    settings.USE_TZ = True
+    settings.TIME_ZONE = "America/Chicago"
+
+
+def test_date_converts_aware_datetimes_to_the_current_timezone(chicago, assert_render):
+    assert_render(
+        '{{ d|date:"Y-m-d H:i" }} {{ d|date:"SHORT_DATE_FORMAT" }} {{ d|time:"H:i" }}',
+        {"d": datetime(2026, 10, 17, 3, 30, tzinfo=UTC)},
+        "2026-10-16 22:30 10/16/2026 22:30",
+    )
+
+
+@pytest.mark.parametrize("use_tz", [True, False])
+@pytest.mark.parametrize("character", FORMAT_CHARACTERS)
+def test_date_format_character_matches_django(settings, use_tz, character):
+    settings.USE_TZ = use_tz
+    settings.TIME_ZONE = "America/Chicago"
+    for value in DATETIMES + DATES + TIMES:
+        for name in ("date", "time"):
+            template = f'{{{{ value|{name}:"{character}" }}}}'
+            assert_matches_django(template, {"value": value})
+
+
+@pytest.mark.parametrize(
+    "format_string",
+    [
+        "D, d M Y H:i:s O",
+        "N j, Y, P T",
+        "c e",
+        "r (U)",
+        "I Z H:i",
+        r"jS \o\f F",
+        r"\\Y \\\Y",
+        r"\Y\m\d",
+        "Y\\",
+        "H\\\ni",
+        "é Y ü 日",
+        "<b>Y</b> & m",
+    ],
+)
+def test_date_mixed_and_escaped_formats_match_django(chicago, format_string):
+    for value in DATETIMES + DATES + TIMES:
+        for name in ("date", "time"):
+            template = f"{{{{ value|{name}:format }}}}"
+            assert_matches_django(template, {"value": value, "format": format_string})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Spring forward: 02:00 CST becomes 03:00 CDT at 08:00 UTC.
+        datetime(2026, 3, 8, 7, 59, tzinfo=UTC),
+        datetime(2026, 3, 8, 8, 0, tzinfo=UTC),
+        # Fall back: 01:00-02:00 happens twice, at 06:00 and 07:00 UTC.
+        datetime(2026, 11, 1, 6, 30, tzinfo=UTC),
+        datetime(2026, 11, 1, 7, 30, tzinfo=UTC),
+        datetime(2026, 11, 1, 1, 30, tzinfo=zoneinfo.ZoneInfo("America/Chicago")),
+        datetime(2026, 11, 1, 1, 30, fold=1),
+        datetime(2026, 11, 1, 1, 30),
+        datetime(2026, 3, 8, 2, 30),
+    ],
+)
+@pytest.mark.parametrize(
+    "template",
+    [
+        '{{ value|date:"Y-m-d H:i P" }}|{{ value|time:"H:i" }}',
+        '{{ value|date:"c I O T Z e" }}|{{ value|time:"O T e" }}',
+        '{% load tz %}{% localtime off %}{{ value|date:"Y-m-d H:i O" }}|{{ value|time:"H:i" }}{% endlocaltime %}',
+        '{% load tz %}{% timezone "Asia/Tokyo" %}{{ value|date:"Y-m-d H:i O" }}|{{ value|time:"H:i" }}{% endtimezone %}{{ value|date:"H:i" }}',
+    ],
+)
+@pytest.mark.parametrize("use_tz", [True, False])
+def test_date_timezones_and_dst_match_django(settings, use_tz, value, template):
+    settings.USE_TZ = use_tz
+    settings.TIME_ZONE = "America/Chicago"
+    assert_matches_django(template, {"value": value})
+
+
+@pytest.mark.parametrize("language", ["en", "de", "fr", "pl", "ru", "ja"])
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "",
+        ':""',
+        ":format",
+        ':"DATE_FORMAT"',
+        ':"DATETIME_FORMAT"',
+        ':"SHORT_DATE_FORMAT"',
+        ':"SHORT_DATETIME_FORMAT"',
+        ':"TIME_FORMAT"',
+        ':"YEAR_MONTH_FORMAT"',
+        ':"MONTH_DAY_FORMAT"',
+        # Not strings: formatted by Django.
+        ':"FIRST_DAY_OF_WEEK"',
+        ':"DATE_INPUT_FORMATS"',
+    ],
+)
+def test_date_format_settings_match_django(chicago, language, argument):
+    context = {"format": None}
+    with translation.override(language):
+        for value in [DATETIMES[0], DATETIMES[3], DATES[0], TIMES[3]]:
+            context["value"] = value
+            for name in ("date", "time"):
+                assert_matches_django(f"{{{{ value|{name}{argument} }}}}", context)
+
+
+@pytest.mark.parametrize("language", ["en", "de", "fr", "pl", "ru", "ja"])
+def test_date_names_match_django(language):
+    context = {
+        # Every month, and every weekday twice.
+        "dates": [date(2026, month, month) for month in range(1, 13)]
+        + [date(2026, 6, day) for day in range(1, 8)],
+        "times": TIMES,
+    }
+    template = (
+        '{% for d in dates %}{{ d|date:"l D F b M N E jS" }}|{% endfor %}'
+        '{% for t in times %}{{ t|date:"a A P f" }}|{{ t|time:"a A P" }}|{% endfor %}'
+    )
+    with translation.override(language):
+        assert_matches_django(template, context)
+
+
+def test_date_language_tag_matches_django(chicago):
+    template = (
+        '{% load i18n %}{{ d|date:"l F P" }}|'
+        '{% language "de" %}{{ d|date:"l F P" }}|'
+        '{% language "fr" %}{{ d|date:"l F P DATE_FORMAT" }}|{% endlanguage %}'
+        '{{ d|date:"l F P" }}|{% endlanguage %}{{ d|date:"l F P" }}'
+    )
+    assert_matches_django(template, {"d": DATETIMES[0]})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "2026-10-17",
+        0,
+        None,
+        datetime(2026, 10, 17, 3, 30, tzinfo=datetime_tzinfo()),
+    ],
+)
+def test_date_unsupported_values_match_django(chicago, value):
+    for name in ("date", "time"):
+        assert_matches_django(f'{{{{ value|{name}:"Y-m-d H:i" }}}}', {"value": value})
+        assert_matches_django(f'{{{{ value|{name}:"literal" }}}}', {"value": value})

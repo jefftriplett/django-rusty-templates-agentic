@@ -4,8 +4,7 @@ use html_escape::encode_quoted_attribute_to_string;
 use num_traits::{ToPrimitive, Zero};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::PyType;
-use pyo3::types::{PyDate, PyDateTime, PyTime};
+use pyo3::types::{PyDateTime, PyString, PyType};
 
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{
@@ -17,6 +16,7 @@ use crate::filters::{
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
+use crate::render::dateformat::{Formatted, Formatter, template_localtime};
 use crate::render::types::{AsBorrowedContent, Content, ContentString, Context, IntoOwnedContent};
 use crate::render::{Resolve, ResolveFailures, ResolveResult};
 use dtl_lexer::types::TemplateString;
@@ -25,8 +25,8 @@ use unicode_normalization::UnicodeNormalization;
 static MARK_FILTER_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
-static DATE_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-static TEMPLATE_LOCALTIME: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static DATE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static TIME_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 impl Resolve for Filter {
     fn resolve<'t, 'py>(
@@ -325,18 +325,6 @@ impl ResolveFilter for DefaultIfNoneFilter {
     }
 }
 
-/// Convert an aware datetime to the current time zone, as Django does for
-/// filters registered with `expects_localtime=True`.
-fn template_localtime<'py>(
-    py: Python<'py>,
-    value: Bound<'py, PyAny>,
-    context: &Context,
-) -> PyResult<Bound<'py, PyAny>> {
-    TEMPLATE_LOCALTIME
-        .import(py, "django.utils.timezone", "template_localtime")?
-        .call1((value, context.use_tz))
-}
-
 impl ResolveFilter for DateFilter {
     fn resolve<'t, 'py>(
         &self,
@@ -348,45 +336,74 @@ impl ResolveFilter for DateFilter {
         let Some(value) = variable else {
             return Ok(Some("".as_content()));
         };
-
-        let fmt = match &self.argument {
-            Some(arg) => arg
-                .resolve(py, template, context, ResolveFailures::Raise)?
-                .expect("missing argument in context should already have raised")
-                .to_py(py),
-            None => py.None().into_bound(py),
+        let format = match &self.argument {
+            Some(arg) => Some(
+                arg.resolve(py, template, context, ResolveFailures::Raise)?
+                    .expect("missing argument in context should already have raised"),
+            ),
+            None => None,
         };
-
-        let value = value.to_py(py);
-
-        let is_valid = value.is_instance_of::<PyDate>()
-            || value.is_instance_of::<PyTime>()
-            || value.is_instance_of::<PyDateTime>();
-
-        if !is_valid {
-            return Ok(Some("".as_content()));
-        }
-
-        // Django registers `date` with `expects_localtime=True`.
-        let value = template_localtime(py, value, context)?;
-        // `formats.date_format` resolves setting names such as "SHORT_DATE_FORMAT"
-        // and falls back to DATE_FORMAT when no format is given.
-        let date_format_fn = DATE_FORMAT.import(py, "django.utils.formats", "date_format")?;
-
-        let formatted = match date_format_fn.call1((value, fmt)) {
-            Ok(res) => res,
-            Err(e) => {
-                if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) {
-                    return Ok(Some("".as_content()));
-                }
-                return Err(PyRenderError::PyErr(
-                    e.annotate(py, self.at, "here", template),
-                ));
-            }
-        };
-
-        Ok(Some(Content::Py(formatted)))
+        let date = DATE_FILTER.import(py, "django.template.defaultfilters", "date")?;
+        let formatted = format_date(value, format, Formatter::Date, date, context)
+            .map_err(|error| error.annotate(py, self.at, "here", template))?;
+        Ok(Some(formatted))
     }
+}
+
+/// Django's `date` and `time` filters with `expects_localtime=True` applied.
+/// Formats natively where [`DateCache`](super::dateformat::DateCache) can
+/// reproduce Django exactly and otherwise calls `django_filter`.
+fn format_date<'t, 'py>(
+    value: Content<'t, 'py>,
+    format: Option<Content<'t, 'py>>,
+    formatter: Formatter,
+    django_filter: &Bound<'py, PyAny>,
+    context: &mut Context,
+) -> PyResult<Content<'t, 'py>> {
+    let py = django_filter.py();
+    let value = value.to_py(py);
+    if value.is_none() {
+        return Ok("".as_content());
+    }
+    let value = template_localtime(value, context.use_tz, &mut context.date_cache)?;
+    if let Some(format_name) = format_name(format.as_ref(), formatter)?
+        && let Some(formatted) = context.date_cache.format(&value, &format_name, formatter)?
+    {
+        return Ok(match formatted {
+            Formatted::Native(formatted) => Content::String(match context.autoescape {
+                false => ContentString::String(Cow::Owned(formatted)),
+                true => ContentString::HtmlUnsafe(Cow::Owned(formatted)),
+            }),
+            Formatted::Django(formatted) => Content::Py(formatted),
+        });
+    }
+    let formatted = match format {
+        Some(format) => django_filter.call1((value, format.to_py(py)))?,
+        None => django_filter.call1((value,))?,
+    };
+    Ok(Content::Py(formatted))
+}
+
+/// The name passed to `get_format(format or "DATE_FORMAT")`. `None` for
+/// argument types that are left to Django.
+fn format_name<'a>(
+    format: Option<&'a Content<'_, '_>>,
+    formatter: Formatter,
+) -> PyResult<Option<Cow<'a, str>>> {
+    let name = match format {
+        None => Cow::Borrowed(""),
+        Some(Content::String(format)) => Cow::Borrowed(format.as_raw().as_ref()),
+        Some(Content::Py(format)) if format.is_none() => Cow::Borrowed(""),
+        Some(Content::Py(format)) => match format.cast_exact::<PyString>() {
+            Ok(format) => format.to_cow()?,
+            Err(_) => return Ok(None),
+        },
+        Some(_) => return Ok(None),
+    };
+    Ok(Some(match name.is_empty() {
+        true => Cow::Borrowed(formatter.default_format()),
+        false => name,
+    }))
 }
 
 impl ResolveFilter for DivisibleByFilter {
@@ -563,12 +580,29 @@ impl ResolveFilter for DjangoFilter {
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
         let filter = self.filter.bind(py);
-        let mut value = variable.unwrap_or_else(|| "".as_content()).to_py(py);
-        if filter
-            .getattr("expects_localtime")
-            .is_ok_and(|flag| flag.is_truthy().unwrap_or(false))
+        let value = variable.unwrap_or_else(|| "".as_content());
+        if filter.is(TIME_FILTER.import(py, "django.template.defaultfilters", "time")?) {
+            let format = match &self.argument {
+                Some(argument) => {
+                    argument.resolve(py, template, context, ResolveFailures::Raise)?
+                }
+                None => None,
+            };
+            return Ok(Some(format_date(
+                value,
+                format,
+                Formatter::Time,
+                filter,
+                context,
+            )?));
+        }
+        let mut value = value.to_py(py);
+        if value.is_instance_of::<PyDateTime>()
+            && filter
+                .getattr_opt("expects_localtime")?
+                .is_some_and(|flag| flag.is_truthy().unwrap_or(false))
         {
-            value = template_localtime(py, value, context)?;
+            value = template_localtime(value, context.use_tz, &mut context.date_cache)?;
         }
         let safe_type = SAFEDATA.import(py, "django.utils.safestring", "SafeData")?;
         let preserve_safe = filter

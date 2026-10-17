@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Format dates and times for the `date` and `time` filters in Rust. Both filters now convert aware datetimes to the current timezone and resolve format names such as `SHORT_DATE_FORMAT`, as Django does.
+
 ## 2026.10.13
 
 Restore callback rendering performance while preserving cyclic collection, and reduce allocations in blocks and includes. ([#171](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/171))

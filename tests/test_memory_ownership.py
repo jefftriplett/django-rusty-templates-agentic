@@ -1,5 +1,6 @@
 """Object lifetime regressions; RSS and allocator benchmarks stay outside CI."""
 
+import datetime
 import gc
 import sys
 from types import ModuleType
@@ -7,6 +8,7 @@ import weakref
 
 import pytest
 from django.template import Context, Library, Node
+from django.utils import timezone
 
 
 class Marker:
@@ -272,3 +274,43 @@ def test_retained_callback_state_survives_collection(
     retained.clear()
     gc.collect()
     assert reference() is None
+
+
+def test_cached_date_timezone_cycle_is_collected(engine_class, monkeypatch, settings):
+    settings.USE_TZ = True
+    module = ModuleType("rusty_memory_date_cycle")
+    module.register = Library()
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    class CycleZone(datetime.tzinfo):
+        def utcoffset(self, value):
+            return datetime.timedelta(hours=2)
+
+        def dst(self, value):
+            return datetime.timedelta(0)
+
+    @module.register.simple_tag(takes_context=True)
+    def remember(context):
+        # The render's date cache holds the zone, which now holds the context.
+        timezone.get_current_timezone().context = context
+        return ""
+
+    def render_once():
+        backend, source = make_backend(
+            engine_class,
+            '{% load callbacks %}{{ value|date:"H:i" }}{% remember %}',
+            libraries={"callbacks": module.__name__},
+        )
+        marker = Marker()
+        reference = weakref.ref(marker)
+        value = datetime.datetime(2026, 10, 17, 3, 30, tzinfo=datetime.timezone.utc)
+        with timezone.override(CycleZone()):
+            rendered = backend.get_template("page.html").render(
+                {"marker": marker, "value": value}
+            )
+        assert rendered == "05:30"
+        return source, reference
+
+    references = [render_once() for _ in range(10)]
+    gc.collect()
+    assert all(source() is None and marker() is None for source, marker in references)
