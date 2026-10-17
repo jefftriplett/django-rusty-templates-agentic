@@ -3,6 +3,7 @@ pub mod common;
 pub mod dateformat;
 pub mod filters;
 pub mod inheritance;
+mod l10n;
 pub mod lorem;
 mod stock;
 pub mod tags;

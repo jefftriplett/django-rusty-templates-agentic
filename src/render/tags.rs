@@ -1573,6 +1573,7 @@ impl Include {
                 new_context.use_l10n = context.use_l10n;
                 new_context.use_tz = context.use_tz;
                 new_context.format_values = context.format_values;
+                new_context.number_format = context.number_format.clone();
                 render(&mut new_context)
             }
         }
@@ -1786,6 +1787,7 @@ impl InclusionTag {
         child.use_l10n = context.use_l10n;
         child.use_tz = context.use_tz;
         child.format_values = context.format_values;
+        child.number_format = context.number_format.clone();
         let filename = self.filename.bind(py);
         let filename = filename
             .getattr("template")
