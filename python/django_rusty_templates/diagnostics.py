@@ -91,7 +91,7 @@ def render_url(view_name, urlconf, args, kwargs, current_app):
 
 
 def format_now(format_string, escape):
-    """Format a natively resolved now expression with Django's date service."""
+    """Format the current time for {% now %} as Django's NowNode does."""
     from datetime import datetime
     from django.conf import settings
     from django.template.defaultfilters import date
