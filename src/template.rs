@@ -23,7 +23,9 @@ pub mod django_rusty_templates {
     use pyo3::{PyTraverseError, PyVisit};
 
     use crate::error::{PyRenderError, RenderError};
-    use crate::loaders::{AppDirsLoader, CachedLoader, FileSystemLoader, Loader, LocMemLoader};
+    use crate::loaders::{
+        AppDirsLoader, CachedLoader, FileSystemLoader, Loader, LocMemLoader, Lookup,
+    };
     use crate::parse::{Fallback, Parser, PartialDefinition, Tag, TokenTree};
     use crate::render::types::{Context, PyContext};
     use crate::render::{Render, RenderResult};
@@ -393,24 +395,26 @@ pub mod django_rusty_templates {
         }
 
         fn get_template(&self, py: Python<'_>, template_name: String) -> PyResult<Template> {
-            let result = self.with_loader(py, |loader| {
-                let lookup = loader.find_template(py, &template_name, &self.engine);
-                lookup.map(|lookup| {
-                    let template =
-                        lookup?.into_template(py, &template_name, self.engine.clone())?;
-                    loader.cache_template(&template_name, &template);
-                    Ok(template)
+            let lookup = self
+                .with_loader(py, |loader| {
+                    loader.find_template(py, &template_name, &self.engine)
                 })
-            });
-            match result {
-                Ok(template) => template.map(|mut template| {
-                    let mut path = self.path.clone();
-                    path.extend(&template.loader_path);
-                    template.loader_path = path;
+                .map_err(|_| TemplateDoesNotExist::new_err(template_name.clone()))??;
+            let mut template = match lookup {
+                Lookup::Cached(template) => template,
+                // Compile without the loader lock, as the engine's `get_template` does.
+                source => {
+                    let template = source.into_template(py, &template_name, self.engine.clone())?;
+                    self.with_loader(py, |loader| {
+                        loader.cache_template(&template_name, &template)
+                    });
                     template
-                }),
-                Err(_) => Err(TemplateDoesNotExist::new_err(template_name)),
-            }
+                }
+            };
+            let mut path = self.path.clone();
+            path.extend(&template.loader_path);
+            template.loader_path = path;
+            Ok(template)
         }
 
         fn get_template_sources(
@@ -874,28 +878,37 @@ pub mod django_rusty_templates {
             .template_loaders
             .lock_py_attached(py)
             .expect("Mutex should not be poisoned");
+        let mut found = None;
         for (index, loader) in loaders.iter_mut().enumerate() {
             match loader.find_template(py, &template_name, &engine) {
+                Ok(Ok(Lookup::Cached(mut template))) => {
+                    template.loader_path.insert(0, index);
+                    update_cache_view(py, loader, &template_name, &template)?;
+                    return Ok(template);
+                }
                 Ok(lookup) => {
-                    return lookup.and_then(|lookup| {
-                        let mut template =
-                            lookup.into_template(py, &template_name, engine.clone())?;
-                        loader.cache_template(&template_name, &template);
-                        template.loader_path.insert(0, index);
-                        if let Loader::Cached(cached) = loader
-                            && let Some(view) = &cached.cache_view
-                        {
-                            view.bind(py)
-                                .set_item(template_name.as_ref(), template.clone())?;
-                        }
-                        Ok(template)
-                    });
+                    found = Some((index, lookup?));
+                    break;
                 }
                 Err(mut e) if !e.tried.is_empty() => tried.append(&mut e.tried),
                 Err(_) => {}
             }
         }
+        // Compiling can run Python tag compile functions that load templates
+        // from this engine, so the loaders must be unlocked while it runs.
         drop(loaders);
+        if let Some((index, lookup)) = found {
+            let mut template = lookup.into_template(py, &template_name, engine.clone())?;
+            let mut loaders = engine
+                .template_loaders
+                .lock_py_attached(py)
+                .expect("Mutex should not be poisoned");
+            let loader = &mut loaders[index];
+            loader.cache_template(&template_name, &template);
+            template.loader_path.insert(0, index);
+            update_cache_view(py, loader, &template_name, &template)?;
+            return Ok(template);
+        }
         let requested_name = template_name.to_string();
         Err(TemplateDoesNotExist::new_err((
             template_name.into_owned(),
@@ -913,6 +926,20 @@ pub mod django_rusty_templates {
                 })
                 .collect::<Vec<_>>(),
         )))
+    }
+
+    fn update_cache_view(
+        py: Python<'_>,
+        loader: &Loader,
+        template_name: &str,
+        template: &Template,
+    ) -> PyResult<()> {
+        if let Loader::Cached(cached) = loader
+            && let Some(view) = &cached.cache_view
+        {
+            view.bind(py).set_item(template_name, template.clone())?;
+        }
+        Ok(())
     }
 
     pub fn select_template(
