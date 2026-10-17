@@ -1224,29 +1224,15 @@ pub mod django_rusty_templates {
             );
             parser.emit_warnings = false;
             parser.inspect_only = true;
-            match parser.parse() {
-                Ok(_) => {}
+            let unimplemented = match parser.parse() {
+                Ok(_) => None,
+                Err(crate::parse::PyParseError::Unimplemented(error)) => {
+                    Some((error.has_python_fallback(), error.to_string()))
+                }
                 Err(crate::parse::PyParseError::PyErr(error))
                     if error.is_instance_of::<PyNotImplementedError>(py) =>
                 {
-                    report.set_item(
-                        "mode",
-                        if can_compile_python_fallback(py, &error) {
-                            "hybrid"
-                        } else {
-                            "unsupported"
-                        },
-                    )?;
-                    report.set_item("reason", error.value(py).to_string())?;
-                    if let Some(at) = parser.last_tag {
-                        let token = TemplateString(source).content(at);
-                        report.set_item("tag", token)?;
-                        report.set_item("span", (at.0, at.1))?;
-                        report.set_item(
-                            "line",
-                            source[..at.0].bytes().filter(|b| *b == b'\n').count() + 1,
-                        )?;
-                    }
+                    Some((false, error.value(py).to_string()))
                 }
                 Err(error) => {
                     return Err(canonical_parse_error(
@@ -1257,6 +1243,26 @@ pub mod django_rusty_templates {
                         None,
                         None,
                     ));
+                }
+            };
+            if let Some((python_fallback, reason)) = unimplemented {
+                report.set_item(
+                    "mode",
+                    if python_fallback {
+                        "hybrid"
+                    } else {
+                        "unsupported"
+                    },
+                )?;
+                report.set_item("reason", reason)?;
+                if let Some(at) = parser.last_tag {
+                    let token = TemplateString(source).content(at);
+                    report.set_item("tag", token)?;
+                    report.set_item("span", (at.0, at.1))?;
+                    report.set_item(
+                        "line",
+                        source[..at.0].bytes().filter(|b| *b == b'\n').count() + 1,
+                    )?;
                 }
             }
             Ok(report)
@@ -1340,7 +1346,7 @@ pub mod django_rusty_templates {
             parser.inspect_only = true;
             let parsed = parser.parse();
             match parsed {
-                Ok(_) => None,
+                Ok(_) | Err(crate::parse::PyParseError::Unimplemented(_)) => None,
                 Err(crate::parse::PyParseError::PyErr(error))
                     if error.is_instance_of::<PyNotImplementedError>(py) =>
                 {
@@ -1680,18 +1686,6 @@ pub mod django_rusty_templates {
         }
     }
 
-    fn can_compile_python_fallback(py: Python<'_>, error: &PyErr) -> bool {
-        [
-            "block",
-            "extends",
-            "Fully custom tag",
-            "partialdef",
-            "partial",
-        ]
-        .iter()
-        .any(|tag| error.value(py).to_string() == format!("not yet implemented: {tag}"))
-    }
-
     fn native_parse_error(
         error: crate::parse::PyParseError,
         source: &str,
@@ -1776,9 +1770,8 @@ pub mod django_rusty_templates {
             let parsed = parser.parse();
             let nodes = match parsed {
                 Ok(nodes) => nodes,
-                Err(crate::parse::PyParseError::PyErr(error))
-                    if error.is_instance_of::<PyNotImplementedError>(py)
-                        && can_compile_python_fallback(py, &error) =>
+                Err(crate::parse::PyParseError::Unimplemented(error))
+                    if error.has_python_fallback() =>
                 {
                     python_renderer = Some(Gc::new(
                         py.import("django_rusty_templates.interop")?
