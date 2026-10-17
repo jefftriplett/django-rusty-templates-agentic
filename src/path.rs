@@ -1,8 +1,7 @@
 use std::borrow::Cow;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use miette::{Diagnostic, SourceSpan};
-use sugar_path::SugarPath;
 use thiserror::Error;
 
 use dtl_lexer::types::At;
@@ -37,33 +36,35 @@ pub fn construct_relative_path<'a>(
     }
     match origin {
         Some(origin) => {
-            let origin = Path::new(origin);
-            let path = match origin.parent() {
-                None if adjacent => Path::new(path).normalize().into_owned(),
-                None => {
-                    return Err(RelativePathError::Outside {
-                        at: at.into(),
-                        origin: origin.to_path_buf(),
-                        template_path: path.to_string(),
-                    });
-                }
-                Some(directory) => {
-                    let new_path = Path::join(directory, path).normalize().into_owned();
-                    if new_path.starts_with("../") {
-                        return Err(RelativePathError::Outside {
-                            at: at.into(),
-                            origin: origin.to_path_buf(),
-                            template_path: path.to_string(),
-                        });
+            // Template names use POSIX separators even with a Windows loader.
+            let directory = origin.rsplit_once('/').map_or("", |(parent, _)| parent);
+            let absolute = directory.starts_with('/');
+            let mut parts = Vec::new();
+            for part in directory.split('/').chain(path.split('/')) {
+                match part {
+                    "" | "." => {}
+                    ".." if parts.last().is_some_and(|part| *part != "..") => {
+                        parts.pop();
                     }
-                    new_path
+                    ".." if absolute => {}
+                    part => parts.push(part),
                 }
-            };
-            Ok(Some(Cow::Owned(
-                path.to_str()
-                    .expect("Template names should be valid unicode.")
-                    .to_string(),
-            )))
+            }
+            if parts.first() == Some(&"..") {
+                return Err(RelativePathError::Outside {
+                    at: at.into(),
+                    origin: origin.into(),
+                    template_path: path.to_string(),
+                });
+            }
+            let path = parts.join("/");
+            Ok(Some(Cow::Owned(if absolute {
+                format!("/{path}")
+            } else if path.is_empty() {
+                ".".to_string()
+            } else {
+                path
+            })))
         }
         None => Err(RelativePathError::UnknownOrigin {
             at: at.into(),
@@ -75,6 +76,23 @@ pub fn construct_relative_path<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn template_names_keep_posix_separators() {
+        for (path, origin, expected) in [
+            ("./part.html", "nested/page.html", "nested/part.html"),
+            ("../part.html", "nested/page.html", "part.html"),
+            ("./part.html", "café/page.html", "café/part.html"),
+            ("./part.html", "nested\\page.html", "part.html"),
+        ] {
+            assert_eq!(
+                construct_relative_path(path, Some(origin), (0, path.len()))
+                    .unwrap()
+                    .unwrap(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn test_construct_adjacent_path_origin_root() {

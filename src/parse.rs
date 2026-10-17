@@ -1483,7 +1483,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         Self {
             py,
             template,
-            lexer: Lexer::new(template),
+            lexer: Lexer::new(template).with_modern_raw_blocks(engine.django_series >= (6, 2)),
             engine,
             origin,
             external_tags: HashMap::new(),
@@ -1513,11 +1513,12 @@ impl<'t, 'py> Parser<'t, 'py> {
         template: TemplateString<'t>,
         external_filters: HashMap<String, Bound<'py, PyAny>>,
     ) -> Self {
+        let engine: Arc<Engine> = Engine::empty().into();
         Self {
             py,
             template,
-            lexer: Lexer::new(template),
-            engine: Engine::empty().into(),
+            lexer: Lexer::new(template).with_modern_raw_blocks(engine.django_series >= (6, 2)),
+            engine,
             origin: None,
             external_tags: HashMap::new(),
             external_filters,

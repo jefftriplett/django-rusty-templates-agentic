@@ -14,6 +14,14 @@ use crate::template::django_rusty_templates::{Engine, Template};
 
 static APPS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
+fn normalize_newlines(contents: &str) -> Cow<'_, str> {
+    if contents.contains('\r') {
+        Cow::Owned(contents.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(contents)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoaderError {
     pub tried: Vec<(String, String)>,
@@ -130,7 +138,13 @@ impl FileSystemLoader {
                     .call_method1("decode", (&engine.file_charset,))
                     .and_then(|value| value.extract::<String>());
                 return Ok(contents.and_then(|contents| {
-                    Template::new(py, &contents, path, template_name, engine)
+                    Template::new(
+                        py,
+                        &normalize_newlines(&contents),
+                        path,
+                        template_name,
+                        engine,
+                    )
                 }));
             }
             let (contents, encoding, malformed) = self.encoding.decode(&bytes);
@@ -141,7 +155,13 @@ impl FileSystemLoader {
                     encoding.name()
                 ))));
             }
-            return Ok(Template::new(py, &contents, path, template_name, engine));
+            return Ok(Template::new(
+                py,
+                &normalize_newlines(&contents),
+                path,
+                template_name,
+                engine,
+            ));
         }
         Err(LoaderError { tried })
     }

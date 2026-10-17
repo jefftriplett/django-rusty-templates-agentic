@@ -58,7 +58,7 @@ def test_native_outer_parse_preserves_scopes_and_node_identity(
         "{% capture value|upper %}{{ captured }}-{{ forloop.counter }}"
         "{% endcapture %}|{% endfor %}{% endif %}{{ captured }}"
     )
-    (tmp_path / "custom.html").write_text(source)
+    (tmp_path / "custom.html").write_text(source, encoding="utf-8")
     loaders = ["django.template.loaders.filesystem.Loader"]
     if cached:
         loaders = [("django.template.loaders.cached.Loader", loaders)]
