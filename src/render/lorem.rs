@@ -215,6 +215,10 @@ pub static COMMON_WORDS: [&str; 19] = [
     "aliqua",
 ];
 
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "a sentence always has at least three words"
+)]
 pub fn sentence() -> String {
     let mut rng = rand::rng();
     let num_sections = rng.random_range(1..=5);

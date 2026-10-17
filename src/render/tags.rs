@@ -836,6 +836,7 @@ impl Render for Tag {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "one match arm per builtin tag")]
     fn render<'t>(
         &self,
         py: Python<'_>,

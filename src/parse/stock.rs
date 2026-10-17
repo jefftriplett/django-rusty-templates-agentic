@@ -147,6 +147,10 @@ pub(super) fn compiler(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<Optio
 }
 
 impl Parser<'_, '_> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "follows Django's do_block_translate step by step"
+    )]
     fn parse_block_translate(
         &mut self,
         tag: &str,
@@ -280,6 +284,10 @@ impl Parser<'_, '_> {
                     message.push_str(&format!("%({variable})s"));
                     variables.push(variable.to_string());
                 }
+                #[expect(
+                    clippy::suspicious_operation_groupings,
+                    reason = "a counted block must have seen its plural before it can close"
+                )]
                 _ => {
                     let content = token.content(self.template).trim();
                     if content == "plural" && counter.is_some() && plural.is_none() {
@@ -305,6 +313,7 @@ impl Parser<'_, '_> {
         })
     }
 
+    #[expect(clippy::too_many_lines, reason = "one match arm per stock tag")]
     pub(super) fn parse_stock(
         &mut self,
         at: At,

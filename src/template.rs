@@ -312,6 +312,10 @@ pub mod django_rusty_templates {
         }
 
         #[pyo3(signature = (template_name, skip=None))]
+        #[expect(
+            clippy::unused_self,
+            reason = "mirrors Django's cached Loader.cache_key instance method"
+        )]
         fn cache_key(
             &self,
             py: Python<'_>,
@@ -947,6 +951,10 @@ pub mod django_rusty_templates {
 
         #[new]
         #[pyo3(signature = (dirs=None, app_dirs=false, context_processors=None, debug=false, loaders=None, string_if_invalid=String::new(), file_charset="utf-8".to_string(), libraries=None, builtins=None, autoescape=true))]
+        #[expect(
+            clippy::too_many_lines,
+            reason = "normalises every argument of Django's Engine.__init__"
+        )]
         #[allow(clippy::too_many_arguments)] // We're matching Django's Engine __init__ signature
         pub fn new(
             py: Python<'_>,
@@ -2590,6 +2598,10 @@ pub mod django_rusty_templates {
     }
 
     impl Template {
+        #[expect(
+            clippy::too_many_lines,
+            reason = "selects a context binding strategy before the native render; split candidate"
+        )]
         pub fn py_render(
             &self,
             py: Python<'_>,

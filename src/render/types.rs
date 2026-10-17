@@ -864,6 +864,10 @@ impl Context {
         Ok(())
     }
 
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "setting str keys and formatting a dict of builtins cannot fail"
+    )]
     pub fn render_for_loop(&self, py: Python<'_>, depth: usize) -> String {
         let mut forloop_dict = PyDict::new(py);
         for forloop in self.loops.iter().rev().take(self.loops.len() - depth) {
@@ -1468,6 +1472,10 @@ impl<'t, 'py> Content<'t, 'py> {
         }
     }
 
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "int() always returns a Python int, which converts to BigInt"
+    )]
     pub fn to_bigint(&self) -> Option<BigInt> {
         match self {
             Self::Int(left) => Some(left.clone()),
@@ -1542,6 +1550,10 @@ impl<'t, 'py> Content<'t, 'py> {
         })
     }
 
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "converting Rust numbers to Python objects cannot fail"
+    )]
     pub fn to_py(&self, py: Python<'py>) -> Bound<'py, PyAny> {
         match self {
             Self::Py(object) => object.clone(),

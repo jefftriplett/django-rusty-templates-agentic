@@ -33,6 +33,7 @@ fn value<'py>(
 }
 
 impl Render for StockNode {
+    #[expect(clippy::too_many_lines, reason = "one match arm per stock node")]
     fn render<'t>(
         &self,
         py: Python<'_>,
@@ -252,6 +253,10 @@ impl Render for StockNode {
 }
 
 impl StockNode {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "follows Django's BlockTranslateNode.render step by step"
+    )]
     fn render_block_translation<'t>(
         &self,
         py: Python<'_>,

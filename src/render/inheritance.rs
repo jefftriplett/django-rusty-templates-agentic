@@ -164,6 +164,10 @@ impl Context {
     /// # Panics
     ///
     /// Panics if no template is currently being rendered.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "follows Django's ExtendsNode.get_parent and find_template step by step"
+    )]
     pub fn render_parent(
         &mut self,
         py: Python<'_>,

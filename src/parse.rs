@@ -190,6 +190,7 @@ pub struct Filter {
 }
 
 impl Filter {
+    #[expect(clippy::too_many_lines, reason = "one match arm per builtin filter")]
     pub fn new(
         parser: &Parser,
         at: At,
@@ -2372,6 +2373,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(cycle)
     }
 
+    #[expect(clippy::too_many_lines, reason = "one match arm per builtin tag")]
     fn parse_tag(
         &mut self,
         tag: &'t str,
