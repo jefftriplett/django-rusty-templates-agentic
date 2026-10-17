@@ -147,6 +147,14 @@ also tracks block and `with` scopes with small and large caller contexts.
 Each case runs in fresh processes with matching Django controls; use
 `--baseline` to check a later revision locally.
 
+`uv run python scripts/benchmark_realistic_page.py --json-output page.json`
+renders a realistic page through the `DjangoTemplates` and `RustyTemplates`
+backends: a base template with `extends`, 25 included cards, Django `User`
+objects, model-style methods, i18n tags and common filters, with and without
+a request and seven context processors. Templates live in
+`scripts/realistic_page/`. Each case checks output against Django and runs in
+fresh processes; `--baseline` applies the same 15% gate.
+
 `engine.explain_template(source, template_name=None)` reports `mode` (`native`, `hybrid`, or
 `unsupported`) and the first native compilation blocker. For a tag blocker it
 includes `reason`, the complete `tag` token, its UTF-8 byte `span` (start, length),
