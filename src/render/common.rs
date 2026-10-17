@@ -4,7 +4,7 @@ use pyo3::exceptions::{PyAttributeError, PyIndexError, PyKeyError, PyTypeError, 
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyString};
+use pyo3::types::{PyDict, PyFunction, PyString, PyType};
 
 use dtl_lexer::types::TemplateString;
 
@@ -23,6 +23,7 @@ use dtl_lexer::types::Variable;
 static BASE_CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DIR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SIGNATURE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static METHOD_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
 static GETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -32,12 +33,40 @@ pub fn gettext(py: Python<'_>, text: &str) -> PyResult<String> {
     get_text.call1((text,))?.extract::<String>()
 }
 
-fn has_truthy_attr(variable: &Bound<'_, PyAny>, attr: &Bound<'_, PyString>) -> PyResult<bool> {
-    match variable.getattr(attr) {
-        Ok(attr) => attr.is_truthy(),
-        Err(error) if error.is_instance_of::<PyAttributeError>(variable.py()) => Ok(false),
-        Err(error) => Err(error),
+/// The attribute dictionary of a Python function, or of a bound method's
+/// function. Neither type defines `do_not_call_in_templates` or `alters_data`
+/// and a bound method forwards other lookups to its function, so Django's
+/// `getattr` can only find the flags here. Reading the dictionary avoids
+/// raising two `AttributeError`s for every call.
+fn function_attributes<'py>(variable: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyDict>>> {
+    let py = variable.py();
+    let function = if variable
+        .get_type()
+        .is(METHOD_TYPE.import(py, "types", "MethodType")?)
+    {
+        variable.getattr(intern!(py, "__func__"))?
+    } else {
+        variable.clone()
+    };
+    if !function.is_exact_instance_of::<PyFunction>() {
+        return Ok(None);
     }
+    Ok(function
+        .getattr(intern!(py, "__dict__"))?
+        .cast_into_exact::<PyDict>()
+        .ok())
+}
+
+fn has_truthy_attr(
+    variable: &Bound<'_, PyAny>,
+    attributes: Option<&Bound<'_, PyDict>>,
+    attr: &Bound<'_, PyString>,
+) -> PyResult<bool> {
+    let value = match attributes {
+        Some(attributes) => attributes.get_item(attr)?,
+        None => variable.getattr_opt(attr)?,
+    };
+    value.map_or(Ok(false), |value| value.is_truthy())
 }
 
 fn resolve_callable<'py>(
@@ -48,10 +77,15 @@ fn resolve_callable<'py>(
         return Ok(Some(variable));
     }
     let py = variable.py();
-    if has_truthy_attr(&variable, intern!(py, "do_not_call_in_templates"))? {
+    let attributes = function_attributes(&variable)?;
+    if has_truthy_attr(
+        &variable,
+        attributes.as_ref(),
+        intern!(py, "do_not_call_in_templates"),
+    )? {
         return Ok(Some(variable));
     }
-    if has_truthy_attr(&variable, intern!(py, "alters_data"))? {
+    if has_truthy_attr(&variable, attributes.as_ref(), intern!(py, "alters_data"))? {
         return Ok(None);
     }
     match context.call_variable(py, &variable) {
