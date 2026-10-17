@@ -25,6 +25,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: cargo-bins/cargo-binstall@3be4ad2b146f3302f92e5956c54fedbb6ae8cccc # v1.25.3
-      - run: cargo binstall --no-confirm cargo-shear
+      - name: Install cargo-shear with its locked dependencies
+        run: cargo install --locked --version 1.14.0 cargo-shear
       - run: cargo shear

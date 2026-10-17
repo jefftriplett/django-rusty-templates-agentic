@@ -75,6 +75,7 @@ pub struct Lexer<'t> {
     rest: &'t str,
     byte: usize,
     verbatim: Option<&'t str>,
+    modern_raw_blocks: bool,
 }
 
 impl<'t> Lexer<'t> {
@@ -84,19 +85,48 @@ impl<'t> Lexer<'t> {
             rest: template.0,
             byte: 0,
             verbatim: None,
+            modern_raw_blocks: false,
         }
+    }
+
+    pub fn with_modern_raw_blocks(mut self, enabled: bool) -> Self {
+        self.modern_raw_blocks = enabled;
+        self
     }
 
     fn lex_text(&mut self) -> Token {
         // Search once for the next opening delimiter. Three independent
         // searches repeatedly scanned the entire remaining source when one
         // delimiter kind (often comments) was absent, making lexing quadratic.
+        let mut endings: [Option<Option<usize>>; 3] = [None; 3];
+        let mut next_newline = None;
         let next = self.rest.match_indices('{').find_map(|(index, _)| {
-            matches!(
-                self.rest.as_bytes().get(index + 1),
-                Some(b'{' | b'%' | b'#')
-            )
-            .then_some(index)
+            let (kind, end) = match self.rest.as_bytes().get(index + 1) {
+                Some(b'{') => (0, "}}"),
+                Some(b'%') => (1, "%}"),
+                Some(b'#') => (2, "#}"),
+                _ => return None,
+            };
+            // Reuse unsuccessful lookups across literal opening delimiters.
+            let closing = match endings[kind] {
+                Some(None) => return None,
+                Some(Some(closing)) if closing >= index + 2 => closing,
+                _ => {
+                    let closing = self.rest[index + 2..]
+                        .find(end)
+                        .map(|offset| index + 2 + offset);
+                    endings[kind] = Some(closing);
+                    closing?
+                }
+            };
+            if next_newline.is_none_or(|newline| newline < index) {
+                next_newline = self.rest[index..closing]
+                    .find('\n')
+                    .map(|offset| index + offset);
+            }
+            next_newline
+                .is_none_or(|newline| newline >= closing)
+                .then_some(index)
         });
         let len = match next {
             None => {
@@ -129,18 +159,11 @@ impl<'t> Lexer<'t> {
             EndTag::Comment => "#}",
         };
         let Some(n) = self.rest.find(end_str) else {
-            let len = self.rest.len();
-            let at = (self.byte, len);
-            self.byte += len;
-            self.rest = "";
-            return Token::text(at);
+            return self.lex_text();
         };
         // This can be removed if https://code.djangoproject.com/ticket/35899 lands
-        if let Some(newline) = self.rest[..n].find('\n') {
-            let at = (self.byte, newline + 1);
-            self.byte += newline + 1;
-            self.rest = &self.rest[newline + 1..];
-            return Token::text(at);
+        if self.rest[..n].contains('\n') {
+            return self.lex_text();
         }
         let len = n + end_str.len();
         self.rest = &self.rest[len..];
@@ -169,10 +192,17 @@ impl<'t> Lexer<'t> {
                 return self.lex_text_to_end();
             };
             let inner = &rest[2..end_tag].trim();
+            let multiline = rest[..end_tag].contains('\n');
             // Check we have the right endverbatim tag
-            if inner.len() < 3 || &inner[3..] != verbatim {
-                rest = &rest[end_tag + 2..];
-                index += start_tag + end_tag + 2;
+            if multiline || inner.strip_prefix("end") != Some(verbatim) {
+                let consumed = if self.modern_raw_blocks || multiline {
+                    // A literal opener must not hide a later valid closing tag.
+                    2
+                } else {
+                    end_tag + 2
+                };
+                rest = &rest[consumed..];
+                index += start_tag + consumed;
                 continue;
             }
 

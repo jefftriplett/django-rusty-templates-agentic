@@ -1783,10 +1783,10 @@ impl InclusionTag {
             .bind(py)
             .call(PyTuple::new(py, args)?, kwargs.as_ref())?;
         let mut values: HashMap<String, Py<PyAny>> = values.extract()?;
-        if let Some(csrf) = context.get("csrf_token")
-            && !csrf.is_none(py)
+        if let Some(csrf) = context.resolve_root(py, "csrf_token")?
+            && !csrf.is_none()
         {
-            values.insert("csrf_token".to_string(), csrf.clone_ref(py));
+            values.insert("csrf_token".to_string(), csrf.unbind());
         }
         // Context.new() restores builtins and preserves formatting flags, while
         // excluding the caller's variables, loop state and context processors.
@@ -2059,9 +2059,8 @@ impl Render for CsrfToken {
         _template: TemplateString<'t>,
         context: &mut Context,
     ) -> RenderResult<'t> {
-        match context.get("csrf_token") {
-            Some(token) => {
-                let bound_token = token.bind(py);
+        match context.resolve_root(py, "csrf_token")? {
+            Some(bound_token) => {
                 if let Ok(token_str) = bound_token.extract::<String>() {
                     if token_str.is_empty() || token_str == "NOTPROVIDED" {
                         Ok(Cow::Borrowed(""))

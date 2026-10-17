@@ -1,4 +1,4 @@
-"""Run unmodified Django template tests with the Rusty engine substituted."""
+"""Run unmodified Django template and admin tests through Rusty."""
 
 import argparse
 import json
@@ -14,6 +14,20 @@ PROJECT_DIR = SCRIPT_DIR.parent
 
 def log(message):
     print(f"==> {message}", flush=True)
+
+
+def default_test_labels(django_version):
+    labels = ["template_tests", "template_loader", "admin_views"]
+    if tuple(map(int, django_version.split("."))) >= (6, 0):
+        labels.extend(
+            [
+                "context_processors.tests.CSPContextProcessorTests",
+                "middleware.test_csp",
+                "decorators.test_csp",
+                "utils_tests.test_csp",
+            ]
+        )
+    return labels
 
 
 def summarize_results(results):
@@ -108,9 +122,7 @@ def prepare_checkout(args):
             "HEAD",
             "--",
             "django",
-            "tests/template_tests",
-            "tests/template_loader",
-            "tests/runtests.py",
+            "tests",
         ],
         cwd=checkout,
     ).returncode:
@@ -143,10 +155,9 @@ def main():
         help="Save outcomes, tracebacks, skips, versions, and reference commit",
     )
     parser.add_argument("--raw-output", type=Path)
-    parser.add_argument(
-        "tests", nargs="*", default=["template_tests", "template_loader"]
-    )
+    parser.add_argument("tests", nargs="*")
     args = parser.parse_args()
+    args.tests = args.tests or default_test_labels(args.django_version)
     try:
         checkout, commit = prepare_checkout(args)
     except (ValueError, subprocess.CalledProcessError) as error:

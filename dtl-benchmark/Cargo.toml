@@ -5,11 +5,6 @@ publish = false
 rust-version.workspace = true
 description = "DTL Micro-benchmarks"
 
-[lib]
-bench = false
-test = false
-doctest = false
-
 [[bench]]
 name = "slugify"
 harness = false

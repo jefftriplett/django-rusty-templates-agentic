@@ -58,7 +58,7 @@ $ pytest
 
 Running `just python-test` combines these two commands for you.
 
-### Django template conformance
+### Django template and admin conformance
 
 Build the extension with `uv run maturin develop`, then run a Django version locally:
 
@@ -71,11 +71,15 @@ uv run scripts/run_django_test_suite.py --django-version 6.2 --django-ref dab0a5
 
 Django 6.2 is development support: its cache initially clones `main`, because `stable/6.2.x` does not yet exist. Pin `--django-ref` for reproducible results. The reference above is the audited checkout, not a claim of compatibility with future changes.
 
-Django 6 requires Python 3.12+. Development dependencies and the default Ubuntu/Python 3.13 sanity job use Django 5.2. Every PR also checks unchanged upstream Django 5.2, 6.0, and 6.1 template tests on Python 3.13. Broader OS/Python matrices and Django 6.2 run by manual dispatch.
+Django 6 requires Python 3.12+. Development dependencies and the default Ubuntu/Python 3.13 sanity job use Django 5.2. Every PR also checks unchanged upstream Django 5.2, 6.0, and 6.1 template and admin view tests on Python 3.13. Broader OS/Python matrices and Django 6.2 run by manual dispatch.
 
-The runner clones each series into its own ignored `scripts/.django-{version}` checkout. It substitutes Engine and the backend at runtime without changing Django's assertions, fixtures, or source files. Existing caches retain their reference until `--django-ref stable/6.1.x` (or a tag/commit) is supplied. JSON output records the Django/Python versions, reference commit, skipped tests, and failure tracebacks. The pass percentage counts runnable test methods once, including methods with multiple failing subtests, and excludes skips. A failing suite returns a nonzero exit code.
+The runner clones each series into its own ignored `scripts/.django-{version}` checkout. By default it runs `template_tests`, `template_loader`, and `admin_views`, including login, index, change forms, filters, and inclusion tags through the configured backend. It substitutes Engine and the backend and adapts the public `Template(...)` constructor to compile and render through Rusty, without changing Django's assertions, fixtures, or source files. The base Django Template remains available for interoperability and test-client instrumentation. This matters because replacing Engine alone lets direct `Template(...)` tests pass using Django's parser and renderer.
 
-Use `--django-checkout /path/to/django` for an existing pristine checkout; the runner leaves it unchanged and rejects tracked source/test edits. An optional `--django-ref` must match that checkout's HEAD. Add test labels to narrow a run, for example `template_tests.test_partials`. `--raw-output` saves the complete test log.
+Existing caches retain their reference until `--django-ref stable/6.1.x` (or a tag/commit) is supplied. JSON output records the Django/Python versions, reference commit, test labels, skipped tests, and failure tracebacks. The pass percentage counts runnable test methods once, including methods with multiple failing subtests, and excludes skips. A failing suite returns a nonzero exit code.
+
+On Django 6.0+, the default run also includes CSP context processor, middleware, decorator, and utility tests. Local regression tests cover every registered builtin tag and filter in template syntax, since many upstream filter tests only call the Python functions. CSP integration tests additionally check the documented inline nonce, attribute tag, and media forms against enforced and report-only headers, fresh nonces per request, and lazy generation.
+
+Use `--django-checkout /path/to/django` for an existing pristine checkout; the runner leaves it unchanged and rejects tracked source/test edits. An optional `--django-ref` must match that checkout's HEAD. Add test labels to narrow a run, for example `template_tests.syntax_tests.test_csp_nonce_attr` on Django 6.1, or `admin_views.tests.AdminViewPermissionsTest.test_login`. `--raw-output` saves the complete test log. Browser tests remain skipped unless their dependencies and browser configuration are supplied.
 
 ### Rust tests with cargo
 You can also run the Rust tests:
@@ -129,7 +133,7 @@ Individual workflows remain dispatchable. `Full CI` runs the Python 3.11–3.14/
 
 Coverage reports are retained as artifacts for seven days. **Codecov uploads remain disabled.** Wheel builds remain tag/manual only. No duplicate main-push test runs or schedules are added. The restoration PR remains unmerged until approved.
 
-Django base/PR comparisons use the exact same pristine upstream checkout. Structured summaries reject mismatched references and empty results; suite failures retain failing job status. Manual runs use the selected commit for both sides, and report results without posting a PR comment. PR comment permissions are confined to a separate job for same-repository PRs.
+Django base/PR comparisons run `template_tests` and `template_loader` against the exact same pristine upstream checkout. A separate required PR run uses the full default suite, including admin and applicable CSP tests, and records its results alongside the comparison. This lets coverage expand without comparing different test sets or requiring the base branch to support newly covered features. Structured summaries reject mismatched references and empty results; failures in either PR run or the baseline retain failing job status. Manual runs use the selected commit for both sides, and report results without posting a PR comment. PR comment permissions are confined to a separate job for same-repository PRs.
 
 uv cache keys include job/matrix-specific suffixes so concurrent jobs do not compete to save the same key. Rust caches, timeouts, and workflow-specific cancellation groups limit repeated work. Cancellation groups use explicit workflow prefixes so reusable workflows called by `Full CI` cannot cancel each other or their caller. Linux runners are pinned to `ubuntu-24.04` to avoid the October–November 2026 `ubuntu-latest` migration to Ubuntu 26.04; the image can be upgraded deliberately after validation.
 
