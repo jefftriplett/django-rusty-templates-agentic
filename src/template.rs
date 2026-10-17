@@ -394,7 +394,13 @@ pub mod django_rusty_templates {
 
         fn get_template(&self, py: Python<'_>, template_name: String) -> PyResult<Template> {
             let result = self.with_loader(py, |loader| {
-                loader.get_template(py, &template_name, self.engine.clone())
+                let lookup = loader.find_template(py, &template_name, &self.engine);
+                lookup.map(|lookup| {
+                    let template =
+                        lookup?.into_template(py, &template_name, self.engine.clone())?;
+                    loader.cache_template(&template_name, &template);
+                    Ok(template)
+                })
             });
             match result {
                 Ok(template) => template.map(|mut template| {
@@ -869,9 +875,12 @@ pub mod django_rusty_templates {
             .lock_py_attached(py)
             .expect("Mutex should not be poisoned");
         for (index, loader) in loaders.iter_mut().enumerate() {
-            match loader.get_template(py, &template_name, engine.clone()) {
-                Ok(template) => {
-                    return template.and_then(|mut template| {
+            match loader.find_template(py, &template_name, &engine) {
+                Ok(lookup) => {
+                    return lookup.and_then(|lookup| {
+                        let mut template =
+                            lookup.into_template(py, &template_name, engine.clone())?;
+                        loader.cache_template(&template_name, &template);
                         template.loader_path.insert(0, index);
                         if let Loader::Cached(cached) = loader
                             && let Some(view) = &cached.cache_view
