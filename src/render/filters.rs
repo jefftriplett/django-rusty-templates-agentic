@@ -25,8 +25,8 @@ use unicode_normalization::UnicodeNormalization;
 static MARK_FILTER_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
-static GET_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DATE_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static TEMPLATE_LOCALTIME: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 impl Resolve for Filter {
     fn resolve<'t, 'py>(
@@ -325,6 +325,18 @@ impl ResolveFilter for DefaultIfNoneFilter {
     }
 }
 
+/// Convert an aware datetime to the current time zone, as Django does for
+/// filters registered with `expects_localtime=True`.
+fn template_localtime<'py>(
+    py: Python<'py>,
+    value: Bound<'py, PyAny>,
+    context: &Context,
+) -> PyResult<Bound<'py, PyAny>> {
+    TEMPLATE_LOCALTIME
+        .import(py, "django.utils.timezone", "template_localtime")?
+        .call1((value, context.use_tz))
+}
+
 impl ResolveFilter for DateFilter {
     fn resolve<'t, 'py>(
         &self,
@@ -342,10 +354,7 @@ impl ResolveFilter for DateFilter {
                 .resolve(py, template, context, ResolveFailures::Raise)?
                 .expect("missing argument in context should already have raised")
                 .to_py(py),
-            None => {
-                let get_format = GET_FORMAT.import(py, "django.utils.formats", "get_format")?;
-                get_format.call1(("DATE_FORMAT",))?
-            }
+            None => py.None().into_bound(py),
         };
 
         let value = value.to_py(py);
@@ -358,7 +367,11 @@ impl ResolveFilter for DateFilter {
             return Ok(Some("".as_content()));
         }
 
-        let date_format_fn = DATE_FORMAT.import(py, "django.utils.dateformat", "format")?;
+        // Django registers `date` with `expects_localtime=True`.
+        let value = template_localtime(py, value, context)?;
+        // `formats.date_format` resolves setting names such as "SHORT_DATE_FORMAT"
+        // and falls back to DATE_FORMAT when no format is given.
+        let date_format_fn = DATE_FORMAT.import(py, "django.utils.formats", "date_format")?;
 
         let formatted = match date_format_fn.call1((value, fmt)) {
             Ok(res) => res,
