@@ -44,6 +44,7 @@ use crate::filters::LowerFilter;
 use crate::filters::SafeFilter;
 use crate::filters::SlugifyFilter;
 use crate::filters::TitleFilter;
+use crate::filters::TruncateCharsFilter;
 use crate::filters::UpperFilter;
 use crate::filters::WordcountFilter;
 use crate::filters::WordwrapFilter;
@@ -185,6 +186,14 @@ fn unexpected_argument(filter: &'static str, right: Argument) -> ParseError {
     }
 }
 
+/// Whether `filter` is Django's own implementation of `name`, so a native
+/// port may stand in for it, rather than a replacement registered in its place.
+fn is_django_filter(py: Python<'_>, filter: &Py<PyAny>, name: &str) -> bool {
+    py.import(intern!(py, "django.template.defaultfilters"))
+        .and_then(|module| module.getattr(name))
+        .is_ok_and(|django| django.is(filter))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Filter {
     pub at: At,
@@ -221,14 +230,23 @@ impl Filter {
                 (FilterArgument::Optional | FilterArgument::Required, right) => right,
                 (FilterArgument::Forbidden, None) => None,
             };
+            let django = DjangoFilter {
+                filter: parser.builtin_filter(builtin, at)?,
+                argument,
+            };
+            let filter = match builtin {
+                BuiltinFilter::Truncatechars
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::TruncateChars(TruncateCharsFilter { django })
+                }
+                _ => FilterType::Django(django),
+            };
             return Ok(Self {
                 at,
                 all_at,
                 left,
-                filter: FilterType::Django(DjangoFilter {
-                    filter: parser.builtin_filter(builtin, at)?,
-                    argument,
-                }),
+                filter,
             });
         }
         let filter = match parser.template.content(at) {

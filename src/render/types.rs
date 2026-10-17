@@ -19,8 +19,10 @@ use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
 use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyType};
 
+use super::filters::TruncationText;
 use super::inheritance::{BlockEntry, BlockMarker};
 use super::l10n::{NumberFormat, localize_number};
+use super::language_cache::LanguageCache;
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::parse::CycleId;
 use crate::render::RenderResult;
@@ -186,6 +188,7 @@ pub struct Context {
     changed_states: Vec<HashMap<CycleId, Py<PyAny>>>,
     assigned: HashSet<String>,
     cycle_variables: HashSet<String>,
+    pub(crate) truncation_text: LanguageCache<Option<TruncationText>>,
 }
 
 impl Trace for Context {
@@ -270,6 +273,7 @@ impl Context {
             changed_states: vec![HashMap::new()],
             assigned: HashSet::new(),
             cycle_variables: HashSet::new(),
+            truncation_text: LanguageCache::default(),
         }
     }
 
@@ -316,6 +320,7 @@ impl Context {
                         .collect()
                 })
                 .collect(),
+            truncation_text: self.truncation_text.clone(),
         }
     }
 
