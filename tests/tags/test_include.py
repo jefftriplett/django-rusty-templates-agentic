@@ -1,5 +1,4 @@
 from django import VERSION
-import os
 from pathlib import Path
 
 import pytest
@@ -816,11 +815,10 @@ def test_include_bool_filter_true(assert_render_error):
 def test_include_missing_relative_template(assert_render_error):
     template = "{% include 'nested/invalid.txt' %}"
     django_message = "nested/missing.txt"
-    sep = os.sep
-    rusty_message = f"""\
-  × nested{sep}missing.txt
+    rusty_message = """\
+  × nested/missing.txt
    ╭────
- 1 │ {{% include "./missing.txt" %}}
+ 1 │ {% include "./missing.txt" %}
    ·             ──────┬──────
    ·                   ╰── here
    ╰────
