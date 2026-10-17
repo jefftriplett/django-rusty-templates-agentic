@@ -56,13 +56,26 @@ jobs:
           uv sync --python 3.13
           uv run maturin develop
           uv run -m django compilemessages
-      - name: Run unchanged Django tests (PR)
+      - name: Run comparable Django template tests (PR)
         id: branch
         continue-on-error: true
         working-directory: branch
         run: |
           mkdir -p "$GITHUB_WORKSPACE/results"
-          uv run scripts/run_django_test_suite.py --django-version "$DJANGO_SERIES"             --parsed-output "$GITHUB_WORKSPACE/results/branch-$DJANGO_SERIES.txt"             --json-output "$GITHUB_WORKSPACE/results/branch-$DJANGO_SERIES.json"             --raw-output "$GITHUB_WORKSPACE/results/branch-$DJANGO_SERIES.log"
+          uv run scripts/run_django_test_suite.py --django-version "$DJANGO_SERIES" \
+            --parsed-output "$GITHUB_WORKSPACE/results/branch-$DJANGO_SERIES.txt" \
+            --json-output "$GITHUB_WORKSPACE/results/branch-$DJANGO_SERIES.json" \
+            --raw-output "$GITHUB_WORKSPACE/results/branch-$DJANGO_SERIES.log" \
+            template_tests template_loader
+      - name: Run full Django template, admin, and CSP suites (PR)
+        id: full_branch
+        continue-on-error: true
+        working-directory: branch
+        run: |
+          uv run scripts/run_django_test_suite.py --django-version "$DJANGO_SERIES" \
+            --parsed-output "$GITHUB_WORKSPACE/results/full-branch-$DJANGO_SERIES.txt" \
+            --json-output "$GITHUB_WORKSPACE/results/full-branch-$DJANGO_SERIES.json" \
+            --raw-output "$GITHUB_WORKSPACE/results/full-branch-$DJANGO_SERIES.log"
       - name: Build base extension
         working-directory: base
         run: |
@@ -74,11 +87,18 @@ jobs:
         continue-on-error: true
         working-directory: base
         run: |
-          uv run scripts/run_django_test_suite.py --django-version "$DJANGO_SERIES"             --django-checkout "$GITHUB_WORKSPACE/branch/scripts/.django-$DJANGO_SERIES"             --parsed-output "$GITHUB_WORKSPACE/results/base-$DJANGO_SERIES.txt"             --json-output "$GITHUB_WORKSPACE/results/base-$DJANGO_SERIES.json"             --raw-output "$GITHUB_WORKSPACE/results/base-$DJANGO_SERIES.log"
+          uv run scripts/run_django_test_suite.py --django-version "$DJANGO_SERIES" \
+            --django-checkout "$GITHUB_WORKSPACE/branch/scripts/.django-$DJANGO_SERIES" \
+            --parsed-output "$GITHUB_WORKSPACE/results/base-$DJANGO_SERIES.txt" \
+            --json-output "$GITHUB_WORKSPACE/results/base-$DJANGO_SERIES.json" \
+            --raw-output "$GITHUB_WORKSPACE/results/base-$DJANGO_SERIES.log" \
+            template_tests template_loader
       - name: Compare structured results
         working-directory: branch
         run: |
           uv run scripts/compare_django_results.py             "$GITHUB_WORKSPACE/results/base-$DJANGO_SERIES.json"             "$GITHUB_WORKSPACE/results/branch-$DJANGO_SERIES.json"             --output "$GITHUB_WORKSPACE/results/comment-$DJANGO_SERIES.md"
+          printf '\nExpanded PR suite (templates, admin, and applicable CSP tests):\n\n' >> "$GITHUB_WORKSPACE/results/comment-$DJANGO_SERIES.md"
+          sed -n '1,2p' "$GITHUB_WORKSPACE/results/full-branch-$DJANGO_SERIES.txt" >> "$GITHUB_WORKSPACE/results/comment-$DJANGO_SERIES.md"
           cat "$GITHUB_WORKSPACE/results/comment-$DJANGO_SERIES.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Save audit results
         if: always()
@@ -88,7 +108,7 @@ jobs:
           path: results/
           retention-days: 7
       - name: Preserve conformance failure status
-        if: steps.branch.outcome == 'failure' || steps.base.outcome == 'failure'
+        if: steps.branch.outcome == 'failure' || steps.full_branch.outcome == 'failure' || steps.base.outcome == 'failure'
         run: exit 1
 
   comment:
