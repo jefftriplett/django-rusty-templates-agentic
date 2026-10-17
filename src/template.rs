@@ -644,7 +644,7 @@ pub mod django_rusty_templates {
                             .collect::<PyResult<Vec<_>>>()
                     })
                     .transpose()?
-                    .unwrap_or(dirs.clone());
+                    .unwrap_or_else(|| dirs.clone());
 
                 Ok(Loader::FileSystem(if uses_engine_dirs {
                     FileSystemLoader::with_engine_dirs(paths, encoding)
@@ -774,6 +774,7 @@ pub mod django_rusty_templates {
                 return None;
             };
             let mut template = loader.cache.get(name)?.as_ref().ok()?.clone();
+            drop(loaders);
             if !template.is_native() {
                 return None;
             }
@@ -1160,7 +1161,9 @@ pub mod django_rusty_templates {
                 self.engine.clone(),
             )?;
             let loader = origin.getattr("loader")?.getattr("_native")?;
-            template.loader_path = loader.extract::<PyRef<'_, LoaderView>>()?.path.clone();
+            template
+                .loader_path
+                .clone_from(&loader.extract::<PyRef<'_, LoaderView>>()?.path);
             if let Some(renderer) = &template.python_renderer {
                 renderer.bind(py).call_method1("bind_origin", (origin,))?;
                 return Ok(renderer.bind(py).clone());
@@ -1333,7 +1336,7 @@ pub mod django_rusty_templates {
             source: &str,
             filename: Option<PathBuf>,
             template_name: Option<String>,
-        ) -> PyResult<Option<String>> {
+        ) -> Option<String> {
             let mut parser = Parser::new(
                 py,
                 TemplateString(source),
@@ -1344,18 +1347,18 @@ pub mod django_rusty_templates {
             parser.inspect_only = true;
             let parsed = parser.parse();
             match parsed {
-                Ok(_) => Ok(None),
+                Ok(_) => None,
                 Err(crate::parse::PyParseError::PyErr(error))
                     if error.is_instance_of::<PyNotImplementedError>(py) =>
                 {
-                    Ok(None)
+                    None
                 }
                 Err(error) => {
                     // Django already rejected this source in the compatibility
                     // parser. Attach the native explanation without validating
                     // again or invoking arbitrary compilers a second time.
                     let error = native_parse_error(error, source, filename.as_deref());
-                    Ok(Some(error.value(py).to_string()))
+                    Some(error.value(py).to_string())
                 }
             }
         }

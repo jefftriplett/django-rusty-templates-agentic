@@ -263,6 +263,7 @@ impl Context {
         }
     }
 
+    #[must_use]
     pub fn clone_ref(&self, py: Python<'_>) -> Self {
         Self {
             request: self.request.as_ref().map(|v| v.clone_ref(py)),
@@ -434,16 +435,18 @@ impl Context {
         kwargs.set_item("use_l10n", self.use_l10n)?;
         kwargs.set_item("use_tz", self.use_tz)?;
         let mut cached_base = self.django_context_base.borrow_mut();
-        if cached_base.is_none() {
+        let base = if let Some(base) = cached_base.as_ref() {
+            base
+        } else {
             let base = PyDict::new(py);
             for (key, values) in self.visible_bindings() {
                 if let Some(value) = values.last() {
                     base.set_item(key, value)?;
                 }
             }
-            *cached_base = Some(base.unbind());
+            cached_base.insert(base.unbind())
         }
-        let base = cached_base.as_ref().expect("base was initialized").bind(py);
+        .bind(py);
         let overlay = PyDict::new(py);
         if !self.loops.is_empty() {
             overlay.set_item("forloop", self.loop_dictionary(py, 0)?)?;
@@ -713,6 +716,9 @@ impl Context {
         Ok(())
     }
 
+    /// # Panics
+    ///
+    /// Panics if `name` was never pushed.
     pub fn pop_variable(&mut self, name: &str) {
         if self.django_context_base.get_mut().is_some() {
             self.django_context_changes.insert(name.to_string());
@@ -746,6 +752,9 @@ impl Context {
         self.changed_states.push(HashMap::new());
     }
 
+    /// # Panics
+    ///
+    /// Panics if no for loop is active.
     pub fn increment_for_loop(&mut self) {
         let for_loop = self
             .loops
@@ -754,6 +763,9 @@ impl Context {
         for_loop.count += 1;
     }
 
+    /// # Panics
+    ///
+    /// Panics if no for loop is active.
     pub fn pop_for_loop(&mut self) {
         self.changed_states.pop();
         self.loops
@@ -807,6 +819,10 @@ impl Context {
     }
 
     /// Expose native loop scopes to Python callbacks on the live Django context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called for a live Django context while no for loop is active.
     pub fn sync_loop_context(&self, py: Python<'_>, first: bool) -> PyResult<()> {
         let Some(context) = &self.formatting_context else {
             if let Some(loop_) = self.loops.last()
@@ -902,6 +918,9 @@ impl Context {
         }
     }
 
+    /// # Panics
+    ///
+    /// Panics if the `ifchanged` state frames are unbalanced.
     pub fn has_changed(
         &mut self,
         py: Python<'_>,

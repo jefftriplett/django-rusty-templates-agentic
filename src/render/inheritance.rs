@@ -69,11 +69,10 @@ impl BlockCallback {
 
     #[pyo3(name = "super")]
     fn render_super(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let mut context = self
+        let output = self
             .context
             .lock_py_attached(py)
-            .expect("context lock is not poisoned");
-        let output = context
+            .expect("context lock is not poisoned")
             .render_super(py, &self.marker)
             .map_err(|error| self.marker.entry.owner.render_error(error))?;
         Ok(py
@@ -162,6 +161,9 @@ impl Context {
         Ok(self.render_block(py, marker.entry.clone())?.into_owned())
     }
 
+    /// # Panics
+    ///
+    /// Panics if no template is currently being rendered.
     pub fn render_parent(
         &mut self,
         py: Python<'_>,

@@ -1548,12 +1548,12 @@ impl<'t, 'py> Parser<'t, 'py> {
         name: &'static str,
         at: At,
     ) -> Result<Gc<Py<PyAny>>, ParseError> {
+        static DEFAULT_FILTERS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
         if let Some(cache) = self.builtin_filters.borrow().as_ref()
             && let Some(filter) = &cache[index]
         {
             return Ok(filter.clone());
         }
-        static DEFAULT_FILTERS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
         let lookup = (|| -> PyResult<_> {
             let library = match self.engine.template_builtins.get(1) {
                 Some(library) => library.bind(self.py),
@@ -1839,7 +1839,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(var)
     }
 
-    fn parse_lorem(&mut self, _at: At, parts: TagParts) -> Result<Lorem, PyParseError> {
+    fn parse_lorem(&self, _at: At, parts: TagParts) -> Result<Lorem, PyParseError> {
         let mut lexer = LoremLexer::new(self.template, parts);
 
         let first = match lexer.next() {
@@ -1899,7 +1899,9 @@ impl<'t, 'py> Parser<'t, 'py> {
                         common: false,
                     });
                 }
-                _ => unreachable!("Count in second position should already have errored"),
+                LoremTokenType::Count(_) => {
+                    unreachable!("Count in second position should already have errored")
+                }
             },
             Some(third) => third.map_err(ParseError::from)?,
         };
@@ -1971,7 +1973,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         tokens
     }
 
-    fn parse_now(&mut self, parts: TagParts) -> Result<Now, PyParseError> {
+    fn parse_now(&self, parts: TagParts) -> Result<Now, PyParseError> {
         let version = self.py.import("django")?.getattr("VERSION")?;
         let series = (
             version.get_item(0)?.extract::<u8>()?,
@@ -2254,7 +2256,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(TokenTree::Tag(Tag::WidthRatio { args, asvar }))
     }
 
-    fn parse_firstof(&mut self, parts: TagParts) -> Result<TokenTree, PyParseError> {
+    fn parse_firstof(&self, parts: TagParts) -> Result<TokenTree, PyParseError> {
         let mut tokens = TagElementKwargLexer::new(self.template, parts.clone())
             .with_modern_syntax(self.engine.django_series >= (6, 0))
             .collect::<Result<Vec<_>, _>>()

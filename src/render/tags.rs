@@ -92,7 +92,7 @@ impl Resolve for Url {
             for arg in &self.args {
                 py_args.append(
                     arg.resolve(py, template, context, failures)?
-                        .unwrap_or("".as_content()),
+                        .unwrap_or_else(|| "".as_content()),
                 )?;
             }
             reverse.call1((
@@ -2089,27 +2089,28 @@ impl Render for Lorem {
         let text = match self.method {
             LoremMethod::Words => {
                 let final_count = match (val, self.common) {
-                    (val, true) if val < 0 => (COMMON_WORDS.len() as i64 + val).max(0) as usize,
+                    // A negative count drops that many words from the common words.
+                    (val, true) if val < 0 => usize::try_from(val.unsigned_abs())
+                        .map_or(0, |drop| COMMON_WORDS.len().saturating_sub(drop)),
                     (val, false) if val < 0 => 0,
-                    (val, _) => val as usize,
+                    (val, _) => usize::try_from(val).unwrap_or(usize::MAX),
                 };
                 words(final_count, self.common)
             }
             LoremMethod::Paragraphs | LoremMethod::Blocks => {
                 if val <= 0 {
                     return Ok(Cow::Borrowed(""));
+                }
+                let count = usize::try_from(val).unwrap_or(usize::MAX);
+                let paras = paragraphs(count, self.common);
+                if matches!(self.method, LoremMethod::Paragraphs) {
+                    paras
+                        .into_iter()
+                        .map(|p| format!("<p>{p}</p>"))
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
                 } else {
-                    let count = val as usize;
-                    let paras = paragraphs(count, self.common);
-                    if matches!(self.method, LoremMethod::Paragraphs) {
-                        paras
-                            .into_iter()
-                            .map(|p| format!("<p>{p}</p>"))
-                            .collect::<Vec<_>>()
-                            .join("\n\n")
-                    } else {
-                        paras.join("\n\n")
-                    }
+                    paras.join("\n\n")
                 }
             }
         };

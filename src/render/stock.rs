@@ -188,7 +188,7 @@ impl Render for StockNode {
                         safe,
                     ))?;
                     let mut result = Some(Content::Py(initial));
-                    if !(missing && !context.string_if_invalid.is_empty()) {
+                    if !missing || context.string_if_invalid.is_empty() {
                         for filter in filters {
                             result = filter.resolve(result, py, template, context)?;
                         }

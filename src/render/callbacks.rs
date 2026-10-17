@@ -11,6 +11,9 @@ use super::inheritance::{BlockCallback, BlockMarker};
 use super::types::Context;
 
 impl Context {
+    /// # Panics
+    ///
+    /// Panics if a nested callback poisoned the shared context lock.
     pub fn call_variable<'py>(
         &mut self,
         py: Python<'py>,
@@ -63,6 +66,7 @@ impl Context {
                 if let Some(root) = &context.root_template {
                     input.setattr("template", Py::new(py, root.as_ref().clone())?)?;
                 }
+                drop(context);
                 overlay
             };
             let before = overlay.copy()?;
@@ -89,6 +93,7 @@ impl Context {
                 context.autoescape = input.getattr("autoescape")?.extract()?;
                 context.use_l10n = input.getattr("use_l10n")?.extract()?;
                 context.use_tz = input.getattr("use_tz")?.extract()?;
+                drop(context);
                 Ok(())
             })();
             let value = result?;
