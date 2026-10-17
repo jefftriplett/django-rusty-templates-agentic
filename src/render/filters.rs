@@ -563,7 +563,13 @@ impl ResolveFilter for DjangoFilter {
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
         let filter = self.filter.bind(py);
-        let value = variable.unwrap_or_else(|| "".as_content()).to_py(py);
+        let mut value = variable.unwrap_or_else(|| "".as_content()).to_py(py);
+        if filter
+            .getattr("expects_localtime")
+            .is_ok_and(|flag| flag.is_truthy().unwrap_or(false))
+        {
+            value = template_localtime(py, value, context)?;
+        }
         let safe_type = SAFEDATA.import(py, "django.utils.safestring", "SafeData")?;
         let preserve_safe = filter
             .getattr("is_safe")
