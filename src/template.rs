@@ -41,6 +41,8 @@ pub mod django_rusty_templates {
 
     static IMPORT_STRING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
+    static MARK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
     /// Experimental JSON-only runtime sharing its parser/renderer with browser Wasm.
     #[pyclass]
     pub struct PortableEngine {
@@ -1296,6 +1298,17 @@ pub mod django_rusty_templates {
             )
         }
 
+        /// Preserve Django's direct Template constructor metadata in conformance tests.
+        fn _from_string(
+            &self,
+            py: Python<'_>,
+            source: &str,
+            filename: Option<PathBuf>,
+            template_name: Option<String>,
+        ) -> PyResult<Template> {
+            Template::compile(py, source, filename, template_name, self.engine.clone())
+        }
+
         /// Render the template specified by `template_name` with the given context.
         /// For use in Django's test suite.
         #[pyo3(signature = (template_name, context=None))]
@@ -1630,20 +1643,22 @@ pub mod django_rusty_templates {
     }
 
     impl Template {
-        pub fn new(
+        fn compile(
             py: Python<'_>,
             template: &str,
-            filename: PathBuf,
-            template_name: &str,
+            filename: Option<PathBuf>,
+            template_name: Option<String>,
             engine: Arc<Engine>,
         ) -> PyResult<Self> {
             let mut parser = Parser::new(
                 py,
                 TemplateString(template),
                 engine.clone(),
-                Some(template_name),
+                template_name.as_deref(),
             );
-            parser.warning_origin = Some(filename.to_string_lossy().into_owned());
+            parser.warning_origin = filename
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned());
             let mut python_renderer = None;
             let parsed = parser.parse();
             let nodes = match parsed {
@@ -1660,8 +1675,10 @@ pub mod django_rusty_templates {
                                 PyEngine {
                                     engine: engine.clone(),
                                 },
-                                Some(&filename).map(|path| path.to_string_lossy().into_owned()),
-                                Some(template_name),
+                                filename
+                                    .as_ref()
+                                    .map(|path| path.to_string_lossy().into_owned()),
+                                template_name.as_deref(),
                             ))?
                             .unbind(),
                     ));
@@ -1669,7 +1686,7 @@ pub mod django_rusty_templates {
                 }
                 Err(error) => {
                     if let Some(compiler) = &parser.compiler_parser {
-                        let native = native_parse_error(error, template, Some(&filename));
+                        let native = native_parse_error(error, template, filename.as_deref());
                         if !native.is_instance_of::<PyException>(py)
                             || compiler
                                 .bind(py)
@@ -1690,8 +1707,8 @@ pub mod django_rusty_templates {
                         error,
                         engine.clone(),
                         template,
-                        Some(&filename),
-                        Some(template_name),
+                        filename.as_deref(),
+                        template_name.as_deref(),
                     ));
                 }
             };
@@ -1705,8 +1722,8 @@ pub mod django_rusty_templates {
                 parser.compiler_parser.is_some() || !parser.python_nodes.is_empty();
             Ok(Self {
                 template: Arc::from(template),
-                filename: Some(filename),
-                template_name: Some(template_name.to_string()),
+                filename,
+                template_name,
                 loader_path: Vec::new(),
                 inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
                 django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
@@ -1722,88 +1739,28 @@ pub mod django_rusty_templates {
             })
         }
 
+        pub fn new(
+            py: Python<'_>,
+            template: &str,
+            filename: PathBuf,
+            template_name: &str,
+            engine: Arc<Engine>,
+        ) -> PyResult<Self> {
+            Self::compile(
+                py,
+                template,
+                Some(filename),
+                Some(template_name.to_string()),
+                engine,
+            )
+        }
+
         pub fn new_from_string(
             py: Python<'_>,
             template: String,
             engine: Arc<Engine>,
         ) -> PyResult<Self> {
-            let mut parser = Parser::new(py, TemplateString(&template), engine.clone(), None);
-            let mut python_renderer = None;
-            let parsed = parser.parse();
-            let nodes = match parsed {
-                Ok(nodes) => nodes,
-                Err(crate::parse::PyParseError::PyErr(error))
-                    if error.is_instance_of::<PyNotImplementedError>(py)
-                        && can_compile_python_fallback(py, &error) =>
-                {
-                    python_renderer = Some(Arc::new(
-                        py.import("django_rusty_templates.interop")?
-                            .getattr("compile_template")?
-                            .call1((
-                                &template,
-                                PyEngine {
-                                    engine: engine.clone(),
-                                },
-                                None::<String>,
-                                None::<String>,
-                            ))?
-                            .unbind(),
-                    ));
-                    Vec::new()
-                }
-                Err(error) => {
-                    if let Some(compiler) = &parser.compiler_parser {
-                        let native = native_parse_error(error, &template, None);
-                        if !native.is_instance_of::<PyException>(py)
-                            || compiler
-                                .bind(py)
-                                .getattr("compiler_failed")?
-                                .extract::<bool>()?
-                            || native.value(py).hasattr("_rusty_compiler_error")?
-                        {
-                            return Err(native);
-                        }
-                        return Err(PyErr::from_value(
-                            compiler
-                                .bind(py)
-                                .call_method1("canonical_error", (native.value(py),))?,
-                        ));
-                    }
-                    return Err(canonical_parse_error(
-                        py,
-                        error,
-                        engine.clone(),
-                        &template,
-                        None,
-                        None,
-                    ));
-                }
-            };
-            let partial_data = Arc::new(InspectionNodes(PyOnceLock::new()));
-            if let Some(compiler) = &parser.compiler_parser {
-                partial_data.0.get_or_try_init(py, || {
-                    compiler.bind(py).getattr("extra_data").map(Bound::unbind)
-                })?;
-            }
-            let has_python_callbacks =
-                parser.compiler_parser.is_some() || !parser.python_nodes.is_empty();
-            Ok(Self {
-                template: Arc::from(template),
-                filename: None,
-                template_name: None,
-                loader_path: Vec::new(),
-                inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
-                django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
-                fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
-                native_blocks: Arc::new(OnceLock::new()),
-                native_partials: Arc::new(OnceLock::new()),
-                partial_data,
-                python_renderer,
-                has_inheritance: Self::nodes_have_inheritance(&nodes),
-                has_python_callbacks,
-                nodes: Arc::new(nodes),
-                engine,
-            })
+            Self::compile(py, &template, None, None, engine)
         }
 
         pub fn render(&self, py: Python<'_>, context: &mut Context) -> RenderResult<'_> {
@@ -2464,6 +2421,20 @@ pub mod django_rusty_templates {
         }
 
         #[pyo3(name = "render", signature = (context=None, request=None))]
+        fn render_safe<'py>(
+            &self,
+            py: Python<'py>,
+            context: Option<Bound<'py, PyAny>>,
+            request: Option<Bound<'py, PyAny>>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let rendered = self.py_render(py, context, request)?;
+            MARK_SAFE
+                .import(py, "django.utils.safestring", "mark_safe")?
+                .call1((rendered,))
+        }
+    }
+
+    impl Template {
         pub fn py_render(
             &self,
             py: Python<'_>,

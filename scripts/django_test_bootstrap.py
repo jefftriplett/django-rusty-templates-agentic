@@ -12,15 +12,10 @@ checkout = Path(sys.argv.pop(1)).resolve()
 sys.path[:0] = [str(checkout / "tests"), str(checkout)]
 
 import django
-import django.template
-import django.template.backends.django
-import django.template.engine
-import django_rusty_templates
 
-original_default = django.template.Engine.get_default
-django_rusty_templates.Engine.get_default = original_default
-django.template.Engine = django.template.engine.Engine = django_rusty_templates.Engine
-django.template.backends.django.DjangoTemplates = django_rusty_templates.RustyTemplates
+from scripts.django_test_adapter import install
+
+install()
 
 results = {
     "django_version": django.get_version(),

@@ -233,6 +233,13 @@ impl Filter {
             "linebreaksbr" => Some((24, "linebreaksbr", false, false)),
             "linenumbers" => Some((25, "linenumbers", false, false)),
             "first" => Some((26, "first", false, false)),
+            "truncatechars_html" => Some((28, "truncatechars_html", true, true)),
+            "truncatewords_html" => Some((29, "truncatewords_html", true, true)),
+            "dictsort" => Some((30, "dictsort", true, true)),
+            "dictsortreversed" => Some((31, "dictsortreversed", true, true)),
+            "get_digit" => Some((32, "get_digit", true, true)),
+            "filesizeformat" => Some((33, "filesizeformat", false, false)),
+            "pprint" => Some((34, "pprint", false, false)),
             _ => None,
         };
         if let Some((index, name, required, accepts_argument)) = django_filter {
@@ -1437,7 +1444,8 @@ enum TagContext<'py> {
     Opaque(Bound<'py, PyAny>),
 }
 
-type BuiltinFilterCache = [Option<Arc<Py<PyAny>>>; 28];
+const BUILTIN_FILTER_COUNT: usize = 35;
+type BuiltinFilterCache = [Option<Arc<Py<PyAny>>>; BUILTIN_FILTER_COUNT];
 
 pub struct Parser<'t, 'py> {
     py: Python<'py>,
@@ -1563,7 +1571,8 @@ impl<'t, 'py> Parser<'t, 'py> {
         );
         self.builtin_filters
             .borrow_mut()
-            .get_or_insert_with(|| Box::new([const { None }; 28]))[index] = Some(filter.clone());
+            .get_or_insert_with(|| Box::new([const { None }; BUILTIN_FILTER_COUNT]))[index] =
+            Some(filter.clone());
         Ok(filter)
     }
 
@@ -2398,6 +2407,20 @@ impl<'t, 'py> Parser<'t, 'py> {
                 at,
                 parts: None,
             }),
+            "csp_nonce_attr" if self.engine.django_series >= (6, 1) => {
+                let compile = self
+                    .py
+                    .import("django.template.defaulttags")?
+                    .getattr("register")?
+                    .getattr("tags")?
+                    .get_item("csp_nonce_attr")?;
+                self.load_tag(at, "csp_nonce_attr", &compile)?;
+                let Some(TagContext::Simple(context)) = self.external_tags.get("csp_nonce_attr")
+                else {
+                    unreachable!("csp_nonce_attr is a simple tag")
+                };
+                Either::Left(self.parse_simple_tag(context, at, tag.parts)?)
+            }
             "querystring" => {
                 let compile = self
                     .py

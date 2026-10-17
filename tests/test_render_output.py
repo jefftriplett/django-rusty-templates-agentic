@@ -8,9 +8,35 @@ from types import ModuleType
 import pytest
 from django.template import Context, Engine as DjangoEngine, Library
 from django.utils.functional import lazy
-from django.utils.safestring import mark_safe
+from django.utils.safestring import SafeData, mark_safe
 
 from django_rusty_templates import Engine
+
+
+@pytest.mark.parametrize("engine_class", [Engine, DjangoEngine])
+@pytest.mark.parametrize(
+    "source", ["<b>{{ value }}</b>", "{% block body %}{{ value }}{% endblock %}"]
+)
+def test_rendered_templates_are_safe_html(engine_class, source):
+    rendered = engine_class().from_string(source).render(Context({"value": "<script>"}))
+    assert isinstance(rendered, SafeData)
+    assert "&lt;script&gt;" in rendered
+
+
+def test_simple_tag_can_return_a_rendered_template(output_library):
+    from importlib import import_module
+
+    library = import_module(output_library["output"]).register
+    engine = Engine(libraries=output_library)
+
+    @library.simple_tag
+    def rendered_fragment():
+        return engine.from_string("<a>{{ value }}</a>").render({"value": "<"})
+
+    assert (
+        engine.from_string("{% load output %}{% rendered_fragment %}").render()
+        == "<a>&lt;</a>"
+    )
 
 
 @pytest.fixture

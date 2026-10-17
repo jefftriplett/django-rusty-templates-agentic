@@ -1,4 +1,4 @@
-name: Django conformance
+name: Django template and admin conformance
 
 on:
   pull_request:
@@ -111,7 +111,7 @@ jobs:
       - name: Assemble conformance summary
         run: |
           echo '<!-- generated-comment ecosystem -->' > test-diff-result
-          echo '## Django template conformance' >> test-diff-result
+          echo '## Django template and admin conformance' >> test-diff-result
           for series in 5.2 6.0 6.1; do
             if [[ -f "results/comment-$series.md" ]]; then
               cat "results/comment-$series.md" >> test-diff-result
