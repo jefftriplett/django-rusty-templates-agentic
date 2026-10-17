@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 2026.10.10
+
+Restore Django 6.1 admin rendering with CSP nonce support, complete the default filter set, and fix mixed-template CSRF and HTML handling, Windows template loading, and raw-block parsing. Exercise Rusty directly in the template, admin, and CSP conformance suites. ([#163](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/163))
+
 ## 2026.10.9
 
 Make local performance checks less sensitive to allocator state and timing outliers, and remove performance comparisons from GitHub Actions. ([#142](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/142), [#144](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/144))
