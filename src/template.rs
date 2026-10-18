@@ -379,12 +379,7 @@ pub mod django_rusty_templates {
                     engine: self.engine.clone(),
                     template_name: Some(renderer.getattr("name")?.extract()?),
                     loader_path: loader.path[self.path.len()..].to_vec(),
-                    inspection_nodes: Gc::new(InspectionNodes(GcOnceLock::new())),
-                    django_renderer: Gc::new(InspectionNodes(GcOnceLock::new())),
-                    fallback_blocks: Gc::new(InspectionNodes(GcOnceLock::new())),
-                    native_blocks: Gc::new(OnceLock::new()),
-                    native_partials: Gc::new(OnceLock::new()),
-                    partial_data: Gc::new(InspectionNodes(GcOnceLock::new())),
+                    caches: TemplateCaches::default(),
                     python_renderer: Some(Gc::new(renderer.unbind())),
                 }
             };
@@ -860,12 +855,7 @@ pub mod django_rusty_templates {
                 template: Arc::from(renderer.getattr("source")?.extract::<String>()?),
                 template_name: Some(template_name.into_owned()),
                 loader_path: Vec::new(),
-                inspection_nodes: Gc::new(InspectionNodes(GcOnceLock::new())),
-                django_renderer: Gc::new(InspectionNodes(GcOnceLock::new())),
-                fallback_blocks: Gc::new(InspectionNodes(GcOnceLock::new())),
-                native_blocks: Gc::new(OnceLock::new()),
-                native_partials: Gc::new(OnceLock::new()),
-                partial_data: Gc::new(InspectionNodes(GcOnceLock::new())),
+                caches: TemplateCaches::default(),
                 python_renderer: Some(Gc::new(renderer.unbind())),
                 nodes: Gc::new(Vec::new()),
                 has_inheritance: false,
@@ -1326,12 +1316,7 @@ pub mod django_rusty_templates {
                 nodes: Gc::new(nodes),
                 engine: self.engine.clone(),
                 loader_path: Vec::new(),
-                inspection_nodes: Gc::new(InspectionNodes(GcOnceLock::new())),
-                django_renderer: Gc::new(InspectionNodes(GcOnceLock::new())),
-                fallback_blocks: Gc::new(InspectionNodes(GcOnceLock::new())),
-                native_blocks: Gc::new(OnceLock::new()),
-                native_partials: Gc::new(OnceLock::new()),
-                partial_data: Gc::new(InspectionNodes(GcOnceLock::new())),
+                caches: TemplateCaches::default(),
                 python_renderer: None,
                 has_inheritance: false,
                 has_python_callbacks,
@@ -1635,6 +1620,42 @@ pub mod django_rusty_templates {
         }
     }
 
+    /// Views of a template's nodes that are built on first use. Clones of a
+    /// template share them; a template with different nodes needs fresh ones.
+    #[derive(Debug, Clone)]
+    struct TemplateCaches {
+        inspection_nodes: Gc<InspectionNodes>,
+        django_renderer: Gc<InspectionNodes>,
+        fallback_blocks: Gc<InspectionNodes>,
+        native_blocks: Gc<OnceLock<HashMap<String, Gc<Vec<TokenTree>>>>>,
+        native_partials: Gc<OnceLock<HashMap<String, PartialDefinition>>>,
+        partial_data: Gc<InspectionNodes>,
+    }
+
+    impl Default for TemplateCaches {
+        fn default() -> Self {
+            Self {
+                inspection_nodes: Gc::new(InspectionNodes(GcOnceLock::new())),
+                django_renderer: Gc::new(InspectionNodes(GcOnceLock::new())),
+                fallback_blocks: Gc::new(InspectionNodes(GcOnceLock::new())),
+                native_blocks: Gc::new(OnceLock::new()),
+                native_partials: Gc::new(OnceLock::new()),
+                partial_data: Gc::new(InspectionNodes(GcOnceLock::new())),
+            }
+        }
+    }
+
+    impl Trace for TemplateCaches {
+        fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+            self.inspection_nodes.trace(visit)?;
+            self.django_renderer.trace(visit)?;
+            self.fallback_blocks.trace(visit)?;
+            self.native_blocks.trace(visit)?;
+            self.native_partials.trace(visit)?;
+            self.partial_data.trace(visit)
+        }
+    }
+
     #[derive(Debug, Clone)]
     #[pyclass(skip_from_py_object)]
     pub struct Template {
@@ -1644,12 +1665,7 @@ pub mod django_rusty_templates {
         pub engine: Gc<Engine>,
         pub template_name: Option<String>,
         pub loader_path: Vec<usize>,
-        inspection_nodes: Gc<InspectionNodes>,
-        django_renderer: Gc<InspectionNodes>,
-        fallback_blocks: Gc<InspectionNodes>,
-        native_blocks: Gc<OnceLock<HashMap<String, Gc<Vec<TokenTree>>>>>,
-        native_partials: Gc<OnceLock<HashMap<String, PartialDefinition>>>,
-        partial_data: Gc<InspectionNodes>,
+        caches: TemplateCaches,
         has_inheritance: bool,
         has_python_callbacks: bool,
         python_renderer: Option<Gc<Py<PyAny>>>,
@@ -1659,12 +1675,7 @@ pub mod django_rusty_templates {
         fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
             self.engine.trace(visit)?;
             self.nodes.trace(visit)?;
-            self.inspection_nodes.trace(visit)?;
-            self.django_renderer.trace(visit)?;
-            self.fallback_blocks.trace(visit)?;
-            self.native_blocks.trace(visit)?;
-            self.native_partials.trace(visit)?;
-            self.partial_data.trace(visit)?;
+            self.caches.trace(visit)?;
             self.python_renderer.trace(visit)
         }
     }
@@ -1827,12 +1838,10 @@ pub mod django_rusty_templates {
                 filename,
                 template_name,
                 loader_path: Vec::new(),
-                inspection_nodes: Gc::new(InspectionNodes(GcOnceLock::new())),
-                django_renderer: Gc::new(InspectionNodes(GcOnceLock::new())),
-                fallback_blocks: Gc::new(InspectionNodes(GcOnceLock::new())),
-                native_blocks: Gc::new(OnceLock::new()),
-                native_partials: Gc::new(OnceLock::new()),
-                partial_data,
+                caches: TemplateCaches {
+                    partial_data,
+                    ..TemplateCaches::default()
+                },
                 python_renderer,
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
                 has_python_callbacks,
@@ -1941,7 +1950,7 @@ pub mod django_rusty_templates {
         }
 
         pub(crate) fn native_partials(&self) -> &HashMap<String, PartialDefinition> {
-            self.native_partials.get_or_init(|| {
+            self.caches.native_partials.get_or_init(|| {
                 fn collect(nodes: &[TokenTree], partials: &mut HashMap<String, PartialDefinition>) {
                     for node in nodes {
                         if let TokenTree::Tag(Tag::PartialDef { definition, .. }) = node {
@@ -1959,7 +1968,7 @@ pub mod django_rusty_templates {
         }
 
         pub(crate) fn native_blocks(&self) -> &HashMap<String, Gc<Vec<TokenTree>>> {
-            self.native_blocks.get_or_init(|| {
+            self.caches.native_blocks.get_or_init(|| {
                 fn collect(nodes: &[TokenTree], blocks: &mut HashMap<String, Gc<Vec<TokenTree>>>) {
                     for node in nodes {
                         if let TokenTree::Tag(Tag::Block { name, nodes }) = node {
@@ -1985,12 +1994,10 @@ pub mod django_rusty_templates {
                 has_python_callbacks: self.has_python_callbacks
                     && Self::nodes_have_callbacks(&nodes),
                 nodes,
-                inspection_nodes: Gc::new(InspectionNodes(GcOnceLock::new())),
-                django_renderer: Gc::new(InspectionNodes(GcOnceLock::new())),
-                fallback_blocks: Gc::new(InspectionNodes(GcOnceLock::new())),
-                native_blocks: Gc::new(OnceLock::new()),
-                native_partials: self.native_partials.clone(),
-                partial_data: Gc::new(InspectionNodes(GcOnceLock::new())),
+                caches: TemplateCaches {
+                    native_partials: self.caches.native_partials.clone(),
+                    ..TemplateCaches::default()
+                },
                 ..self.clone()
             }
         }
@@ -2022,7 +2029,8 @@ pub mod django_rusty_templates {
         }
 
         pub(crate) fn compiled_blocks<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            self.fallback_blocks
+            self.caches
+                .fallback_blocks
                 .0
                 .get_or_try_init(py, || {
                     fn collect(
@@ -2387,7 +2395,8 @@ pub mod django_rusty_templates {
                 return Ok(renderer.bind(py).clone());
             }
             let renderer =
-                self.django_renderer
+                self.caches
+                    .django_renderer
                     .0
                     .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
                         Ok(py
@@ -2458,6 +2467,7 @@ pub mod django_rusty_templates {
             match &self.python_renderer {
                 Some(renderer) => renderer.bind(py).getattr("extra_data"),
                 None => self
+                    .caches
                     .partial_data
                     .0
                     .get_or_try_init(py, || {
@@ -2535,7 +2545,8 @@ pub mod django_rusty_templates {
             }
             // This Python tree is for Django tooling and inspection only;
             // rendering always uses the compiled Rust nodes above.
-            self.inspection_nodes
+            self.caches
+                .inspection_nodes
                 .0
                 .get_or_try_init(py, || {
                     let libraries = PyDict::new(py);
