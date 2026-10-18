@@ -104,6 +104,12 @@ impl<T: 'static> Deref for Gc<T> {
     }
 }
 
+impl<T: 'static> AsRef<T> for Gc<T> {
+    fn as_ref(&self) -> &T {
+        self
+    }
+}
+
 impl<T: Debug + 'static> Debug for Gc<T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.deref().fmt(formatter)
@@ -159,12 +165,17 @@ impl<T: Trace> Trace for OnceLock<T> {
 }
 
 /// A fallible Python initializer with a nonblocking, Python-free GC read path.
+#[derive(Debug)]
 pub(crate) struct GcOnceLock<T> {
     value: OnceLock<T>,
     initializing: Mutex<()>,
 }
 
 impl<T> GcOnceLock<T> {
+    pub fn get(&self) -> Option<&T> {
+        self.value.get()
+    }
+
     pub fn new() -> Self {
         Self {
             value: OnceLock::new(),

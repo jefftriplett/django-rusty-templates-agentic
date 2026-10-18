@@ -1,7 +1,6 @@
 use crate::gc::Gc;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 
 use either::Either;
 use num_bigint::{BigInt, Sign};
@@ -1328,7 +1327,7 @@ impl For {
 }
 
 enum IncludeTemplate<'py> {
-    Template(Arc<Template>),
+    Template(Gc<Template>),
     Callable(Bound<'py, PyAny>),
 }
 
@@ -1668,20 +1667,13 @@ fn retrieve_context<'py>(py: Python<'py>, py_context: Bound<'py, PyAny>, context
     drop(py_context);
 
     // Try to remove the Context from the PyContext
-    let inner_context = match Arc::try_unwrap(extracted_context.context) {
-        // Fast path when we have the only reference in the Arc.
-        Ok(inner_context) => inner_context
-            .into_inner()
-            .expect("Mutex should be unlocked because Arc refcount is one."),
-        // Slow path when Python has held on to the context for some reason.
-        // We can still do the right thing by cloning.
-        Err(inner_context) => {
-            let guard = inner_context
-                .lock_py_attached(py)
-                .expect("Mutex should not be poisoned");
-            guard.clone_ref(py)
-        }
-    };
+    // A Python callback may retain its context. Copy the current state back
+    // while the shared snapshot remains valid and visible to cyclic GC.
+    let inner_context = extracted_context
+        .context
+        .lock_py_attached(py)
+        .expect("context lock is not poisoned")
+        .clone_ref(py);
     // Put the Context back in `context`
     let _ = std::mem::replace(context, inner_context);
 }

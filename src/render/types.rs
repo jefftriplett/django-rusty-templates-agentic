@@ -1,4 +1,5 @@
-use crate::gc::Gc;
+use crate::gc::{Gc, GcOnceLock, Trace};
+use pyo3::{PyTraverseError, PyVisit};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -6,7 +7,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::iter::zip;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use html_escape::{encode_quoted_attribute, encode_quoted_attribute_to_string};
 use miette::SourceSpan;
@@ -58,7 +59,7 @@ fn formatting_flag_index(flag: Option<bool>) -> usize {
 pub struct ForLoop {
     count: usize,
     len: usize,
-    dictionary: Arc<PyOnceLock<Py<PyDict>>>,
+    dictionary: Gc<GcOnceLock<Py<PyDict>>>,
 }
 
 impl std::fmt::Debug for ForLoop {
@@ -112,6 +113,18 @@ type BindingMap = HashMap<String, Vec<Py<PyAny>>>;
 #[derive(Debug)]
 struct SharedBindings(BindingMap);
 
+impl Trace for SharedBindings {
+    fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.0.trace(visit)
+    }
+}
+
+impl Trace for ForLoop {
+    fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.dictionary.trace(visit)
+    }
+}
+
 impl Clone for SharedBindings {
     fn clone(&self) -> Self {
         Python::attach(|py| {
@@ -132,7 +145,7 @@ impl Clone for SharedBindings {
 
 #[derive(Clone, Debug)]
 struct ScopeBindings {
-    base: Arc<SharedBindings>,
+    base: Gc<SharedBindings>,
     overlay: bool,
 }
 
@@ -152,8 +165,8 @@ pub struct Context {
     pub callback_input: Option<Gc<Py<PyAny>>>,
     pub inheritance_blocks: HashMap<String, Vec<BlockEntry>>,
     pub python_blocks: Option<Py<PyAny>>,
-    pub current_template: Option<Arc<Template>>,
-    pub root_template: Option<Arc<Template>>,
+    pub current_template: Option<Gc<Template>>,
+    pub root_template: Option<Gc<Template>>,
     pub inheritance_history: Vec<Gc<Py<PyAny>>>,
     // Share unchanged values across Python context snapshots. Each snapshot
     // owns a small overlay so later loop iterations cannot alter earlier ones.
@@ -161,11 +174,53 @@ pub struct Context {
     django_context_changes: HashSet<String>,
     pub string_if_invalid: String,
     names: Vec<HashSet<String>>,
-    include_cache: HashMap<(CycleId, IncludeTemplateKey), Arc<Template>>,
+    include_cache: HashMap<(CycleId, IncludeTemplateKey), Gc<Template>>,
     pub(crate) cycle_indices: HashMap<CycleId, usize>,
     changed_states: Vec<HashMap<CycleId, Py<PyAny>>>,
     assigned: HashSet<String>,
     cycle_variables: HashSet<String>,
+}
+
+impl Trace for Context {
+    fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.context.trace(visit)?;
+        if let Some(shared) = &self.scope_bindings {
+            shared.base.trace(visit)?;
+        }
+        self.loops.trace(visit)?;
+        self.request.trace(visit)?;
+        self.formatting_context.trace(visit)?;
+        self.callback_input.trace(visit)?;
+        self.inheritance_blocks.trace(visit)?;
+        self.python_blocks.trace(visit)?;
+        self.current_template.trace(visit)?;
+        self.root_template.trace(visit)?;
+        self.inheritance_history.trace(visit)?;
+        if let Ok(base) = self.django_context_base.try_borrow() {
+            base.trace(visit)?;
+        }
+        self.include_cache.trace(visit)?;
+        self.changed_states.trace(visit)
+    }
+}
+
+impl Trace for Mutex<Context> {
+    fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        // A callback can trigger GC while a render is using this context.
+        if let Ok(context) = self.try_lock() {
+            context.trace(visit)?;
+        }
+        Ok(())
+    }
+
+    fn clear(&self) {
+        let removed = self
+            .try_lock()
+            .ok()
+            .map(|mut context| std::mem::take(&mut *context));
+        // Finalizers may call back into the context; release its lock first.
+        drop(removed);
+    }
 }
 
 impl Context {
@@ -252,7 +307,7 @@ impl Context {
     pub(crate) fn clone_scope(&mut self, py: Python<'_>) -> Self {
         if self.scope_bindings.is_none() {
             self.scope_bindings = Some(ScopeBindings {
-                base: Arc::new(SharedBindings(std::mem::take(&mut self.context))),
+                base: Gc::new(SharedBindings(std::mem::take(&mut self.context))),
                 overlay: false,
             });
         }
@@ -275,10 +330,12 @@ impl Context {
     }
 
     fn bindings_mut(&mut self) -> &mut BindingMap {
-        if let Some(shared) = &mut self.scope_bindings
-            && !shared.overlay
-        {
-            return &mut Arc::make_mut(&mut shared.base).0;
+        if let Some(shared) = self.scope_bindings.take_if(|shared| !shared.overlay) {
+            // Materialize parent writes while retained child snapshots keep
+            // their immutable GC-visible base.
+            let mut bindings = (*shared.base).clone().0;
+            bindings.extend(std::mem::take(&mut self.context));
+            self.context = bindings;
         }
         &mut self.context
     }
@@ -396,7 +453,7 @@ impl Context {
                     py,
                     super::inheritance::BlockCallback {
                         marker: marker.clone(),
-                        context: Arc::new(Mutex::new(self.clone_ref(py))),
+                        context: Gc::new(Mutex::new(self.clone_ref(py))),
                     },
                 )?,
             )?;
@@ -680,7 +737,7 @@ impl Context {
         self.loops.push(ForLoop {
             count: 0,
             len,
-            dictionary: Arc::new(PyOnceLock::new()),
+            dictionary: Gc::new(GcOnceLock::new()),
         });
         self.changed_states.push(HashMap::new());
     }
@@ -705,9 +762,9 @@ impl Context {
         self.loops.get(index)
     }
 
-    pub fn loop_dictionary_cached(&self, py: Python<'_>, depth: usize) -> bool {
+    pub fn loop_dictionary_cached(&self, _py: Python<'_>, depth: usize) -> bool {
         self.get_for_loop(depth)
-            .is_some_and(|loop_| loop_.dictionary.get(py).is_some())
+            .is_some_and(|loop_| loop_.dictionary.get().is_some())
     }
 
     fn fill_loop_dictionary(loop_: &ForLoop, dict: &Bound<'_, PyDict>) -> PyResult<()> {
@@ -749,7 +806,7 @@ impl Context {
     pub fn sync_loop_context(&self, py: Python<'_>, first: bool) -> PyResult<()> {
         let Some(context) = &self.formatting_context else {
             if let Some(loop_) = self.loops.last()
-                && let Some(dict) = loop_.dictionary.get(py)
+                && let Some(dict) = loop_.dictionary.get()
             {
                 Self::fill_loop_dictionary(loop_, dict.bind(py))?;
             }
@@ -824,7 +881,7 @@ impl Context {
         engine: &Gc<Engine>,
         key: &IncludeTemplateKey,
         id: CycleId,
-    ) -> Result<Arc<Template>, PyErr> {
+    ) -> Result<Gc<Template>, PyErr> {
         match self.include_cache.entry((id, key.clone())) {
             Entry::Occupied(entry) => Ok(entry.get().clone()),
             Entry::Vacant(entry) => {
@@ -836,7 +893,7 @@ impl Context {
                         select_template(engine.clone(), py, templates.clone())?
                     }
                 };
-                Ok(entry.insert(Arc::new(include)).clone())
+                Ok(entry.insert(Gc::new(include)).clone())
             }
         }
     }
@@ -971,19 +1028,23 @@ impl Context {
 #[pyclass(mapping, from_py_object)]
 #[derive(Clone)]
 pub struct PyContext {
-    pub context: Arc<Mutex<Context>>,
+    pub context: Gc<Mutex<Context>>,
 }
 
 impl PyContext {
     pub fn new(context: Context) -> Self {
         Self {
-            context: Arc::new(Mutex::new(context)),
+            context: Gc::new(Mutex::new(context)),
         }
     }
 }
 
 #[pymethods]
 impl PyContext {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.context.trace(&visit)
+    }
+
     #[getter]
     fn autoescape(&self, py: Python<'_>) -> bool {
         self.context

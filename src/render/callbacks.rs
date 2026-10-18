@@ -1,6 +1,7 @@
 //! Synchronize a caller's Django Context only at a Python callable boundary.
 
-use std::sync::{Arc, Mutex};
+use crate::gc::Gc;
+use std::sync::Mutex;
 
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
@@ -32,7 +33,7 @@ impl Context {
         let original_template = input.getattr("template")?;
         let dicts = input.getattr("dicts")?.cast_into::<PyList>()?;
         let original_depth = dicts.len();
-        let shared = Arc::new(Mutex::new(std::mem::take(self)));
+        let shared = Gc::new(Mutex::new(std::mem::take(self)));
         let result = (|| -> PyResult<Bound<'py, PyAny>> {
             let overlay = {
                 let context = shared
@@ -102,13 +103,10 @@ impl Context {
             input.setattr("template", original_template)?;
             Ok(())
         })();
-        *self = match Arc::try_unwrap(shared) {
-            Ok(context) => context.into_inner().expect("context lock is not poisoned"),
-            Err(context) => context
-                .lock_py_attached(py)
-                .expect("context lock is not poisoned")
-                .clone_ref(py),
-        };
+        *self = shared
+            .lock_py_attached(py)
+            .expect("context lock is not poisoned")
+            .clone_ref(py);
         let value = result?;
         cleanup?;
         Ok(value)

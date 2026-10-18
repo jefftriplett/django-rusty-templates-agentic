@@ -152,3 +152,74 @@ def test_opaque_callback_capturing_engine_is_collected(
     references = [render_once() for _ in range(20)]
     gc.collect()
     assert all(reference() is None for reference in references)
+
+
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("depth", [0, 1])
+@pytest.mark.parametrize("save", ["context", "block", "loop", "scope"])
+def test_native_callback_context_cycles_are_collected(
+    engine_class, monkeypatch, debug, depth, save
+):
+    module = ModuleType("rusty_memory_context_cycle")
+    module.register = Library()
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    @module.register.simple_tag(takes_context=True)
+    def remember(context):
+        if save == "loop":
+            context["forloop"]["saved"] = context
+        elif save == "scope":
+            context["marker"].context = context
+        else:
+            context["saved"] = context if save == "context" else context["block"]
+        return ""
+
+    def render_once():
+        backend, source_reference = make_backend(
+            engine_class,
+            "{% load callbacks %}{% block body %}"
+            "{% for item in items %}{% remember %}{{ value }}{% endfor %}{% endblock %}",
+            debug=debug,
+            depth=depth,
+            libraries={"callbacks": module.__name__},
+        )
+        marker = Marker()
+        reference = weakref.ref(marker)
+        assert (
+            backend.get_template("page.html").render(
+                {"marker": marker, "value": "ok", "items": [1]}
+            )
+            == "ok"
+        )
+        return source_reference, reference
+
+    references = [render_once() for _ in range(10)]
+    gc.collect()
+    assert all(source() is None and request() is None for source, request in references)
+
+
+def test_callable_block_context_cycle_is_collected(engine_class):
+    class SaveBlock:
+        def __init__(self, context):
+            self.context = context
+
+        def __call__(self):
+            self.context["saved"] = self.context["block"]
+            return "ok"
+
+    def render_once():
+        backend, source = make_backend(
+            engine_class, "{% block body %}{{ save }}{% endblock %}"
+        )
+        marker = Marker()
+        reference = weakref.ref(marker)
+        context = Context({"marker": marker})
+        context["save"] = SaveBlock(context)
+        wrapped = backend.get_template("page.html")
+        template = getattr(wrapped, "template", wrapped)
+        assert template.render(context) == "ok"
+        return source, reference
+
+    references = [render_once() for _ in range(10)]
+    gc.collect()
+    assert all(source() is None and request() is None for source, request in references)
