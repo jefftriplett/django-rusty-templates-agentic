@@ -153,7 +153,10 @@ backends: a base template with `extends`, 25 included cards, Django `User`
 objects, model-style methods, i18n tags and common filters, with and without
 a request and seven context processors. Templates live in
 `scripts/realistic_page/`. Each case checks output against Django and runs in
-fresh processes; `--baseline` applies the same 15% gate.
+fresh processes; `--baseline` applies the same 15% gate. A separate process
+then uses `tracemalloc` to report memory growth across repeated renders and
+the memory retained by discarded engines, for Django and Rusty. The run fails
+if discarded engines leave GC-tracked objects behind.
 
 `engine.explain_template(source, template_name=None)` reports `mode` (`native`, `hybrid`, or
 `unsupported`) and the first native compilation blocker. For a tag blocker it
