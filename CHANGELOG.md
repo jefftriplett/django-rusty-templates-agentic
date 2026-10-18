@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Restore callback rendering performance while preserving cyclic collection, and reduce allocations in blocks and includes. ([#171](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/171))
+
 ## 2026.10.12
 
 Collect cycles created by custom tags retaining native contexts or block callbacks, including shared scope and loop data. ([#169](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/169))
