@@ -1,3 +1,4 @@
+use crate::gc::Gc;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -1626,7 +1627,7 @@ impl Render for Include {
 
 fn call_tag<'t, 'py>(
     py: Python<'py>,
-    func: &Arc<Py<PyAny>>,
+    func: &Gc<Py<PyAny>>,
     at: At,
     template: TemplateString<'t>,
     args: VecDeque<Bound<'py, PyAny>>,
