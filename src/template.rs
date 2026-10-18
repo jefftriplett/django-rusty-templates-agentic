@@ -9,7 +9,6 @@ pub mod django_rusty_templates {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
 
-    use crate::gc::{Gc, GcOnceLock, Trace};
     use encoding_rs::Encoding;
     use pyo3::exceptions::{
         PyAttributeError, PyException, PyImportError, PyNotImplementedError, PyOverflowError,
@@ -20,7 +19,6 @@ pub mod django_rusty_templates {
     use pyo3::prelude::*;
     use pyo3::sync::{MutexExt, PyOnceLock};
     use pyo3::types::{PyBool, PyDict, PyIterator, PyList, PyString, PyTuple};
-    use pyo3::{PyTraverseError, PyVisit};
 
     use crate::error::{PyRenderError, RenderError};
     use crate::loaders::{AppDirsLoader, CachedLoader, FileSystemLoader, Loader, LocMemLoader};
@@ -126,13 +124,13 @@ pub mod django_rusty_templates {
     #[derive(Clone)]
     #[pyclass(frozen, skip_from_py_object)]
     struct LoaderView {
-        engine: Gc<Engine>,
+        engine: Arc<Engine>,
         path: Vec<usize>,
     }
 
     impl PartialEq for LoaderView {
         fn eq(&self, other: &Self) -> bool {
-            Gc::ptr_eq(&self.engine, &other.engine) && self.path == other.path
+            Arc::ptr_eq(&self.engine, &other.engine) && self.path == other.path
         }
     }
 
@@ -171,10 +169,6 @@ pub mod django_rusty_templates {
 
     #[pymethods]
     impl LoaderView {
-        fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-            self.engine.trace(&visit)
-        }
-
         fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
             let other = other.getattr("_native").unwrap_or_else(|_| other.clone());
             other
@@ -369,19 +363,19 @@ pub mod django_rusty_templates {
                 Template {
                     filename: Some(PathBuf::from(origin.getattr("name")?.extract::<String>()?)),
                     template: Arc::from(renderer.getattr("source")?.extract::<String>()?),
-                    nodes: Gc::new(Vec::new()),
+                    nodes: Arc::new(Vec::new()),
                     has_inheritance: false,
                     has_python_callbacks: false,
                     engine: self.engine.clone(),
                     template_name: Some(renderer.getattr("name")?.extract()?),
                     loader_path: loader.path[self.path.len()..].to_vec(),
-                    inspection_nodes: Gc::new(InspectionNodes(GcOnceLock::new())),
-                    django_renderer: Gc::new(InspectionNodes(GcOnceLock::new())),
-                    fallback_blocks: Gc::new(InspectionNodes(GcOnceLock::new())),
-                    native_blocks: Gc::new(OnceLock::new()),
-                    native_partials: Gc::new(OnceLock::new()),
-                    partial_data: Gc::new(InspectionNodes(GcOnceLock::new())),
-                    python_renderer: Some(Gc::new(renderer.unbind())),
+                    inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
+                    django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
+                    fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
+                    native_blocks: Arc::new(OnceLock::new()),
+                    native_partials: Arc::new(OnceLock::new()),
+                    partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
+                    python_renderer: Some(Arc::new(renderer.unbind())),
                 }
             };
             self.with_loader(py, |loader| {
@@ -513,13 +507,6 @@ pub mod django_rusty_templates {
 
     #[pymethods]
     impl Origin {
-        fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-            if let Some(loader) = &self.loader {
-                loader.engine.trace(&visit)?;
-            }
-            Ok(())
-        }
-
         fn __str__(&self) -> &str {
             &self.name
         }
@@ -704,60 +691,6 @@ pub mod django_rusty_templates {
         pub libraries: HashMap<String, Py<PyAny>>,
     }
 
-    impl Trace for Engine {
-        fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-            self.configuration.trace(visit)?;
-            self.template_builtins.trace(visit)?;
-            self.loaded_context_processors.trace(visit)?;
-            self.libraries.trace(visit)?;
-            // GC can run during a Python callback while this lock is held.
-            // Omit the busy cache for this collection instead of deadlocking.
-            if let Ok(loaders) = self.template_loaders.try_lock() {
-                trace_loaders(&loaders, visit)?;
-            }
-            Ok(())
-        }
-
-        fn clear(&self) {
-            fn take_caches(loaders: &mut [Loader], removed: &mut Vec<CachedLoader>) {
-                for loader in loaders {
-                    if let Loader::Cached(cached) = loader {
-                        removed.push(CachedLoader {
-                            cache: std::mem::take(&mut cached.cache),
-                            cache_view: cached.cache_view.take(),
-                            loaders: Vec::new(),
-                        });
-                        take_caches(&mut cached.loaders, removed);
-                    }
-                }
-            }
-            let mut removed = Vec::new();
-            if let Ok(mut loaders) = self.template_loaders.try_lock() {
-                take_caches(&mut loaders, &mut removed);
-            }
-            // Python finalizers may call back into a loader. Drop the removed
-            // objects only after releasing its lock.
-            drop(removed);
-        }
-    }
-
-    fn trace_loaders(loaders: &[Loader], visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-        for loader in loaders {
-            if let Loader::Cached(cached) = loader {
-                cached.cache_view.trace(visit)?;
-                for template in cached
-                    .cache
-                    .values()
-                    .filter_map(|entry| entry.as_ref().ok())
-                {
-                    template.trace(visit)?;
-                }
-                trace_loaders(&cached.loaders, visit)?;
-            }
-        }
-        Ok(())
-    }
-
     impl Engine {
         /// Peek only at the first loader: later loaders cannot bypass an
         /// earlier uncached loader's search order. Misses use normal loading.
@@ -819,7 +752,7 @@ pub mod django_rusty_templates {
     }
 
     pub fn get_template(
-        engine: Gc<Engine>,
+        engine: Arc<Engine>,
         py: Python<'_>,
         template_name: Cow<str>,
     ) -> PyResult<Template> {
@@ -855,14 +788,14 @@ pub mod django_rusty_templates {
                 template: Arc::from(renderer.getattr("source")?.extract::<String>()?),
                 template_name: Some(template_name.into_owned()),
                 loader_path: Vec::new(),
-                inspection_nodes: Gc::new(InspectionNodes(GcOnceLock::new())),
-                django_renderer: Gc::new(InspectionNodes(GcOnceLock::new())),
-                fallback_blocks: Gc::new(InspectionNodes(GcOnceLock::new())),
-                native_blocks: Gc::new(OnceLock::new()),
-                native_partials: Gc::new(OnceLock::new()),
-                partial_data: Gc::new(InspectionNodes(GcOnceLock::new())),
-                python_renderer: Some(Gc::new(renderer.unbind())),
-                nodes: Gc::new(Vec::new()),
+                inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
+                django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
+                fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
+                native_blocks: Arc::new(OnceLock::new()),
+                native_partials: Arc::new(OnceLock::new()),
+                partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
+                python_renderer: Some(Arc::new(renderer.unbind())),
+                nodes: Arc::new(Vec::new()),
                 has_inheritance: false,
                 has_python_callbacks: false,
                 engine,
@@ -912,7 +845,7 @@ pub mod django_rusty_templates {
     }
 
     pub fn select_template(
-        engine: Gc<Engine>,
+        engine: Arc<Engine>,
         py: Python<'_>,
         template_name_list: Vec<String>,
     ) -> PyResult<Template> {
@@ -935,15 +868,11 @@ pub mod django_rusty_templates {
     #[derive(Debug)]
     #[pyclass(name = "Engine", dict)]
     pub struct PyEngine {
-        pub(crate) engine: Gc<Engine>,
+        pub(crate) engine: Arc<Engine>,
     }
 
     #[pymethods]
     impl PyEngine {
-        fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-            self.engine.trace(&visit)
-        }
-
         #[new]
         #[pyo3(signature = (dirs=None, app_dirs=false, context_processors=None, debug=false, loaders=None, string_if_invalid=String::new(), file_charset="utf-8".to_string(), libraries=None, builtins=None, autoescape=true))]
         #[allow(clippy::too_many_arguments)] // We're matching Django's Engine __init__ signature
@@ -1086,7 +1015,7 @@ pub mod django_rusty_templates {
                 libraries,
             };
             Ok(Self {
-                engine: Gc::new(engine),
+                engine: Arc::new(engine),
             })
         }
 
@@ -1286,7 +1215,7 @@ pub mod django_rusty_templates {
                 }
                 parser
                     .python_nodes
-                    .insert(start, (end, crate::parse::PythonNode(Gc::new(node))));
+                    .insert(start, (end, crate::parse::PythonNode(Arc::new(node))));
             }
             let nodes = parser.parse().map_err(|error| {
                 if parser.compiler_parser.as_ref().is_some_and(|compiler| {
@@ -1312,15 +1241,15 @@ pub mod django_rusty_templates {
                 template: Arc::from(source),
                 filename,
                 template_name,
-                nodes: Gc::new(nodes),
+                nodes: Arc::new(nodes),
                 engine: self.engine.clone(),
                 loader_path: Vec::new(),
-                inspection_nodes: Gc::new(InspectionNodes(GcOnceLock::new())),
-                django_renderer: Gc::new(InspectionNodes(GcOnceLock::new())),
-                fallback_blocks: Gc::new(InspectionNodes(GcOnceLock::new())),
-                native_blocks: Gc::new(OnceLock::new()),
-                native_partials: Gc::new(OnceLock::new()),
-                partial_data: Gc::new(InspectionNodes(GcOnceLock::new())),
+                inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
+                django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
+                fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
+                native_blocks: Arc::new(OnceLock::new()),
+                native_partials: Arc::new(OnceLock::new()),
+                partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
                 python_renderer: None,
                 has_inheritance: false,
                 has_python_callbacks,
@@ -1610,13 +1539,7 @@ pub mod django_rusty_templates {
         }
     }
 
-    struct InspectionNodes(GcOnceLock<Py<PyAny>>);
-
-    impl Trace for InspectionNodes {
-        fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-            self.0.trace(visit)
-        }
-    }
+    struct InspectionNodes(PyOnceLock<Py<PyAny>>);
 
     impl std::fmt::Debug for InspectionNodes {
         fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1629,33 +1552,19 @@ pub mod django_rusty_templates {
     pub struct Template {
         pub filename: Option<PathBuf>,
         pub template: Arc<str>,
-        pub nodes: Gc<Vec<TokenTree>>,
-        pub engine: Gc<Engine>,
+        pub nodes: Arc<Vec<TokenTree>>,
+        pub engine: Arc<Engine>,
         pub template_name: Option<String>,
         pub loader_path: Vec<usize>,
-        inspection_nodes: Gc<InspectionNodes>,
-        django_renderer: Gc<InspectionNodes>,
-        fallback_blocks: Gc<InspectionNodes>,
-        native_blocks: Gc<OnceLock<HashMap<String, Gc<Vec<TokenTree>>>>>,
-        native_partials: Gc<OnceLock<HashMap<String, PartialDefinition>>>,
-        partial_data: Gc<InspectionNodes>,
+        inspection_nodes: Arc<InspectionNodes>,
+        django_renderer: Arc<InspectionNodes>,
+        fallback_blocks: Arc<InspectionNodes>,
+        native_blocks: Arc<OnceLock<HashMap<String, Arc<Vec<TokenTree>>>>>,
+        native_partials: Arc<OnceLock<HashMap<String, PartialDefinition>>>,
+        partial_data: Arc<InspectionNodes>,
         has_inheritance: bool,
         has_python_callbacks: bool,
-        python_renderer: Option<Gc<Py<PyAny>>>,
-    }
-
-    impl Trace for Template {
-        fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-            self.engine.trace(visit)?;
-            self.nodes.trace(visit)?;
-            self.inspection_nodes.trace(visit)?;
-            self.django_renderer.trace(visit)?;
-            self.fallback_blocks.trace(visit)?;
-            self.native_blocks.trace(visit)?;
-            self.native_partials.trace(visit)?;
-            self.partial_data.trace(visit)?;
-            self.python_renderer.trace(visit)
-        }
+        python_renderer: Option<Arc<Py<PyAny>>>,
     }
 
     fn can_compile_python_fallback(py: Python<'_>, error: &PyErr) -> bool {
@@ -1693,7 +1602,7 @@ pub mod django_rusty_templates {
     fn canonical_parse_error(
         py: Python<'_>,
         error: crate::parse::PyParseError,
-        engine: Gc<Engine>,
+        engine: Arc<Engine>,
         source: &str,
         filename: Option<&Path>,
         template_name: Option<&str>,
@@ -1739,7 +1648,7 @@ pub mod django_rusty_templates {
             template: &str,
             filename: Option<PathBuf>,
             template_name: Option<String>,
-            engine: Gc<Engine>,
+            engine: Arc<Engine>,
         ) -> PyResult<Self> {
             let mut parser = Parser::new(
                 py,
@@ -1758,7 +1667,7 @@ pub mod django_rusty_templates {
                     if error.is_instance_of::<PyNotImplementedError>(py)
                         && can_compile_python_fallback(py, &error) =>
                 {
-                    python_renderer = Some(Gc::new(
+                    python_renderer = Some(Arc::new(
                         py.import("django_rusty_templates.interop")?
                             .getattr("compile_template")?
                             .call1((
@@ -1803,7 +1712,7 @@ pub mod django_rusty_templates {
                     ));
                 }
             };
-            let partial_data = Gc::new(InspectionNodes(GcOnceLock::new()));
+            let partial_data = Arc::new(InspectionNodes(PyOnceLock::new()));
             if let Some(compiler) = &parser.compiler_parser {
                 partial_data.0.get_or_try_init(py, || {
                     compiler.bind(py).getattr("extra_data").map(Bound::unbind)
@@ -1816,16 +1725,16 @@ pub mod django_rusty_templates {
                 filename,
                 template_name,
                 loader_path: Vec::new(),
-                inspection_nodes: Gc::new(InspectionNodes(GcOnceLock::new())),
-                django_renderer: Gc::new(InspectionNodes(GcOnceLock::new())),
-                fallback_blocks: Gc::new(InspectionNodes(GcOnceLock::new())),
-                native_blocks: Gc::new(OnceLock::new()),
-                native_partials: Gc::new(OnceLock::new()),
+                inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
+                django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
+                fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
+                native_blocks: Arc::new(OnceLock::new()),
+                native_partials: Arc::new(OnceLock::new()),
                 partial_data,
                 python_renderer,
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
                 has_python_callbacks,
-                nodes: Gc::new(nodes),
+                nodes: Arc::new(nodes),
                 engine,
             })
         }
@@ -1835,7 +1744,7 @@ pub mod django_rusty_templates {
             template: &str,
             filename: PathBuf,
             template_name: &str,
-            engine: Gc<Engine>,
+            engine: Arc<Engine>,
         ) -> PyResult<Self> {
             Self::compile(
                 py,
@@ -1849,7 +1758,7 @@ pub mod django_rusty_templates {
         pub fn new_from_string(
             py: Python<'_>,
             template: String,
-            engine: Gc<Engine>,
+            engine: Arc<Engine>,
         ) -> PyResult<Self> {
             Self::compile(py, &template, None, None, engine)
         }
@@ -1936,9 +1845,9 @@ pub mod django_rusty_templates {
             })
         }
 
-        pub(crate) fn native_blocks(&self) -> &HashMap<String, Gc<Vec<TokenTree>>> {
+        pub(crate) fn native_blocks(&self) -> &HashMap<String, Arc<Vec<TokenTree>>> {
             self.native_blocks.get_or_init(|| {
-                fn collect(nodes: &[TokenTree], blocks: &mut HashMap<String, Gc<Vec<TokenTree>>>) {
+                fn collect(nodes: &[TokenTree], blocks: &mut HashMap<String, Arc<Vec<TokenTree>>>) {
                     for node in nodes {
                         if let TokenTree::Tag(Tag::Block { name, nodes }) = node {
                             blocks.insert(name.clone(), nodes.clone());
@@ -1954,7 +1863,7 @@ pub mod django_rusty_templates {
             })
         }
 
-        pub(crate) fn block_template(&self, nodes: Gc<Vec<TokenTree>>) -> Self {
+        pub(crate) fn block_template(&self, nodes: Arc<Vec<TokenTree>>) -> Self {
             // A detached body must resolve definitions from the complete owner,
             // including definitions outside an inherited block.
             self.native_partials();
@@ -1963,12 +1872,12 @@ pub mod django_rusty_templates {
                 has_python_callbacks: self.has_python_callbacks
                     && Self::nodes_have_callbacks(&nodes),
                 nodes,
-                inspection_nodes: Gc::new(InspectionNodes(GcOnceLock::new())),
-                django_renderer: Gc::new(InspectionNodes(GcOnceLock::new())),
-                fallback_blocks: Gc::new(InspectionNodes(GcOnceLock::new())),
-                native_blocks: Gc::new(OnceLock::new()),
+                inspection_nodes: Arc::new(InspectionNodes(PyOnceLock::new())),
+                django_renderer: Arc::new(InspectionNodes(PyOnceLock::new())),
+                fallback_blocks: Arc::new(InspectionNodes(PyOnceLock::new())),
+                native_blocks: Arc::new(OnceLock::new()),
                 native_partials: self.native_partials.clone(),
-                partial_data: Gc::new(InspectionNodes(GcOnceLock::new())),
+                partial_data: Arc::new(InspectionNodes(PyOnceLock::new())),
                 ..self.clone()
             }
         }
@@ -2249,29 +2158,7 @@ pub mod django_rusty_templates {
                 .map(|label| (label.offset(), label.len()));
             let error = match error {
                 RenderError::RelativePathError(_) => {
-                    let canonical_message = self.engine.django_series >= (6, 0)
-                        && matches!(
-                            &error,
-                            RenderError::RelativePathError(
-                                crate::path::RelativePathError::Outside { .. }
-                            )
-                        );
-                    let message = error.to_string();
-                    let diagnostic = TemplateSyntaxError::with_source_code(
-                        error.into(),
-                        self.template.to_string(),
-                    );
-                    if canonical_message {
-                        let canonical = TemplateSyntaxError::new_err(message);
-                        Python::attach(|py| {
-                            let _ = canonical
-                                .value(py)
-                                .setattr("rusty_diagnostic", diagnostic.value(py).to_string());
-                        });
-                        canonical
-                    } else {
-                        diagnostic
-                    }
+                    TemplateSyntaxError::with_source_code(error.into(), self.template.to_string())
                 }
                 RenderError::VariableDoesNotExist { .. }
                 | RenderError::ArgumentDoesNotExist { .. } => {
@@ -2311,10 +2198,6 @@ pub mod django_rusty_templates {
 
     #[pymethods]
     impl Template {
-        fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-            self.trace(&visit)
-        }
-
         #[getter]
         fn _is_native(&self) -> bool {
             self.python_renderer.is_none()
@@ -2519,7 +2402,7 @@ pub mod django_rusty_templates {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             self.template.hash(&mut hasher);
             self.filename.hash(&mut hasher);
-            Gc::as_ptr(&self.engine).hash(&mut hasher);
+            Arc::as_ptr(&self.engine).hash(&mut hasher);
             hasher.finish()
         }
 
@@ -2527,7 +2410,7 @@ pub mod django_rusty_templates {
             other.extract::<PyRef<'_, Self>>().is_ok_and(|other| {
                 self.template == other.template
                     && self.filename == other.filename
-                    && Gc::ptr_eq(&self.engine, &other.engine)
+                    && Arc::ptr_eq(&self.engine, &other.engine)
             })
         }
 
@@ -2758,7 +2641,7 @@ pub mod django_rusty_templates {
                 if !already_bound {
                     input.setattr("template_name", self.template_name.as_deref())?;
                 }
-                rendering_context.callback_input = Some(Gc::new(
+                rendering_context.callback_input = Some(Arc::new(
                     py.import("weakref")?
                         .getattr("ref")?
                         .call1((input,))?
@@ -2781,8 +2664,8 @@ pub mod django_rusty_templates {
 
 #[cfg(test)]
 mod tests {
-    use crate::gc::Gc;
     use pyo3::types::PyAnyMethods;
+    use std::sync::Arc;
 
     use super::django_rusty_templates::*;
 
@@ -2810,7 +2693,7 @@ mod tests {
                 filename.display(),
             );
 
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = std::fs::read_to_string(&filename).unwrap();
             let error = temp_env::with_var("NO_COLOR", Some("1"), || {
                 Template::new(py, &template_string, filename, "parse_error.txt", engine)
@@ -2830,7 +2713,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ foo.bar|title'foo' }}".to_string();
             let error = temp_env::with_var("NO_COLOR", Some("1"), || {
                 Template::new_from_string(py, template_string, engine).unwrap_err()
@@ -2857,7 +2740,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = String::new();
             let template = Template::new_from_string(py, template_string, engine).unwrap();
             let context = PyDict::new(py).into_any();
@@ -2871,7 +2754,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "Hello {{ user }}!".to_string();
             let template = Template::new_from_string(py, template_string, engine).unwrap();
             let context = PyDict::new(py);
@@ -2891,7 +2774,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "Hello {{ user }}!".to_string();
             let template = Template::new_from_string(py, template_string, engine).unwrap();
             let context = PyDict::new(py).into_any();
@@ -2908,7 +2791,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "Hello {{ user.profile.names.0 }}!".to_string();
             let template = Template::new_from_string(py, template_string, engine).unwrap();
             let locals = PyDict::new(py);

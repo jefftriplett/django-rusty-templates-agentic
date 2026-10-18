@@ -1,4 +1,3 @@
-use crate::gc::Gc;
 mod stock;
 pub use stock::StockNode;
 
@@ -8,7 +7,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::iter::Peekable;
-
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use either::Either;
@@ -136,22 +135,22 @@ impl Parse<Argument> for ArgumentToken {
 pub struct InclusionTag {
     pub id: CycleId,
     pub call: SimpleTag,
-    pub filename: Gc<Py<PyAny>>,
-    pub engine: Gc<Engine>,
+    pub filename: Arc<Py<PyAny>>,
+    pub engine: Arc<Engine>,
 }
 
 impl PartialEq for InclusionTag {
     fn eq(&self, other: &Self) -> bool {
         self.call == other.call
-            && Gc::ptr_eq(&self.filename, &other.filename)
-            && Gc::ptr_eq(&self.engine, &other.engine)
+            && Arc::ptr_eq(&self.filename, &other.filename)
+            && Arc::ptr_eq(&self.engine, &other.engine)
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Regroup {
     pub target: TagElement,
-    pub expression: Gc<Py<PyAny>>,
+    pub expression: Arc<Py<PyAny>>,
     pub asvar: String,
 }
 
@@ -159,7 +158,7 @@ impl PartialEq for Regroup {
     fn eq(&self, other: &Self) -> bool {
         self.target == other.target
             && self.asvar == other.asvar
-            && Gc::ptr_eq(&self.expression, &other.expression)
+            && Arc::ptr_eq(&self.expression, &other.expression)
     }
 }
 
@@ -747,14 +746,14 @@ pub struct Include {
     pub id: CycleId,
     pub template_name: IncludeTemplateName,
     pub origin: Option<String>,
-    pub engine: Gc<Engine>,
+    pub engine: Arc<Engine>,
     pub only: bool,
     pub kwargs: Vec<(At, TagElement)>,
 }
 
 impl PartialEq for Include {
     fn eq(&self, other: &Self) -> bool {
-        // We use `Gc::ptr_eq` here to avoid needing the `py` token for true
+        // We use `Arc::ptr_eq` here to avoid needing the `py` token for true
         // equality comparison between two `Py` smart pointers.
         //
         // We only use `eq` in tests, so this concession is acceptable here.
@@ -762,13 +761,13 @@ impl PartialEq for Include {
             && self.origin == other.origin
             && self.template_name.eq(&other.template_name)
             && self.kwargs == other.kwargs
-            && Gc::ptr_eq(&self.engine, &other.engine)
+            && Arc::ptr_eq(&self.engine, &other.engine)
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct SimpleTag {
-    pub func: Gc<Py<PyAny>>,
+    pub func: Arc<Py<PyAny>>,
     pub at: At,
     pub takes_context: bool,
     pub args: Vec<TagElement>,
@@ -778,7 +777,7 @@ pub struct SimpleTag {
 
 impl PartialEq for SimpleTag {
     fn eq(&self, other: &Self) -> bool {
-        // We use `Gc::ptr_eq` here to avoid needing the `py` token for true
+        // We use `Arc::ptr_eq` here to avoid needing the `py` token for true
         // equality comparison between two `Py` smart pointers.
         //
         // We only use `eq` in tests, so this concession is acceptable here.
@@ -787,13 +786,13 @@ impl PartialEq for SimpleTag {
             && self.args == other.args
             && self.kwargs == other.kwargs
             && self.target_var == other.target_var
-            && Gc::ptr_eq(&self.func, &other.func)
+            && Arc::ptr_eq(&self.func, &other.func)
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct SimpleBlockTag {
-    pub func: Gc<Py<PyAny>>,
+    pub func: Arc<Py<PyAny>>,
     pub nodes: Vec<TokenTree>,
     pub at: At,
     pub takes_context: bool,
@@ -804,7 +803,7 @@ pub struct SimpleBlockTag {
 
 impl PartialEq for SimpleBlockTag {
     fn eq(&self, other: &Self) -> bool {
-        // We use `Gc::ptr_eq` here to avoid needing the `py` token for true
+        // We use `Arc::ptr_eq` here to avoid needing the `py` token for true
         // equality comparison between two `Py` smart pointers.
         //
         // We only use `eq` in tests, so this concession is acceptable here.
@@ -814,14 +813,14 @@ impl PartialEq for SimpleBlockTag {
             && self.kwargs == other.kwargs
             && self.target_var == other.target_var
             && self.nodes == other.nodes
-            && Gc::ptr_eq(&self.func, &other.func)
+            && Arc::ptr_eq(&self.func, &other.func)
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PartialDefinition {
     pub name: String,
-    pub nodes: Gc<Vec<TokenTree>>,
+    pub nodes: Arc<Vec<TokenTree>>,
     pub span: At,
 }
 
@@ -889,7 +888,7 @@ pub enum Tag {
     PythonNode(PythonNode),
     Block {
         name: String,
-        nodes: Gc<Vec<TokenTree>>,
+        nodes: Arc<Vec<TokenTree>>,
     },
     Extends {
         at: At,
@@ -948,11 +947,11 @@ pub enum Tag {
 }
 
 #[derive(Clone, Debug)]
-pub struct PythonNode(pub Gc<Py<PyAny>>);
+pub struct PythonNode(pub Arc<Py<PyAny>>);
 
 impl PartialEq for PythonNode {
     fn eq(&self, other: &Self) -> bool {
-        Gc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -1446,13 +1445,13 @@ enum TagContext<'py> {
 }
 
 const BUILTIN_FILTER_COUNT: usize = 35;
-type BuiltinFilterCache = [Option<Gc<Py<PyAny>>>; BUILTIN_FILTER_COUNT];
+type BuiltinFilterCache = [Option<Arc<Py<PyAny>>>; BUILTIN_FILTER_COUNT];
 
 pub struct Parser<'t, 'py> {
     py: Python<'py>,
     template: TemplateString<'t>,
     lexer: Lexer<'t>,
-    engine: Gc<Engine>,
+    engine: Arc<Engine>,
     origin: Option<&'t str>,
     external_tags: HashMap<String, TagContext<'py>>,
     external_filters: HashMap<String, Bound<'py, PyAny>>,
@@ -1478,7 +1477,7 @@ impl<'t, 'py> Parser<'t, 'py> {
     pub fn new(
         py: Python<'py>,
         template: TemplateString<'t>,
-        engine: Gc<Engine>,
+        engine: Arc<Engine>,
         origin: Option<&'t str>,
     ) -> Self {
         Self {
@@ -1514,7 +1513,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         template: TemplateString<'t>,
         external_filters: HashMap<String, Bound<'py, PyAny>>,
     ) -> Self {
-        let engine: Gc<Engine> = Engine::empty().into();
+        let engine: Arc<Engine> = Engine::empty().into();
         Self {
             py,
             template,
@@ -1547,7 +1546,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         index: usize,
         name: &'static str,
         at: At,
-    ) -> Result<Gc<Py<PyAny>>, ParseError> {
+    ) -> Result<Arc<Py<PyAny>>, ParseError> {
         if let Some(cache) = self.builtin_filters.borrow().as_ref()
             && let Some(filter) = &cache[index]
         {
@@ -1563,7 +1562,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             };
             library.getattr(intern!(self.py, "filters"))?.get_item(name)
         })();
-        let filter = Gc::new(
+        let filter = Arc::new(
             lookup
                 .map_err(|_| ParseError::InvalidFilter {
                     at: at.into(),
@@ -2093,7 +2092,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         for (name, filter) in &self.external_filters {
             filters.set_item(name, filter)?;
         }
-        let expression = Gc::new(
+        let expression = Arc::new(
             parser
                 .call_method1("compile_filter", (expression,))?
                 .unbind(),
@@ -2571,7 +2570,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                         Either::Left(TokenTree::Tag(Tag::InclusionTag(InclusionTag {
                             id: CycleId(NEXT_CYCLE_ID.fetch_add(1, Ordering::Relaxed)),
                             call,
-                            filename: Gc::new(filename.clone().unbind()),
+                            filename: Arc::new(filename.clone().unbind()),
                             engine: self.engine.clone(),
                         })))
                     }
@@ -2626,7 +2625,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(TokenTree::Tag(Tag::PartialDef {
             definition: PartialDefinition {
                 name,
-                nodes: Gc::new(nodes),
+                nodes: Arc::new(nodes),
                 span: (at.0, end.at.0 + end.at.1 - at.0),
             },
             inline,
@@ -2672,7 +2671,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         }
         Ok(TokenTree::Tag(Tag::Block {
             name,
-            nodes: Gc::new(nodes),
+            nodes: Arc::new(nodes),
         }))
     }
 
@@ -3049,7 +3048,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             }
         }
         self.skip_until = end;
-        Ok(TokenTree::Tag(Tag::PythonNode(PythonNode(Gc::new(node)))))
+        Ok(TokenTree::Tag(Tag::PythonNode(PythonNode(Arc::new(node)))))
     }
 
     fn register_tag(&mut self, name: &str, tag: Bound<'py, PyAny>) -> PyResult<()> {
@@ -3508,7 +3507,7 @@ mod tests {
     };
     use dtl_lexer::common::LexerError;
 
-    fn get_external_filter(node: &TokenTree) -> Gc<Py<PyAny>> {
+    fn get_external_filter(node: &TokenTree) -> Arc<Py<PyAny>> {
         match node {
             TokenTree::Filter(filter) => match &filter.filter {
                 FilterType::External(filter) => filter.filter.clone(),
@@ -3518,7 +3517,7 @@ mod tests {
         }
     }
 
-    fn get_external_filter_tag_element(node: &TokenTree) -> Gc<Py<PyAny>> {
+    fn get_external_filter_tag_element(node: &TokenTree) -> Arc<Py<PyAny>> {
         match node {
             TokenTree::Filter(filter) => match &filter.left {
                 TagElement::Filter(filter) => match &filter.filter {
@@ -3911,7 +3910,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ foo|addslashes }}".to_string();
             let context = PyDict::new(py);
             context.set_item("bar", "").unwrap();
@@ -4364,7 +4363,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let func: Gc<Py<PyAny>> = PyDict::new(py).into_any().unbind().into();
+            let func: Arc<Py<PyAny>> = PyDict::new(py).into_any().unbind().into();
             let at = (0, 1);
             let takes_context = true;
             assert_eq!(
@@ -4393,7 +4392,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let func: Gc<Py<PyAny>> = PyDict::new(py).into_any().unbind().into();
+            let func: Arc<Py<PyAny>> = PyDict::new(py).into_any().unbind().into();
             let at = (0, 1);
             let takes_context = true;
             assert_eq!(
@@ -4424,7 +4423,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|_| {
-            let engine: Gc<Engine> = Engine::empty().into();
+            let engine: Arc<Engine> = Engine::empty().into();
             let template_name = IncludeTemplateName::Variable(TagElement::Float(1.1));
             assert_eq!(
                 Include {

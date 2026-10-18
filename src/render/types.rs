@@ -1,4 +1,3 @@
-use crate::gc::Gc;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -149,12 +148,12 @@ pub struct Context {
     pub instrument_render: bool,
     pub formatting_context: Option<Py<PyAny>>,
     // Weak reference to an input Context, used only while calling Python code.
-    pub callback_input: Option<Gc<Py<PyAny>>>,
+    pub callback_input: Option<Arc<Py<PyAny>>>,
     pub inheritance_blocks: HashMap<String, Vec<BlockEntry>>,
     pub python_blocks: Option<Py<PyAny>>,
     pub current_template: Option<Arc<Template>>,
     pub root_template: Option<Arc<Template>>,
-    pub inheritance_history: Vec<Gc<Py<PyAny>>>,
+    pub inheritance_history: Vec<Arc<Py<PyAny>>>,
     // Share unchanged values across Python context snapshots. Each snapshot
     // owns a small overlay so later loop iterations cannot alter earlier ones.
     django_context_base: RefCell<Option<Py<PyDict>>>,
@@ -821,7 +820,7 @@ impl Context {
     pub fn get_or_insert_include(
         &mut self,
         py: Python,
-        engine: &Gc<Engine>,
+        engine: &Arc<Engine>,
         key: &IncludeTemplateKey,
         id: CycleId,
     ) -> Result<Arc<Template>, PyErr> {

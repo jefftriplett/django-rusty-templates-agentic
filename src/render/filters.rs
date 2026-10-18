@@ -985,7 +985,7 @@ impl ResolveFilter for YesnoFilter {
 
 #[cfg(test)]
 mod tests {
-    use crate::gc::Gc;
+    use std::sync::Arc;
 
     use super::*;
     use crate::filters::{AddSlashesFilter, DefaultFilter, LowerFilter, UpperFilter};
@@ -1047,7 +1047,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|slugify }}".to_string();
             let context = PyDict::new(py);
             context.set_item("var", "hello world").unwrap();
@@ -1065,7 +1065,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|slugify }}".to_string();
             let context = PyDict::new(py);
             context.set_item("var", " hello world").unwrap();
@@ -1083,7 +1083,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|slugify }}".to_string();
             let context = PyDict::new(py);
             context.set_item("var", "a&€%").unwrap();
@@ -1101,7 +1101,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|slugify }}".to_string();
             let context = PyDict::new(py);
             context.set_item("var", "a & b").unwrap();
@@ -1119,7 +1119,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|default:1|slugify }}".to_string();
             let context = PyDict::new(py);
             let template = Template::new_from_string(py, template_string, engine).unwrap();
@@ -1136,7 +1136,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|default:1.3|slugify }}".to_string();
             let context = PyDict::new(py);
             let template = Template::new_from_string(py, template_string, engine).unwrap();
@@ -1153,7 +1153,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|default:'hello world'|slugify }}".to_string();
             let context = PyDict::new(py);
             let template = Template::new_from_string(py, template_string, engine).unwrap();
@@ -1170,7 +1170,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|default:'hello world'|safe|slugify }}".to_string();
             let context = PyDict::new(py);
             let template = Template::new_from_string(py, template_string, engine).unwrap();
@@ -1187,7 +1187,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|slugify }}".to_string();
             let context = PyDict::new(py);
             let safe_string = mark_safe(py, "a &amp; b".to_string()).unwrap();
@@ -1206,7 +1206,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ not_there|slugify }}".to_string();
             let context = PyDict::new(py);
             let template = Template::new_from_string(py, template_string, engine).unwrap();
@@ -1223,7 +1223,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|slugify:invalid }}".to_string();
             let error = Template::new_from_string(py, template_string, engine).unwrap_err();
 
@@ -1263,7 +1263,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|capfirst }}".to_string();
             let context = PyDict::new(py);
             context.set_item("var", "hello world").unwrap();
@@ -1311,7 +1311,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|center:'11' }}".to_string();
             let context = PyDict::new(py);
             context.set_item("var", "hello").unwrap();
@@ -1349,7 +1349,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|center }}".to_string();
             let error = Template::new_from_string(py, template_string, engine).unwrap_err();
 
@@ -1368,7 +1368,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|center:'11' }}".to_string();
             let context = PyDict::new(py);
             let template = Template::new_from_string(py, template_string, engine).unwrap();
@@ -1385,7 +1385,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let template_string = "{{ var|center:0 }}".to_string();
             let context = PyDict::new(py);
             context.set_item("var", "hello").unwrap();

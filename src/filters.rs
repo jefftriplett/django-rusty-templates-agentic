@@ -1,4 +1,4 @@
-use crate::gc::Gc;
+use std::sync::Arc;
 
 use pyo3::prelude::*;
 
@@ -115,14 +115,14 @@ pub struct EscapejsFilter;
 
 #[derive(Clone, Debug)]
 pub struct ExternalFilter {
-    pub filter: Gc<Py<PyAny>>,
+    pub filter: Arc<Py<PyAny>>,
     pub argument: Option<Argument>,
 }
 
 impl ExternalFilter {
     pub fn new(filter: Py<PyAny>, argument: Option<Argument>) -> Self {
         Self {
-            filter: Gc::new(filter),
+            filter: Arc::new(filter),
             argument,
         }
     }
@@ -130,11 +130,11 @@ impl ExternalFilter {
 
 impl PartialEq for ExternalFilter {
     fn eq(&self, other: &Self) -> bool {
-        // We use `Gc::ptr_eq` here to avoid needing the `py` token for true
+        // We use `Arc::ptr_eq` here to avoid needing the `py` token for true
         // equality comparison between two `Py` smart pointers.
         //
         // We only use `eq` in tests, so this concession is acceptable here.
-        self.argument.eq(&other.argument) && Gc::ptr_eq(&self.filter, &other.filter)
+        self.argument.eq(&other.argument) && Arc::ptr_eq(&self.filter, &other.filter)
     }
 }
 
@@ -211,7 +211,7 @@ impl DivisibleByFilter {
 /// Django-backed filters preserve Python protocol and escaping behavior.
 #[derive(Clone, Debug)]
 pub struct DjangoFilter {
-    pub filter: Gc<Py<PyAny>>,
+    pub filter: Arc<Py<PyAny>>,
     pub argument: Option<Argument>,
 }
 

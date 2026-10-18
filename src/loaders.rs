@@ -1,7 +1,7 @@
-use crate::gc::Gc;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use encoding_rs::Encoding;
 use pyo3::exceptions::PyUnicodeError;
@@ -107,7 +107,7 @@ impl FileSystemLoader {
         &self,
         py: Python<'_>,
         template_name: &str,
-        engine: Gc<Engine>,
+        engine: Arc<Engine>,
     ) -> Result<PyResult<Template>, LoaderError> {
         let mut tried = Vec::new();
         let dirs: Cow<'_, [PathBuf]> = if self.uses_engine_dirs {
@@ -180,7 +180,7 @@ impl AppDirsLoader {
         &self,
         py: Python<'_>,
         template_name: &str,
-        engine: Gc<Engine>,
+        engine: Arc<Engine>,
     ) -> Result<PyResult<Template>, LoaderError> {
         let dirs = match get_app_template_dirs(py, "templates") {
             Ok(dirs) => dirs,
@@ -210,7 +210,7 @@ impl CachedLoader {
         &mut self,
         py: Python<'_>,
         template_name: &str,
-        engine: Gc<Engine>,
+        engine: Arc<Engine>,
     ) -> Result<PyResult<Template>, LoaderError> {
         match self.cache.get(template_name) {
             Some(Ok(template)) => Ok(Ok((*template).clone())),
@@ -252,7 +252,7 @@ impl LocMemLoader {
         &self,
         py: Python<'_>,
         template_name: &str,
-        engine: Gc<Engine>,
+        engine: Arc<Engine>,
     ) -> Result<PyResult<Template>, LoaderError> {
         if let Some(contents) = self.templates.get(template_name) {
             Ok(Template::new(
@@ -280,7 +280,7 @@ impl ExternalLoader {
         &self,
         _py: Python<'_>,
         _template_name: &str,
-        _engine: Gc<Engine>,
+        _engine: Arc<Engine>,
     ) -> Result<PyResult<Template>, LoaderError> {
         std::todo!() // Bail here because it does not make much sense to convert from PyErr to empty LoaderError
     }
@@ -302,7 +302,7 @@ impl Loader {
         &mut self,
         py: Python<'_>,
         template_name: &str,
-        engine: Gc<Engine>,
+        engine: Arc<Engine>,
     ) -> Result<PyResult<Template>, LoaderError> {
         match self {
             Self::FileSystem(loader) => loader.get_template(py, template_name, engine),
@@ -343,7 +343,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let loader =
                 FileSystemLoader::new(vec![PathBuf::from("tests/templates")], encoding_rs::UTF_8);
             let template = loader
@@ -365,7 +365,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let loader =
                 FileSystemLoader::new(vec![PathBuf::from("tests/templates")], encoding_rs::UTF_8);
             let error = loader.get_template(py, "missing.txt", engine).unwrap_err();
@@ -392,7 +392,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let loader =
                 FileSystemLoader::new(vec![PathBuf::from("tests/templates")], encoding_rs::UTF_8);
             let error = loader
@@ -431,7 +431,7 @@ mod tests {
                 }
             };
 
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
 
             // Create a FileSystemLoader for the CachedLoader
             let filesystem_loader =
@@ -479,7 +479,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let filesystem_loader =
                 FileSystemLoader::new(vec![PathBuf::from("tests/templates")], encoding_rs::UTF_8);
 
@@ -519,7 +519,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let filesystem_loader =
                 FileSystemLoader::new(vec![PathBuf::from("tests/templates")], encoding_rs::UTF_8);
 
@@ -549,7 +549,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let mut templates: HashMap<String, String> = HashMap::new();
             templates.insert("index.html".to_string(), "index".to_string());
 
@@ -569,7 +569,7 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let templates: HashMap<String, String> = HashMap::new();
 
             let loader = LocMemLoader::new(templates);
@@ -595,7 +595,7 @@ mod tests {
             // Setup Django
             setup_django(py);
 
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let loader = AppDirsLoader::new(encoding_rs::UTF_8);
             let template = loader
                 .get_template(py, "basic.txt", engine)
@@ -619,7 +619,7 @@ mod tests {
             // Setup Django
             setup_django(py);
 
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let loader = AppDirsLoader::new(encoding_rs::UTF_8);
             let error = loader.get_template(py, "missing.txt", engine).unwrap_err();
 
@@ -663,7 +663,7 @@ mod tests {
             // Setup Django
             setup_django(py);
 
-            let engine = Gc::new(Engine::empty());
+            let engine = Arc::new(Engine::empty());
             let loader = AppDirsLoader::new(encoding_rs::UTF_8);
             let error = loader
                 .get_template(py, "invalid.txt", engine)

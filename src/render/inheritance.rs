@@ -1,7 +1,6 @@
 //! Native inheritance state and block scopes. Python is used only at loader,
 //! callback, and unsupported-template boundaries.
 
-use crate::gc::Gc;
 use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
@@ -17,7 +16,7 @@ use crate::template::django_rusty_templates::{PyEngine, Template, TemplateSyntax
 pub struct BlockEntry {
     pub name: String,
     pub owner: Arc<Template>,
-    pub nodes: Gc<Vec<TokenTree>>,
+    pub nodes: Arc<Vec<TokenTree>>,
 }
 
 #[derive(Clone, Debug)]
@@ -182,7 +181,7 @@ impl Context {
                 parent
             } else {
                 if self.inheritance_history.is_empty() {
-                    self.inheritance_history.push(Gc::new(
+                    self.inheritance_history.push(Arc::new(
                         current.origin().into_pyobject(py)?.into_any().unbind(),
                     ));
                 }
@@ -201,7 +200,7 @@ impl Context {
                         .any(|previous| origin.matches(previous.bind(py)))
                     {
                         self.inheritance_history
-                            .push(Gc::new(origin.into_pyobject(py)?.into_any().unbind()));
+                            .push(Arc::new(origin.into_pyobject(py)?.into_any().unbind()));
                         self.add_blocks(&current);
                         if !cached.extends_parent() {
                             self.add_blocks(&Arc::new(cached.clone()));
@@ -226,7 +225,7 @@ impl Context {
                         skip,
                     ))?;
                 self.inheritance_history
-                    .push(Gc::new(loaded.get_item(1)?.unbind()));
+                    .push(Arc::new(loaded.get_item(1)?.unbind()));
                 loaded.get_item(0)?
             };
         self.add_blocks(&current);
