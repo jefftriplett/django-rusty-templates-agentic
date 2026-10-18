@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2026.10.13
+
 Restore callback rendering performance while preserving cyclic collection, and reduce allocations in blocks and includes. ([#171](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/171))
 
 ## 2026.10.12
