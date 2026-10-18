@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2026.10.11
+
 Release discarded cached engines through Python cyclic GC while preserving retained templates and loaders, and match Django 6+ include-path errors. ([#166](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/166))
 
 ## 2026.10.10
