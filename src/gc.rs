@@ -165,7 +165,7 @@ impl<T: Debug + 'static> Debug for Gc<T> {
 
 impl<T: PartialEq + 'static> PartialEq for Gc<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.deref() == other.deref()
+        **self == **other
     }
 }
 
@@ -213,7 +213,7 @@ impl<T: Trace> Trace for OnceLock<T> {
 
 /// A fallible Python initializer with a nonblocking, Python-free GC read path.
 #[derive(Debug)]
-pub(crate) struct GcOnceLock<T> {
+pub struct GcOnceLock<T> {
     value: OnceLock<T>,
     initializing: Mutex<()>,
 }
@@ -466,7 +466,7 @@ impl Trace for Tag {
             Self::PythonNode(node) => node.trace(visit)?,
             Self::Block { nodes, .. } => nodes.trace(visit)?,
             Self::Autoescape { nodes, .. } | Self::Spaceless(nodes) | Self::Verbatim(nodes) => {
-                nodes.trace(visit)?
+                nodes.trace(visit)?;
             }
             Self::Extends { parent, nodes, .. } => {
                 parent.trace(visit)?;

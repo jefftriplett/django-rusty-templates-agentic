@@ -96,10 +96,10 @@ pub struct Lorem {
     pub common: bool,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Comment;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct CsrfToken;
 
 impl Parse<Argument> for ArgumentToken {
@@ -423,9 +423,9 @@ impl Parse<TagElement> for TagElementKwargToken {
 /// Extracts "as variable" from the end of the tokens list (and truncates it).
 ///
 /// This will return:
-/// - Ok(Some(variable_name)) if found and valid
+/// - `Ok(Some(variable_name))` if found and valid
 /// - Ok(None) if "as" not found
-/// - ParseError if as is not at the end or missing a variable
+/// - `ParseError` if as is not at the end or missing a variable
 fn extract_as_variable(
     tokens: &mut Vec<TagElementKwargToken>,
     template: &TemplateString<'_>,
@@ -1923,7 +1923,7 @@ impl<'t, 'py> Parser<'t, 'py> {
 
     fn parse_comment(&mut self, at: At, _parts: TagParts) -> Result<Comment, PyParseError> {
         for token in self.lexer.by_ref() {
-            if let TokenType::Tag = token.token_type {
+            if token.token_type == TokenType::Tag {
                 let content = token.content(self.template).trim();
                 if content.split_whitespace().next() == Some("endcomment") {
                     return Ok(Comment);
@@ -1978,7 +1978,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             version.get_item(1)?.extract::<u8>()?,
         );
         if series >= (6, 2) {
-            let mut tokens = self.argument_spans(parts.clone());
+            let mut tokens = self.argument_spans(parts);
             let asvar = if tokens.len() == 3 && self.template.content(tokens[1]) == "as" {
                 let target = tokens.pop();
                 tokens.pop();
@@ -2994,7 +2994,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                     .setattr("_rusty_compiler_error", true)?;
                 return Err(error);
             }
-            todo!("Fully custom tag")
+            todo!("Fully custom tag");
         }
         self.external_tags
             .insert(name.to_string(), TagContext::Opaque(compiler.clone()));

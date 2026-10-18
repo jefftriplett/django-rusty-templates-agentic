@@ -1267,7 +1267,7 @@ fn append_escaped(text: &str, output: &mut String) {
     }
 }
 
-/// Borrow Python text only while its owning handle is alive. PyO3's to_cow
+/// Borrow Python text only while its owning handle is alive. `PyO3`'s `to_cow`
 /// preserves the same Unicode conversion and errors as String extraction.
 pub(crate) fn append_python_string(
     value: &Bound<'_, PyAny>,

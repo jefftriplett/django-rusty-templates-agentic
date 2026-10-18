@@ -27,7 +27,7 @@ pub(crate) fn join_type_error(index: usize, value: &Bound<'_, PyAny>) -> PyResul
     )))
 }
 
-/// Retain non-string results until joining, just as Django's NodeList does.
+/// Retain non-string results until joining, just as Django's `NodeList` does.
 /// Valid string rendering does not allocate a result list.
 #[derive(Default)]
 pub(crate) struct JoinResults(Vec<(usize, Py<PyAny>)>);

@@ -360,7 +360,7 @@ pub mod django_rusty_templates {
             let origin = renderer.getattr("origin")?;
             let origin_loader = origin.getattr("loader")?;
             let native_loader = origin_loader.getattr("_native").unwrap_or(origin_loader);
-            let loader = native_loader.extract::<PyRef<'_, LoaderView>>()?;
+            let loader = native_loader.extract::<PyRef<'_, Self>>()?;
             let template = if let Ok(native) = renderer.extract::<PyRef<'_, Template>>() {
                 let mut template = native.clone();
                 template.loader_path = loader.path[self.path.len()..].to_vec();
@@ -484,7 +484,7 @@ pub mod django_rusty_templates {
 
     #[derive(Clone)]
     #[pyclass(frozen, skip_from_py_object)]
-    pub(crate) struct Origin {
+    pub struct Origin {
         #[pyo3(get)]
         name: String,
         #[pyo3(get)]
@@ -1796,7 +1796,7 @@ pub mod django_rusty_templates {
                     return Err(canonical_parse_error(
                         py,
                         error,
-                        engine.clone(),
+                        engine,
                         template,
                         filename.as_deref(),
                         template_name.as_deref(),

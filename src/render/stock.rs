@@ -12,7 +12,7 @@ use crate::parse::{StockNode, TagElement};
 
 static SERVICES: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 
-fn services<'py>(py: Python<'py>) -> PyResult<&'py Bound<'py, PyModule>> {
+fn services(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     Ok(SERVICES
         .get_or_try_init(py, || {
             py.import("django_rusty_templates.stock").map(Bound::unbind)

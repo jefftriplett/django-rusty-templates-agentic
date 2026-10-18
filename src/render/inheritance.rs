@@ -48,7 +48,7 @@ impl BlockMarker {
 }
 
 /// A Python callback can call block.super while the native context is owned by
-/// PyContext. Ordinary template expressions resolve it directly in Rust.
+/// `PyContext`. Ordinary template expressions resolve it directly in Rust.
 #[pyclass]
 pub struct BlockCallback {
     pub marker: BlockMarker,

@@ -273,7 +273,7 @@ impl Parser<'_, '_> {
             let message = plural.as_mut().unwrap_or(&mut singular);
             match token.token_type {
                 TokenType::Text => {
-                    message.push_str(&token.content(self.template).replace('%', "%%"))
+                    message.push_str(&token.content(self.template).replace('%', "%%"));
                 }
                 TokenType::Variable => {
                     let variable = token.content(self.template).trim();
