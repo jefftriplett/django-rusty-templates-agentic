@@ -1,8 +1,9 @@
 //! Native inheritance state and block scopes. Python is used only at loader,
 //! callback, and unsupported-template boundaries.
 
-use crate::gc::Gc;
-use std::sync::{Arc, Mutex};
+use crate::gc::{Gc, Trace};
+use pyo3::{PyTraverseError, PyVisit};
+use std::sync::Mutex;
 
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
@@ -16,8 +17,15 @@ use crate::template::django_rusty_templates::{PyEngine, Template, TemplateSyntax
 #[derive(Clone, Debug)]
 pub struct BlockEntry {
     pub name: String,
-    pub owner: Arc<Template>,
+    pub owner: Gc<Template>,
     pub nodes: Gc<Vec<TokenTree>>,
+}
+
+impl Trace for BlockEntry {
+    fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.owner.trace(visit)?;
+        self.nodes.trace(visit)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -29,6 +37,10 @@ pub struct BlockMarker {
 
 #[pymethods]
 impl BlockMarker {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.entry.trace(&visit)
+    }
+
     #[getter]
     fn name(&self) -> &str {
         &self.entry.name
@@ -40,11 +52,16 @@ impl BlockMarker {
 #[pyclass]
 pub struct BlockCallback {
     pub marker: BlockMarker,
-    pub context: Arc<Mutex<Context>>,
+    pub context: Gc<Mutex<Context>>,
 }
 
 #[pymethods]
 impl BlockCallback {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.marker.entry.trace(&visit)?;
+        self.context.trace(&visit)
+    }
+
     #[getter]
     fn name(&self) -> &str {
         &self.marker.entry.name
@@ -68,7 +85,7 @@ impl BlockCallback {
 }
 
 impl Context {
-    pub fn add_blocks(&mut self, owner: &Arc<Template>) {
+    pub fn add_blocks(&mut self, owner: &Gc<Template>) {
         for (name, nodes) in owner.native_blocks() {
             self.inheritance_blocks
                 .entry(name.clone())
@@ -204,7 +221,7 @@ impl Context {
                             .push(Gc::new(origin.into_pyobject(py)?.into_any().unbind()));
                         self.add_blocks(&current);
                         if !cached.extends_parent() {
-                            self.add_blocks(&Arc::new(cached.clone()));
+                            self.add_blocks(&Gc::new(cached.clone()));
                         }
                         return cached
                             .render_chain(py, self)
@@ -231,7 +248,7 @@ impl Context {
             };
         self.add_blocks(&current);
         if let Ok(native) = parent.extract::<PyRef<'_, Template>>() {
-            let native = Arc::new(native.clone());
+            let native = Gc::new(native.clone());
             if native.is_native() {
                 if !native.extends_parent() {
                     self.add_blocks(&native);

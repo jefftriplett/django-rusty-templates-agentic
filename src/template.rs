@@ -2170,7 +2170,7 @@ pub mod django_rusty_templates {
             };
             let previous_python_blocks =
                 std::mem::replace(&mut context.python_blocks, python_blocks);
-            let owner = Arc::new(self.clone());
+            let owner = Gc::new(self.clone());
             if context.root_template.is_none() {
                 context.root_template = Some(owner.clone());
             }
