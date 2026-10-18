@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use pyo3::prelude::*;
@@ -35,6 +36,10 @@ impl<T: Trace + Any + Send + Sync + Debug> Value for T {
 #[pyclass(frozen)]
 struct Shared {
     value: Box<dyn Value>,
+    // Count native handles separately from Python's GC/debugger references.
+    // This also works on free-threaded Python, where Py_REFCNT cannot prove
+    // that a value has a single owner.
+    native_owners: AtomicUsize,
 }
 
 #[pymethods]
@@ -60,6 +65,7 @@ impl<T: Trace + Any + Send + Sync + Debug> Gc<T> {
                 py,
                 Shared {
                     value: Box::new(value),
+                    native_owners: AtomicUsize::new(1),
                 },
             )
             .expect("allocate shared native object"),
@@ -78,10 +84,44 @@ impl<T: Trace + Any + Send + Sync + Debug> Gc<T> {
 
 impl<T> Clone for Gc<T> {
     fn clone(&self) -> Self {
+        self.shared
+            .get()
+            .native_owners
+            .fetch_add(1, Ordering::Relaxed);
         Python::attach(|py| Self {
             shared: self.shared.clone_ref(py),
             marker: PhantomData,
         })
+    }
+}
+
+impl<T> Drop for Gc<T> {
+    fn drop(&mut self) {
+        self.shared
+            .get()
+            .native_owners
+            .fetch_sub(1, Ordering::Release);
+    }
+}
+
+impl<T: Default + Debug + Send + 'static> Gc<Mutex<T>>
+where
+    Mutex<T>: Trace,
+{
+    /// Return exclusive callback state without copying it. Retained Python
+    /// wrappers and block callbacks own native handles too, so their snapshots
+    /// still take the cloning path. Consuming this handle prevents new aliases
+    /// when its native owner count is one.
+    pub fn take_or_clone(self, py: Python<'_>, clone: impl FnOnce(&T) -> T) -> T {
+        let unique = self.shared.get().native_owners.load(Ordering::Acquire) == 1;
+        let mut value = self
+            .lock_py_attached(py)
+            .expect("shared value lock is not poisoned");
+        if unique {
+            std::mem::take(&mut *value)
+        } else {
+            clone(&value)
+        }
     }
 }
 
@@ -473,5 +513,57 @@ impl Trace for Tag {
             | Self::TemplateTag(_) => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A native buffer lets these tests distinguish moving from copying without
+    // relying on timings or CPython reference-count implementation details.
+    impl Trace for Mutex<Vec<String>> {
+        fn trace(&self, _visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn unique_state_reuses_its_buffer() {
+        Python::initialize();
+        Python::attach(|py| {
+            let buffer = vec!["value".to_string()];
+            let pointer = buffer.as_ptr();
+            let shared = Gc::new(Mutex::new(buffer));
+            let returned = shared.take_or_clone(py, Clone::clone);
+            assert_eq!(returned, ["value"]);
+            assert_eq!(returned.as_ptr(), pointer);
+        });
+    }
+
+    #[test]
+    fn retained_state_keeps_its_buffer() {
+        Python::initialize();
+        Python::attach(|py| {
+            let shared = Gc::new(Mutex::new(vec!["value".to_string()]));
+            let retained = shared.clone();
+            let returned = shared.take_or_clone(py, Clone::clone);
+            let retained = retained.lock().expect("test lock is not poisoned");
+            assert_eq!(*retained, returned);
+            assert_ne!(retained.as_ptr(), returned.as_ptr());
+        });
+    }
+
+    #[test]
+    fn released_alias_allows_moving_state() {
+        Python::initialize();
+        Python::attach(|py| {
+            let buffer = vec!["value".to_string()];
+            let pointer = buffer.as_ptr();
+            let shared = Gc::new(Mutex::new(buffer));
+            drop(shared.clone());
+            let returned = shared.take_or_clone(py, Clone::clone);
+            assert_eq!(returned.as_ptr(), pointer);
+        });
     }
 }

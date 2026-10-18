@@ -10,7 +10,7 @@ use pyo3::exceptions::{
 };
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::sync::{MutexExt, PyOnceLock};
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBool, PyDict, PyList, PyNone, PyString, PyTuple};
 
 use crate::parse::Now;
@@ -1340,7 +1340,11 @@ impl<'t, 'py> IncludeTemplate<'py> {
         template: TemplateString<'t>,
     ) -> RenderResult<'t> {
         match self {
-            Self::Template(template) => template.render(py, context),
+            Self::Template(template) => {
+                let mut output = String::with_capacity(template.template.len());
+                Template::render_shared_into(template, py, context, &mut output)?;
+                Ok(Cow::Owned(output))
+            }
             Self::Callable(callable) => {
                 let py_context = build_pycontext(py, context)?;
                 let result = callable.call1((py_context.clone(),));
@@ -1362,7 +1366,7 @@ impl<'t, 'py> IncludeTemplate<'py> {
         output: &mut String,
     ) -> super::RenderIntoResult {
         match self {
-            Self::Template(template) => template.render_into(py, context, output),
+            Self::Template(template) => Template::render_shared_into(template, py, context, output),
             Self::Callable(_) => {
                 output.push_str(&self.render(py, context, at, template)?);
                 Ok(())
@@ -1666,14 +1670,11 @@ fn retrieve_context<'py>(py: Python<'py>, py_context: Bound<'py, PyAny>, context
     // Ensure we only hold one reference in Rust by dropping the Python object.
     drop(py_context);
 
-    // Try to remove the Context from the PyContext
-    // A Python callback may retain its context. Copy the current state back
-    // while the shared snapshot remains valid and visible to cyclic GC.
+    // Move unretained state back; retained callbacks keep their GC-visible
+    // snapshot and need a copy instead.
     let inner_context = extracted_context
         .context
-        .lock_py_attached(py)
-        .expect("context lock is not poisoned")
-        .clone_ref(py);
+        .take_or_clone(py, |context| context.clone_ref(py));
     // Put the Context back in `context`
     let _ = std::mem::replace(context, inner_context);
 }

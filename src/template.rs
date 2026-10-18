@@ -1869,6 +1869,17 @@ pub mod django_rusty_templates {
             })
         }
 
+        pub(crate) fn render_shared_into(
+            owner: &Gc<Self>,
+            py: Python<'_>,
+            context: &mut Context,
+            output: &mut String,
+        ) -> crate::render::RenderIntoResult {
+            owner.with_render_scope(py, context, |context| {
+                owner.render_chain_with_owner_into(py, context, output, Some(owner))
+            })
+        }
+
         fn with_render_scope<T>(
             &self,
             py: Python<'_>,
@@ -2057,6 +2068,16 @@ pub mod django_rusty_templates {
             context: &mut Context,
             output: &mut String,
         ) -> crate::render::RenderIntoResult {
+            self.render_chain_with_owner_into(py, context, output, None)
+        }
+
+        fn render_chain_with_owner_into(
+            &self,
+            py: Python<'_>,
+            context: &mut Context,
+            output: &mut String,
+            owner: Option<&Gc<Self>>,
+        ) -> crate::render::RenderIntoResult {
             if let Some(renderer) = &self.python_renderer {
                 renderer
                     .bind(py)
@@ -2117,7 +2138,8 @@ pub mod django_rusty_templates {
                     Some(live.call_method0("flatten")?.extract()?)
                 };
                 context.formatting_context = Some(live.unbind());
-                let result = self.render_body_into(py, &self.nodes, context, output);
+                let result =
+                    self.render_body_with_owner_into(py, &self.nodes, context, output, owner);
                 let live = context
                     .formatting_context
                     .take()
@@ -2142,7 +2164,7 @@ pub mod django_rusty_templates {
                 }
                 return result;
             }
-            self.render_body_into(py, &self.nodes, context, output)
+            self.render_body_with_owner_into(py, &self.nodes, context, output, owner)
         }
 
         pub(crate) fn render_body<'a>(
@@ -2163,6 +2185,17 @@ pub mod django_rusty_templates {
             context: &mut Context,
             output: &mut String,
         ) -> crate::render::RenderIntoResult {
+            self.render_body_with_owner_into(py, nodes, context, output, None)
+        }
+
+        pub(crate) fn render_body_with_owner_into(
+            &self,
+            py: Python<'_>,
+            nodes: &[TokenTree],
+            context: &mut Context,
+            output: &mut String,
+            owner: Option<&Gc<Self>>,
+        ) -> crate::render::RenderIntoResult {
             let python_blocks = if self.has_inheritance() && context.formatting_context.is_some() {
                 Some(self.compiled_blocks(py)?.unbind())
             } else {
@@ -2170,7 +2203,9 @@ pub mod django_rusty_templates {
             };
             let previous_python_blocks =
                 std::mem::replace(&mut context.python_blocks, python_blocks);
-            let owner = Gc::new(self.clone());
+            // Includes and blocks already own GC-visible template handles.
+            // Reuse them instead of allocating and cloning complete templates.
+            let owner = owner.cloned().unwrap_or_else(|| Gc::new(self.clone()));
             if context.root_template.is_none() {
                 context.root_template = Some(owner.clone());
             }

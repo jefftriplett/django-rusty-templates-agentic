@@ -223,3 +223,52 @@ def test_callable_block_context_cycle_is_collected(engine_class):
     references = [render_once() for _ in range(10)]
     gc.collect()
     assert all(source() is None and request() is None for source, request in references)
+
+
+@pytest.mark.parametrize("keep", ["context", "block"])
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("depth", [0, 1])
+def test_retained_callback_state_survives_collection(
+    engine_class, monkeypatch, keep, debug, depth
+):
+    module = ModuleType("rusty_retained_callback_state")
+    module.register = Library()
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    retained = []
+
+    @module.register.simple_tag(takes_context=True)
+    def remember(context):
+        retained.append(context if keep == "context" else context["block"])
+        gc.collect()
+        return context["value"]
+
+    def render_once():
+        backend, _ = make_backend(
+            engine_class,
+            "{% extends parent %}{% load callbacks %}{% block body %}"
+            "{% for item in items %}{% remember %}{% endfor %}{% endblock %}",
+            debug=debug,
+            depth=depth,
+            libraries={"callbacks": module.__name__},
+        )
+        marker = Marker()
+        reference = weakref.ref(marker)
+        parent = backend.from_string("{% block body %}base{% endblock %}")
+        assert (
+            backend.get_template("page.html").render(
+                {"marker": marker, "value": "ok", "items": [1, 2], "parent": parent}
+            )
+            == "okok"
+        )
+        return reference
+
+    reference = render_once()
+    gc.collect()
+    assert reference() is not None
+    if keep == "context":
+        assert all(context["value"] == "ok" for context in retained)
+    else:
+        assert all(block.name == "body" for block in retained)
+    retained.clear()
+    gc.collect()
+    assert reference() is None
