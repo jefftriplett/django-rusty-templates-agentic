@@ -16,7 +16,7 @@ To measure inheritance compilation separately from warm rendering and uncached l
 
 ## Versioning
 
-Releases use calendar versioning: `YYYY.MM.INCR`, with the increment starting at `1` each month. The current package version is `2026.10.12`.
+Releases use calendar versioning: `YYYY.MM.INCR`, with the increment starting at `1` each month. The current package version is `2026.10.13`.
 
 To release, run `just release-prepare` from a clean `main` checkout. It uses
 [bumpver](https://github.com/mbarkhau/bumpver) to pick the next version, updates
