@@ -125,9 +125,13 @@ impl Context {
             inherited,
         };
         scoped.insert("block".to_string(), Bound::new(py, marker)?.into_any())?;
-        let result = selected
-            .owner
-            .render_body_into(py, &selected.nodes, &mut scoped, output);
+        let result = selected.owner.render_body_with_owner_into(
+            py,
+            &selected.nodes,
+            &mut scoped,
+            output,
+            Some(&selected.owner),
+        );
         if let Some(popped) = popped {
             self.inheritance_blocks
                 .entry(own.name)

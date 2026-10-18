@@ -103,10 +103,7 @@ impl Context {
             input.setattr("template", original_template)?;
             Ok(())
         })();
-        *self = shared
-            .lock_py_attached(py)
-            .expect("context lock is not poisoned")
-            .clone_ref(py);
+        *self = shared.take_or_clone(py, |context| context.clone_ref(py));
         let value = result?;
         cleanup?;
         Ok(value)
