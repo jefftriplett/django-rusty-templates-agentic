@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2026.10.12
+
 Collect cycles created by custom tags retaining native contexts or block callbacks, including shared scope and loop data. ([#169](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/169))
 
 ## 2026.10.11
