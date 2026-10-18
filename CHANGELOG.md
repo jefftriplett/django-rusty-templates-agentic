@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Release discarded cached engines through Python cyclic GC while preserving retained templates and loaders, and match Django 6+ include-path errors. ([#166](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/166))
+
 ## 2026.10.10
 
 Restore Django 6.1 admin rendering with CSP nonce support, complete the default filter set, and fix mixed-template CSRF and HTML handling, Windows template loading, and raw-block parsing. Exercise Rusty directly in the template, admin, and CSP conformance suites. ([#163](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/163))
