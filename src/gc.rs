@@ -21,6 +21,12 @@ pub trait Trace {
     fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError>;
 
     fn clear(&self) {}
+
+    // Only state which can move back out of its container needs a native
+    // handle count. Immutable syntax trees use Python ownership alone.
+    fn count_native_owners(&self) -> bool {
+        false
+    }
 }
 
 trait Value: Trace + Any + Send + Sync + Debug {
@@ -36,7 +42,7 @@ impl<T: Trace + Any + Send + Sync + Debug> Value for T {
 #[pyclass(frozen)]
 struct Shared {
     value: Box<dyn Value>,
-    // Count native handles separately from Python's GC/debugger references.
+    // For movable state, count native handles separately from Python's GC references.
     // This also works on free-threaded Python, where Py_REFCNT cannot prove
     // that a value has a single owner.
     native_owners: AtomicUsize,
@@ -60,12 +66,13 @@ pub struct Gc<T> {
 
 impl<T: Trace + Any + Send + Sync + Debug> Gc<T> {
     pub fn new(value: T) -> Self {
+        let native_owners = usize::from(value.count_native_owners());
         Python::attach(|py| Self {
             shared: Py::new(
                 py,
                 Shared {
                     value: Box::new(value),
-                    native_owners: AtomicUsize::new(1),
+                    native_owners: AtomicUsize::new(native_owners),
                 },
             )
             .expect("allocate shared native object"),
@@ -84,10 +91,10 @@ impl<T: Trace + Any + Send + Sync + Debug> Gc<T> {
 
 impl<T> Clone for Gc<T> {
     fn clone(&self) -> Self {
-        self.shared
-            .get()
-            .native_owners
-            .fetch_add(1, Ordering::Relaxed);
+        let owners = &self.shared.get().native_owners;
+        if owners.load(Ordering::Relaxed) != 0 {
+            owners.fetch_add(1, Ordering::Relaxed);
+        }
         Python::attach(|py| Self {
             shared: self.shared.clone_ref(py),
             marker: PhantomData,
@@ -97,10 +104,10 @@ impl<T> Clone for Gc<T> {
 
 impl<T> Drop for Gc<T> {
     fn drop(&mut self) {
-        self.shared
-            .get()
-            .native_owners
-            .fetch_sub(1, Ordering::Release);
+        let owners = &self.shared.get().native_owners;
+        if owners.load(Ordering::Relaxed) != 0 {
+            owners.fetch_sub(1, Ordering::Release);
+        }
     }
 }
 
@@ -111,7 +118,7 @@ where
     /// Return exclusive callback state without copying it. Retained Python
     /// wrappers and block callbacks own native handles too, so their snapshots
     /// still take the cloning path. Consuming this handle prevents new aliases
-    /// when its native owner count is one.
+    /// when its native owner count is one. Untracked state always clones.
     pub fn take_or_clone(self, py: Python<'_>, clone: impl FnOnce(&T) -> T) -> T {
         let unique = self.shared.get().native_owners.load(Ordering::Acquire) == 1;
         let mut value = self
@@ -523,9 +530,31 @@ mod tests {
     // A native buffer lets these tests distinguish moving from copying without
     // relying on timings or CPython reference-count implementation details.
     impl Trace for Mutex<Vec<String>> {
+        fn count_native_owners(&self) -> bool {
+            true
+        }
+
         fn trace(&self, _visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
             Ok(())
         }
+    }
+
+    impl Trace for Mutex<Vec<usize>> {
+        fn trace(&self, _visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn untracked_state_preserves_other_owners() {
+        Python::initialize();
+        Python::attach(|py| {
+            let shared = Gc::new(Mutex::new(vec![1_usize]));
+            let retained = shared.clone();
+            let returned = shared.take_or_clone(py, Clone::clone);
+            assert_eq!(returned, [1]);
+            assert_eq!(*retained.lock().expect("test lock is not poisoned"), [1]);
+        });
     }
 
     #[test]

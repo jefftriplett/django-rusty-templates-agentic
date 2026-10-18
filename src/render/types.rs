@@ -205,6 +205,10 @@ impl Trace for Context {
 }
 
 impl Trace for Mutex<Context> {
+    fn count_native_owners(&self) -> bool {
+        true
+    }
+
     fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         // A callback can trigger GC while a render is using this context.
         if let Ok(context) = self.try_lock() {
