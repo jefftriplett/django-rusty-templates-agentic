@@ -233,8 +233,8 @@ impl CacheView {
 #[must_use]
 #[derive(Default)]
 pub struct Discarded {
-    _entries: Vec<Result<Template, LoaderError>>,
-    _values: Vec<Py<PyAny>>,
+    entries: Vec<Result<Template, LoaderError>>,
+    values: Vec<Py<PyAny>>,
 }
 
 #[derive(Debug)]
@@ -288,22 +288,22 @@ impl CachedLoader {
         let mut discarded = Discarded::default();
         if let Some(view) = &self.cache_view {
             discarded
-                ._values
+                .values
                 .extend(view.set_item(py, &key, &entry, debug)?);
         }
-        discarded._entries.extend(self.cache.insert(key, entry));
+        discarded.entries.extend(self.cache.insert(key, entry));
         Ok(discarded)
     }
 
     pub fn clear(&mut self, py: Python<'_>) -> Discarded {
         let mut discarded = Discarded {
-            _entries: self.cache.drain().map(|(_, entry)| entry).collect(),
-            _values: Vec::new(),
+            entries: self.cache.drain().map(|(_, entry)| entry).collect(),
+            values: Vec::new(),
         };
         if let Some(view) = &self.cache_view {
             // Keep the dict itself: callers may hold it, as with Django's.
             let dict = view.dict.bind(py);
-            discarded._values.push(dict.values().into_any().unbind());
+            discarded.values.push(dict.values().into_any().unbind());
             dict.clear();
         }
         discarded
