@@ -398,7 +398,7 @@ fn format_name<'a>(
             Ok(format) => format.to_cow()?,
             Err(_) => return Ok(None),
         },
-        Some(_) => return Ok(None),
+        Some(Content::Float(_) | Content::Int(_) | Content::Bool(_)) => return Ok(None),
     };
     Ok(Some(match name.is_empty() {
         true => Cow::Borrowed(formatter.default_format()),

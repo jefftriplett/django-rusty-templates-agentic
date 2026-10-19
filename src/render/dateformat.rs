@@ -60,7 +60,14 @@ impl Formatter {
     }
 }
 
-/// A translated string from `django.utils.dates` or a meridiem from gettext.
+/// Before or after noon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Meridiem {
+    Am,
+    Pm,
+}
+
+/// A translated string from `django.utils.dates` or a time word from gettext.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Name {
     Month(u8),
@@ -70,7 +77,12 @@ enum Name {
     MonthAp(u8),
     Weekday(u8),
     WeekdayAbbr(u8),
-    Meridiem(&'static str),
+    /// `a`: "a.m." or "p.m.".
+    Meridiem(Meridiem),
+    /// `A`: "AM" or "PM".
+    MeridiemUpper(Meridiem),
+    Midnight,
+    Noon,
 }
 
 impl Name {
@@ -82,15 +94,21 @@ impl Name {
             Self::MonthAp(month) => ("MONTHS_AP", month),
             Self::Weekday(day) => ("WEEKDAYS", day),
             Self::WeekdayAbbr(day) => ("WEEKDAYS_ABBR", day),
-            Self::Meridiem(text) => return gettext(py, text),
+            Self::Meridiem(Meridiem::Am) => return gettext(py, "a.m."),
+            Self::Meridiem(Meridiem::Pm) => return gettext(py, "p.m."),
+            Self::MeridiemUpper(Meridiem::Am) => return gettext(py, "AM"),
+            Self::MeridiemUpper(Meridiem::Pm) => return gettext(py, "PM"),
+            Self::Midnight => return gettext(py, "midnight"),
+            Self::Noon => return gettext(py, "noon"),
         };
         let name = py
             .import("django.utils.dates")?
             .getattr(table)?
             .get_item(key)?;
-        let name = match self {
-            Self::MonthAbbrTitle(_) => name.call_method0("title")?,
-            _ => name,
+        let name = if let Self::MonthAbbrTitle(_) = self {
+            name.call_method0("title")?
+        } else {
+            name
         };
         name.str()?.extract()
     }
@@ -147,7 +165,7 @@ impl DateCache {
         formatter: Formatter,
     ) -> PyResult<Option<Formatted<'py>>> {
         let py = value.py();
-        let Some(fields) = fields(value)? else {
+        let Some(fields) = Fields::of(value)? else {
             return Ok(None);
         };
         if !self.formats.contains_key(format_name) {
@@ -254,60 +272,98 @@ impl Time {
             hour => hour,
         }
     }
+
+    fn meridiem(self) -> Meridiem {
+        if self.hour < 12 {
+            Meridiem::Am
+        } else {
+            Meridiem::Pm
+        }
+    }
 }
 
-/// Splits exact `date`, `datetime` and `time` values into their fields.
-/// `None` for anything that might not behave like the built-in types.
-fn fields(value: &Bound<'_, PyAny>) -> PyResult<Option<(Option<Date>, Option<Time>)>> {
-    let py = value.py();
-    if let Ok(datetime) = value.cast_exact::<PyDateTime>() {
-        // `TimeFormat.__init__` calls `utcoffset()` on any tzinfo, which other
-        // implementations may not support.
-        if let Some(tzinfo) = datetime.get_tzinfo() {
-            let tzinfo_type = tzinfo.get_type();
-            if !tzinfo_type.is(FIXED_OFFSET.import(py, "datetime", "timezone")?)
-                && !tzinfo_type.is(ZONE_INFO.import(py, "zoneinfo", "ZoneInfo")?)
-            {
-                return Ok(None);
-            }
+/// The fields of an exact `date`, `datetime` or `time` value.
+#[derive(Clone, Copy)]
+enum Fields {
+    DateTime(Date, Time),
+    Date(Date),
+    Time(Time),
+}
+
+impl Fields {
+    fn date(self) -> Option<Date> {
+        match self {
+            Self::DateTime(date, _) | Self::Date(date) => Some(date),
+            Self::Time(_) => None,
         }
-        let date = Date {
-            year: datetime.get_year(),
-            month: datetime.get_month(),
-            day: datetime.get_day(),
-        };
-        let time = Time {
-            hour: datetime.get_hour(),
-            minute: datetime.get_minute(),
-            second: datetime.get_second(),
-            microsecond: datetime.get_microsecond(),
-        };
-        Ok(Some((Some(date), Some(time))))
-    } else if let Ok(date) = value.cast_exact::<PyDate>() {
-        let date = Date {
-            year: date.get_year(),
-            month: date.get_month(),
-            day: date.get_day(),
-        };
-        Ok(Some((Some(date), None)))
-    } else if let Ok(time) = value.cast_exact::<PyTime>() {
-        let time = Time {
-            hour: time.get_hour(),
-            minute: time.get_minute(),
-            second: time.get_second(),
-            microsecond: time.get_microsecond(),
-        };
-        Ok(Some((None, Some(time))))
-    } else {
-        Ok(None)
     }
+
+    fn time(self) -> Option<Time> {
+        match self {
+            Self::DateTime(_, time) | Self::Time(time) => Some(time),
+            Self::Date(_) => None,
+        }
+    }
+
+    /// `None` for anything that might not behave like the built-in types.
+    fn of(value: &Bound<'_, PyAny>) -> PyResult<Option<Self>> {
+        let py = value.py();
+        if let Ok(datetime) = value.cast_exact::<PyDateTime>() {
+            // `TimeFormat.__init__` calls `utcoffset()` on any tzinfo, which other
+            // implementations may not support.
+            if let Some(tzinfo) = datetime.get_tzinfo() {
+                let tzinfo_type = tzinfo.get_type();
+                if !tzinfo_type.is(FIXED_OFFSET.import(py, "datetime", "timezone")?)
+                    && !tzinfo_type.is(ZONE_INFO.import(py, "zoneinfo", "ZoneInfo")?)
+                {
+                    return Ok(None);
+                }
+            }
+            let date = Date {
+                year: datetime.get_year(),
+                month: datetime.get_month(),
+                day: datetime.get_day(),
+            };
+            let time = Time {
+                hour: datetime.get_hour(),
+                minute: datetime.get_minute(),
+                second: datetime.get_second(),
+                microsecond: datetime.get_microsecond(),
+            };
+            Ok(Some(Self::DateTime(date, time)))
+        } else if let Ok(date) = value.cast_exact::<PyDate>() {
+            Ok(Some(Self::Date(Date {
+                year: date.get_year(),
+                month: date.get_month(),
+                day: date.get_day(),
+            })))
+        } else if let Ok(time) = value.cast_exact::<PyTime>() {
+            Ok(Some(Self::Time(Time {
+                hour: time.get_hour(),
+                minute: time.get_minute(),
+                second: time.get_second(),
+                microsecond: time.get_microsecond(),
+            })))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// What happened to one format specifier.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Specifier {
+    /// Written to the output.
+    Written,
+    /// Not supported natively, so Django formats the whole value.
+    Unsupported,
 }
 
 /// `Formatter.format`: specifiers not preceded by a backslash are replaced
 /// and `\x` in the remaining text becomes `x` (except before a newline, which
 /// the `.` in `re_escaped` does not match).
 fn format_value(
-    (date, time): (Option<Date>, Option<Time>),
+    fields: Fields,
     value: &Bound<'_, PyAny>,
     format: &str,
     formatter: Formatter,
@@ -330,41 +386,40 @@ fn format_value(
             }
             continue;
         }
-        let handled = if TIME_CHARS.contains(character) {
+        let specifier = if TIME_CHARS.contains(character) {
             // Django raises TypeError for time specifiers on a plain date.
-            match time {
+            match fields.time() {
                 Some(time) => push_time_specifier(character, time, names, &mut output, value)?,
-                None => false,
+                None => Specifier::Unsupported,
             }
         } else {
             // `TimeFormat` and `time` values have no date specifiers.
-            match (formatter, date) {
+            match (formatter, fields.date()) {
                 (Formatter::Date, Some(date)) => {
                     push_date_specifier(character, date, names, &mut output, value)?
                 }
-                _ => false,
+                (Formatter::Date, None) | (Formatter::Time, _) => Specifier::Unsupported,
             }
         };
-        if !handled {
+        if specifier == Specifier::Unsupported {
             return Ok(None);
         }
     }
     Ok(Some(output))
 }
 
-/// Appends one `TimeFormat` specifier. `false` leaves it to Django.
+/// Appends one `TimeFormat` specifier.
 fn push_time_specifier(
     specifier: char,
     time: Time,
     names: &mut Names,
     output: &mut String,
     value: &Bound<'_, PyAny>,
-) -> PyResult<bool> {
+) -> PyResult<Specifier> {
     let py = value.py();
-    let pm = time.hour > 11;
     match specifier {
-        'a' => output.push_str(names.get(py, Name::Meridiem(if pm { "p.m." } else { "a.m." }))?),
-        'A' => output.push_str(names.get(py, Name::Meridiem(if pm { "PM" } else { "AM" }))?),
+        'a' => output.push_str(names.get(py, Name::Meridiem(time.meridiem()))?),
+        'A' => output.push_str(names.get(py, Name::MeridiemUpper(time.meridiem()))?),
         'f' => push_hour_minute(time, output),
         'g' => push_fmt(output, format_args!("{}", time.hour12())),
         'G' => push_fmt(output, format_args!("{}", time.hour)),
@@ -372,20 +427,20 @@ fn push_time_specifier(
         'H' => push_fmt(output, format_args!("{:02}", time.hour)),
         'i' => push_fmt(output, format_args!("{:02}", time.minute)),
         'P' => match (time.hour, time.minute) {
-            (0, 0) => output.push_str(names.get(py, Name::Meridiem("midnight"))?),
-            (12, 0) => output.push_str(names.get(py, Name::Meridiem("noon"))?),
+            (0, 0) => output.push_str(names.get(py, Name::Midnight)?),
+            (12, 0) => output.push_str(names.get(py, Name::Noon)?),
             _ => {
                 push_hour_minute(time, output);
                 output.push(' ');
-                output.push_str(names.get(py, Name::Meridiem(if pm { "p.m." } else { "a.m." }))?);
+                output.push_str(names.get(py, Name::Meridiem(time.meridiem()))?);
             }
         },
         's' => push_fmt(output, format_args!("{:02}", time.second)),
         'u' => push_fmt(output, format_args!("{:06}", time.microsecond)),
         // e, O, T, Z depend on the timezone.
-        _ => return Ok(false),
+        _ => return Ok(Specifier::Unsupported),
     }
-    Ok(true)
+    Ok(Specifier::Written)
 }
 
 /// `TimeFormat.f`: 12-hour time with the minutes left off when zero.
@@ -404,14 +459,14 @@ fn push_fmt(output: &mut String, arguments: std::fmt::Arguments<'_>) {
         .expect("writing to a String cannot fail");
 }
 
-/// Appends one `DateFormat` specifier. `false` leaves it to Django.
+/// Appends one `DateFormat` specifier.
 fn push_date_specifier(
     specifier: char,
     date: Date,
     names: &mut Names,
     output: &mut String,
     value: &Bound<'_, PyAny>,
-) -> PyResult<bool> {
+) -> PyResult<Specifier> {
     let py = value.py();
     let Date { year, month, day } = date;
     match specifier {
@@ -445,9 +500,9 @@ fn push_date_specifier(
         'Y' => push_fmt(output, format_args!("{year:04}")),
         'z' => push_fmt(output, format_args!("{}", day_of_year(date))),
         // I, r, U depend on the timezone.
-        _ => return Ok(false),
+        _ => return Ok(Specifier::Unsupported),
     }
-    Ok(true)
+    Ok(Specifier::Written)
 }
 
 fn is_leap(year: i32) -> bool {
