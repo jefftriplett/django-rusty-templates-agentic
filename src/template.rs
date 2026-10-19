@@ -886,10 +886,11 @@ pub mod django_rusty_templates {
                     update_cache_view(py, loader, &template_name, &template)?;
                     return Ok(template);
                 }
-                Ok(lookup) => {
-                    found = Some((index, lookup?));
+                Ok(Ok(source @ Lookup::Source { .. })) => {
+                    found = Some((index, source));
                     break;
                 }
+                Ok(Err(error)) => return Err(error),
                 Err(mut e) if !e.tried.is_empty() => tried.append(&mut e.tried),
                 Err(_) => {}
             }
