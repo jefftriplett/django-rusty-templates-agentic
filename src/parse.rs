@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use either::Either;
 use miette::{Diagnostic, SourceSpan};
 use num_bigint::BigInt;
+use pyo3::exceptions::PyNotImplementedError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -1328,12 +1329,54 @@ pub enum ParseError {
     },
 }
 
+/// Template syntax the native parser does not support. Python sees it as
+/// `NotImplementedError`.
+#[derive(Error, Debug)]
+pub enum Unimplemented {
+    /// A tag with no native parser.
+    #[error("not yet implemented: {0}")]
+    Tag(String),
+    /// A loaded tag whose compiler needs Django's full parser.
+    #[error("not yet implemented: Fully custom tag")]
+    FullyCustomTag,
+}
+
+/// What happens to a template the native parser cannot compile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fallback {
+    /// Django's parser compiles it, and Rust renders what it can.
+    Django,
+    /// No parser can compile it.
+    Unsupported,
+}
+
+impl Unimplemented {
+    pub fn fallback(&self) -> Fallback {
+        match self {
+            // Partials only parse natively from Django 6.0.
+            Self::Tag(name) if matches!(name.as_str(), "partialdef" | "partial") => {
+                Fallback::Django
+            }
+            Self::Tag(_) => Fallback::Unsupported,
+            Self::FullyCustomTag => Fallback::Django,
+        }
+    }
+}
+
+impl From<Unimplemented> for PyErr {
+    fn from(error: Unimplemented) -> Self {
+        PyNotImplementedError::new_err(error.to_string())
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum PyParseError {
     #[error(transparent)]
     PyErr(#[from] PyErr),
     #[error(transparent)]
     ParseError(#[from] ParseError),
+    #[error(transparent)]
+    Unimplemented(#[from] Unimplemented),
 }
 
 impl PyParseError {
@@ -1341,6 +1384,7 @@ impl PyParseError {
         match self {
             Self::ParseError(err) => Ok(err),
             Self::PyErr(err) => Err(err),
+            Self::Unimplemented(err) => Err(err.into()),
         }
     }
 
@@ -1349,6 +1393,7 @@ impl PyParseError {
         match self {
             Self::ParseError(err) => err,
             Self::PyErr(err) => panic!("{err:?}"),
+            Self::Unimplemented(err) => panic!("{err:?}"),
         }
     }
 }
@@ -2559,7 +2604,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                         parts: None,
                     }),
                     Some(TagContext::Unloaded(_)) => unreachable!("tag was loaded above"),
-                    None => todo!("{tag_name}"),
+                    None => return Err(Unimplemented::Tag(tag_name.to_string()).into()),
                 }
             }
         })
@@ -2874,7 +2919,11 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(TokenTree::Tag(Tag::Load))
     }
 
-    fn register_opaque(&mut self, name: &str, compiler: &Bound<'py, PyAny>) -> PyResult<()> {
+    fn register_opaque(
+        &mut self,
+        name: &str,
+        compiler: &Bound<'py, PyAny>,
+    ) -> Result<(), PyParseError> {
         // These tags share parse-time registries with arbitrary compilers. Keep
         // that entire template on the compatibility path before invoking one.
         let shared_state = Lexer::new(self.template).any(|token| {
@@ -2960,9 +3009,9 @@ impl<'t, 'py> Parser<'t, 'py> {
                 error
                     .value(self.py)
                     .setattr("_rusty_compiler_error", true)?;
-                return Err(error);
+                return Err(error.into());
             }
-            todo!("Fully custom tag");
+            return Err(Unimplemented::FullyCustomTag.into());
         }
         self.external_tags
             .insert(name.to_string(), TagContext::Opaque(compiler.clone()));
@@ -3059,10 +3108,10 @@ impl<'t, 'py> Parser<'t, 'py> {
             return Ok(());
         }
         let Ok(closure) = tag.getattr("__closure__") else {
-            return self.register_opaque(name, tag).map_err(Into::into);
+            return self.register_opaque(name, tag);
         };
         let tag = if closure.is_none() {
-            return self.register_opaque(name, tag).map_err(Into::into);
+            return self.register_opaque(name, tag);
         } else {
             let tag_code = tag.getattr("__code__")?;
             let closure_names: Vec<String> = tag_code.getattr("co_freevars")?.extract()?;
@@ -3084,7 +3133,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                 .iter()
                 .all(|required| closure_names.iter().any(|name| name == required))
             {
-                return self.register_opaque(name, tag).map_err(Into::into);
+                return self.register_opaque(name, tag);
             }
             let closure_values = closure
                 .try_iter()?
