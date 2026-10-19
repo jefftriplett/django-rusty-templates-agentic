@@ -403,7 +403,7 @@ pub mod django_rusty_templates {
             let mut template = match lookup {
                 Lookup::Cached(template) => template,
                 // Compile without the loader lock, as the engine's `get_template` does.
-                source => {
+                source @ Lookup::Source { .. } => {
                     let template = source.into_template(py, &template_name, self.engine.clone())?;
                     self.with_loader(py, |loader| {
                         loader.cache_template(&template_name, &template)
