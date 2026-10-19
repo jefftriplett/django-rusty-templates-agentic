@@ -273,9 +273,8 @@ pub mod django_rusty_templates {
 
         #[getter(get_template_cache)]
         fn get_template_cache<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-            let debug = self.engine.debug();
             self.with_loader(py, |loader| match loader {
-                Loader::Cached(loader) => loader.view(py, &self.path, debug),
+                Loader::Cached(loader) => loader.view(py, &self.path, &self.engine),
                 _ => Ok(PyDict::new(py)),
             })
         }
@@ -320,11 +319,13 @@ pub mod django_rusty_templates {
             key: String,
             tried: Vec<(String, String)>,
         ) -> PyResult<()> {
-            let debug = self.engine.debug();
             let discarded = self.with_loader(py, |loader| match loader {
-                Loader::Cached(loader) => {
-                    loader.store(py, key, Err(crate::loaders::LoaderError { tried }), debug)
-                }
+                Loader::Cached(loader) => loader.store(
+                    py,
+                    key,
+                    Err(crate::loaders::LoaderError { tried }),
+                    &self.engine,
+                ),
                 _ => Ok(crate::loaders::Discarded::default()),
             })?;
             drop(discarded);
@@ -359,9 +360,8 @@ pub mod django_rusty_templates {
                     python_renderer: Some(Gc::new(renderer.unbind())),
                 }
             };
-            let debug = self.engine.debug();
             let discarded = self.with_loader(py, |loader| match loader {
-                Loader::Cached(loader) => loader.store(py, key, Ok(template), debug),
+                Loader::Cached(loader) => loader.store(py, key, Ok(template), &self.engine),
                 _ => Ok(crate::loaders::Discarded::default()),
             })?;
             drop(discarded);
@@ -379,9 +379,8 @@ pub mod django_rusty_templates {
                 // Compile without the loader lock, as the engine's `get_template` does.
                 source @ Lookup::Source { .. } => {
                     let template = source.into_template(py, &template_name, self.engine.clone())?;
-                    let debug = self.engine.debug();
                     self.with_loader(py, |loader| {
-                        loader.cache_template(py, &template_name, &template, debug)
+                        loader.cache_template(py, &template_name, &template, &self.engine)
                     })?;
                     template
                 }
@@ -883,7 +882,7 @@ pub mod django_rusty_templates {
                 .lock_py_attached(py)
                 .expect("Mutex should not be poisoned");
             let loader = &mut loaders[index];
-            loader.cache_template(py, &template_name, &template, engine.debug())?;
+            loader.cache_template(py, &template_name, &template, &engine)?;
             drop(loaders);
             template.loader_path.insert(0, index);
             return Ok(template);

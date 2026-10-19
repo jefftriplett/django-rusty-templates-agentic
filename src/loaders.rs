@@ -204,7 +204,7 @@ impl CacheView {
         py: Python<'_>,
         key: &str,
         entry: &Result<Template, LoaderError>,
-        debug: bool,
+        engine: &Engine,
     ) -> PyResult<Option<Py<PyAny>>> {
         let dict = self.dict.bind(py);
         let previous = dict.get_item(key)?.map(Bound::unbind);
@@ -218,7 +218,7 @@ impl CacheView {
             }
             // Like Django's cached loader, debug mode stores an exception
             // instance and production stores the class.
-            Err(_) if debug => dict.set_item(
+            Err(_) if engine.debug() => dict.set_item(
                 key,
                 TemplateDoesNotExist::new_err(key.to_string()).value(py),
             ),
@@ -260,7 +260,7 @@ impl CachedLoader {
         &mut self,
         py: Python<'py>,
         path: &[usize],
-        debug: bool,
+        engine: &Engine,
     ) -> PyResult<Bound<'py, PyDict>> {
         if let Some(view) = &self.cache_view {
             return Ok(view.dict.bind(py).clone());
@@ -270,7 +270,7 @@ impl CachedLoader {
             path: path.to_vec(),
         };
         for (key, entry) in &self.cache {
-            view.set_item(py, key, entry, debug)?;
+            view.set_item(py, key, entry, engine)?;
         }
         let dict = view.dict.bind(py).clone();
         self.cache_view = Some(view);
@@ -283,13 +283,13 @@ impl CachedLoader {
         py: Python<'_>,
         key: String,
         entry: Result<Template, LoaderError>,
-        debug: bool,
+        engine: &Engine,
     ) -> PyResult<Discarded> {
         let mut discarded = Discarded::default();
         if let Some(view) = &self.cache_view {
             discarded
                 .values
-                .extend(view.set_item(py, &key, &entry, debug)?);
+                .extend(view.set_item(py, &key, &entry, engine)?);
         }
         discarded.entries.extend(self.cache.insert(key, entry));
         Ok(discarded)
@@ -333,7 +333,7 @@ impl CachedLoader {
                                     py,
                                     template_name.to_string(),
                                     Ok(template.clone()),
-                                    engine.debug(),
+                                    engine,
                                 ) {
                                     return Ok(Err(e));
                                 }
@@ -345,12 +345,9 @@ impl CachedLoader {
                     }
                 }
                 let error = LoaderError { tried };
-                if let Err(e) = self.store(
-                    py,
-                    template_name.to_string(),
-                    Err(error.clone()),
-                    engine.debug(),
-                ) {
+                if let Err(e) =
+                    self.store(py, template_name.to_string(), Err(error.clone()), engine)
+                {
                     return Ok(Err(e));
                 }
                 Err(error)
@@ -367,18 +364,18 @@ impl CachedLoader {
         template_name: &str,
         template: &Template,
         path: &[usize],
-        debug: bool,
+        engine: &Engine,
     ) -> PyResult<()> {
         if !self.cache.contains_key(template_name) {
             let mut template = template.clone();
             template.loader_path = path.to_vec();
-            let discarded = self.store(py, template_name.to_string(), Ok(template), debug)?;
+            let discarded = self.store(py, template_name.to_string(), Ok(template), engine)?;
             drop(discarded);
         }
         if let Some((index, rest)) = path.split_first()
             && let Loader::Cached(loader) = &mut self.loaders[*index]
         {
-            loader.cache_template(py, template_name, template, rest, debug)?;
+            loader.cache_template(py, template_name, template, rest, engine)?;
         }
         Ok(())
     }
@@ -460,10 +457,10 @@ impl Loader {
         py: Python<'_>,
         template_name: &str,
         template: &Template,
-        debug: bool,
+        engine: &Engine,
     ) -> PyResult<()> {
         if let Self::Cached(loader) = self {
-            loader.cache_template(py, template_name, template, &template.loader_path, debug)?;
+            loader.cache_template(py, template_name, template, &template.loader_path, engine)?;
         }
         Ok(())
     }
@@ -586,13 +583,12 @@ mod tests {
             template_name: &str,
             engine: Gc<Engine>,
         ) -> Result<PyResult<Template>, LoaderError> {
-            let debug = engine.debug();
             Ok(self
                 .find_template(py, template_name, &engine)?
                 .and_then(|lookup| {
-                    let template = lookup.into_template(py, template_name, engine)?;
+                    let template = lookup.into_template(py, template_name, engine.clone())?;
                     let path = template.loader_path.clone();
-                    self.cache_template(py, template_name, &template, &path, debug)?;
+                    self.cache_template(py, template_name, &template, &path, &engine)?;
                     Ok(template)
                 }))
         }
