@@ -4,15 +4,15 @@ use html_escape::encode_quoted_attribute_to_string;
 use num_traits::{ToPrimitive, Zero};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDateTime, PyString, PyType};
+use pyo3::types::{PyDateTime, PyInt, PyString, PyType};
 
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
     EscapejsFilter, ExternalFilter, FilterType, ForceEscapeFilter, LastFilter, LengthFilter,
-    LowerFilter, SafeFilter, SlugifyFilter, TitleFilter, UpperFilter, WordcountFilter,
-    WordwrapFilter, YesnoFilter,
+    LowerFilter, SafeFilter, SlugifyFilter, TitleFilter, TruncateCharsFilter, UpperFilter,
+    WordcountFilter, WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -27,6 +27,9 @@ static MARK_FILTER_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DATE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TIME_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static PGETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static COMBINING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static SAFESTRING: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
 impl Resolve for Filter {
     fn resolve<'t, 'py>(
@@ -98,6 +101,7 @@ impl ResolveFilter for FilterType {
             Self::Safe(filter) => filter.resolve(variable, py, template, context),
             Self::Slugify(filter) => filter.resolve(variable, py, template, context),
             Self::Title(filter) => filter.resolve(variable, py, template, context),
+            Self::TruncateChars(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -571,26 +575,63 @@ impl ResolveFilter for ExternalFilter {
     }
 }
 
-impl ResolveFilter for DjangoFilter {
-    fn resolve<'t, 'py>(
+/// A filter argument resolved once, so a native port and Django's filter see
+/// the same value.
+enum ResolvedArgument<'t, 'py> {
+    /// The filter was used without an argument.
+    Absent,
+    /// The argument's value, `None` when it resolved to nothing. Django's
+    /// filter then receives `None`.
+    Present(Option<Content<'t, 'py>>),
+}
+
+impl<'t, 'py> ResolvedArgument<'t, 'py> {
+    fn value(&self) -> Option<&Content<'t, 'py>> {
+        match self {
+            Self::Absent => None,
+            Self::Present(value) => value.as_ref(),
+        }
+    }
+
+    fn into_value(self) -> Option<Content<'t, 'py>> {
+        match self {
+            Self::Absent => None,
+            Self::Present(value) => value,
+        }
+    }
+}
+
+impl DjangoFilter {
+    fn resolve_argument<'t, 'py>(
         &self,
-        variable: Option<Content<'t, 'py>>,
         py: Python<'py>,
         template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> Result<ResolvedArgument<'t, 'py>, PyRenderError> {
+        Ok(match &self.argument {
+            None => ResolvedArgument::Absent,
+            Some(argument) => ResolvedArgument::Present(argument.resolve(
+                py,
+                template,
+                context,
+                ResolveFailures::Raise,
+            )?),
+        })
+    }
+
+    fn call<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        argument: ResolvedArgument<'t, 'py>,
+        py: Python<'py>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
         let filter = self.filter.bind(py);
         let value = variable.unwrap_or_else(|| "".as_content());
         if filter.is(TIME_FILTER.import(py, "django.template.defaultfilters", "time")?) {
-            let format = match &self.argument {
-                Some(argument) => {
-                    argument.resolve(py, template, context, ResolveFailures::Raise)?
-                }
-                None => None,
-            };
             return Ok(Some(format_date(
                 value,
-                format,
+                argument.into_value(),
                 Formatter::Time,
                 filter,
                 context,
@@ -610,9 +651,11 @@ impl ResolveFilter for DjangoFilter {
             .is_ok_and(|flag| flag.is_truthy().unwrap_or(false))
             && value.is_instance(safe_type)?;
         let mut args = vec![value];
-        if let Some(argument) = &self.argument {
-            let argument = argument.resolve(py, template, context, ResolveFailures::Raise)?;
-            args.push(argument.map_or_else(|| py.None().into_bound(py), |value| value.to_py(py)));
+        match argument {
+            ResolvedArgument::Absent => {}
+            ResolvedArgument::Present(value) => {
+                args.push(value.map_or_else(|| py.None().into_bound(py), |value| value.to_py(py)));
+            }
         }
         let kwargs = if filter
             .getattr("needs_autoescape")
@@ -633,6 +676,40 @@ impl ResolveFilter for DjangoFilter {
             result
         };
         Ok(Some(Content::Py(result)))
+    }
+}
+
+impl ResolveFilter for DjangoFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.resolve_argument(py, template, context)?;
+        self.call(variable, argument, py, context)
+    }
+}
+
+/// The integer Django's `int(arg)` produces, for arguments that convert
+/// unambiguously. Anything else returns `None` and is left to Django.
+fn integer_argument(argument: &Content<'_, '_>) -> Option<i64> {
+    fn parse(text: &str) -> Option<i64> {
+        let digits = text.strip_prefix('-').unwrap_or(text);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        text.parse().ok()
+    }
+    match argument {
+        Content::Int(n) => n.to_i64(),
+        Content::String(text) => parse(text.as_raw()),
+        Content::Py(object) if object.is_exact_instance_of::<PyInt>() => object.extract().ok(),
+        Content::Py(object) if object.is_exact_instance_of::<PyString>() => {
+            parse(object.cast::<PyString>().ok()?.to_str().ok()?)
+        }
+        Content::Py(_) | Content::Float(_) | Content::Bool(_) => None,
     }
 }
 
@@ -803,6 +880,146 @@ impl ResolveFilter for SlugifyFilter {
             None => "".as_content(),
         };
         Ok(Some(content))
+    }
+}
+
+/// Django's translated truncation text, `%(truncated_text)s…` in English,
+/// split around the placeholder.
+#[derive(Clone, Debug)]
+pub struct TruncationText {
+    before: String,
+    after: String,
+    /// The number of characters Django counts: combining characters are free.
+    width: usize,
+}
+
+impl TruncationText {
+    /// Returns `None` when the translation is not a plain
+    /// `%(truncated_text)s` template, leaving its %-formatting to Django.
+    fn new(py: Python<'_>) -> PyResult<Option<Self>> {
+        let text: String = PGETTEXT
+            .import(py, "django.utils.translation", "pgettext")?
+            .call1((
+                "String to return when truncating text",
+                "%(truncated_text)s…",
+            ))?
+            .extract()?;
+        if text.matches('%').count() != 1 {
+            return Ok(None);
+        }
+        let Some((before, after)) = text.split_once("%(truncated_text)s") else {
+            return Ok(None);
+        };
+        let combining = COMBINING.import(py, "unicodedata", "combining")?;
+        let mut width = 0;
+        for character in before.chars().chain(after.chars()) {
+            // Ask Python so the result follows its Unicode database.
+            if character.is_ascii() || !combining.call1((character,))?.is_truthy()? {
+                width += 1;
+            }
+        }
+        Ok(Some(Self {
+            before: before.to_string(),
+            after: after.to_string(),
+            width,
+        }))
+    }
+}
+
+/// A string `truncatechars` can shorten natively.
+#[derive(Clone, Copy)]
+enum Text<'a> {
+    Plain(&'a str),
+    /// Marked safe, so the result stays safe.
+    Safe(&'a str),
+}
+
+impl<'a> Text<'a> {
+    const fn as_str(self) -> &'a str {
+        match self {
+            Self::Plain(text) | Self::Safe(text) => text,
+        }
+    }
+}
+
+/// `Truncator(text).chars(length)` for ASCII text, where every character
+/// counts once and NFC normalization changes nothing. `None` defers to Django.
+fn truncate_ascii_chars(
+    text: &str,
+    length: i64,
+    py: Python<'_>,
+    context: &mut Context,
+) -> PyResult<Option<String>> {
+    if !text.is_ascii() {
+        return Ok(None);
+    }
+    let Ok(length @ 1..) = usize::try_from(length) else {
+        return Ok(Some(String::new()));
+    };
+    if text.len() <= length {
+        return Ok(Some(text.to_string()));
+    }
+    let Some(Some(truncation)) = context
+        .truncation_text
+        .get_or_try_init(py, |_| TruncationText::new(py))?
+    else {
+        return Ok(None);
+    };
+    let end = length.saturating_sub(truncation.width);
+    Ok(Some(format!(
+        "{}{}{}",
+        truncation.before,
+        &text[..end],
+        truncation.after
+    )))
+}
+
+impl ResolveFilter for TruncateCharsFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        let length = argument.value().and_then(integer_argument);
+        // Plain and safe strings, which `str()` in Django's filter leaves as they are.
+        let text = match &variable {
+            None => Some(Text::Plain("")),
+            Some(Content::String(ContentString::HtmlSafe(content))) => Some(Text::Safe(content)),
+            Some(Content::String(
+                ContentString::String(content) | ContentString::HtmlUnsafe(content),
+            )) => Some(Text::Plain(content)),
+            Some(Content::Py(object)) => match object.cast::<PyString>() {
+                Ok(string) if string.is_exact_instance_of::<PyString>() => {
+                    string.to_str().ok().map(Text::Plain)
+                }
+                Ok(string)
+                    if string.get_type().is(SAFESTRING.import(
+                        py,
+                        "django.utils.safestring",
+                        "SafeString",
+                    )?) =>
+                {
+                    string.to_str().ok().map(Text::Safe)
+                }
+                _ => None,
+            },
+            Some(Content::Float(_) | Content::Int(_) | Content::Bool(_)) => None,
+        };
+        if let Some(length) = length
+            && let Some(text) = text
+            && let Some(truncated) = truncate_ascii_chars(text.as_str(), length, py, context)?
+        {
+            let truncated = Cow::Owned(truncated);
+            return Ok(Some(Content::String(match text {
+                Text::Safe(_) => ContentString::HtmlSafe(truncated),
+                Text::Plain(_) if context.autoescape => ContentString::HtmlUnsafe(truncated),
+                Text::Plain(_) => ContentString::String(truncated),
+            })));
+        }
+        self.django.call(variable, argument, py, context)
     }
 }
 

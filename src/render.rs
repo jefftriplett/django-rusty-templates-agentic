@@ -4,6 +4,7 @@ pub mod dateformat;
 pub mod filters;
 pub mod inheritance;
 mod l10n;
+mod language_cache;
 pub mod lorem;
 mod stock;
 pub mod tags;

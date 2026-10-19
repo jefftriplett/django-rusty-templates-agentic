@@ -314,6 +314,7 @@ impl Trace for FilterType {
         match self {
             Self::Django(filter) => filter.filter.trace(visit),
             Self::External(filter) => filter.filter.trace(visit),
+            Self::TruncateChars(filter) => filter.django.filter.trace(visit),
             Self::Add(_)
             | Self::AddSlashes(_)
             | Self::Capfirst(_)
