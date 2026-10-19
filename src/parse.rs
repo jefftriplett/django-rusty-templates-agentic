@@ -217,7 +217,8 @@ impl Filter {
                 (FilterArgument::Forbidden, Some(right)) => {
                     return Err(unexpected_argument(builtin.name(), right));
                 }
-                (_, right) => right,
+                (FilterArgument::Optional | FilterArgument::Required, right) => right,
+                (FilterArgument::Forbidden, None) => None,
             };
             return Ok(Self {
                 at,
