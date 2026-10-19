@@ -58,7 +58,7 @@ impl NumberFormat {
                 .try_iter()?
                 .map(|size| {
                     Ok(Some(size?)
-                        .filter(|size| size.is_exact_instance_of::<PyInt>())
+                        .filter(PyAnyMethods::is_exact_instance_of::<PyInt>)
                         .and_then(|size| size.extract::<i64>().ok()))
                 })
                 .collect::<PyResult<Option<Vec<_>>>>()?;
@@ -100,7 +100,7 @@ impl NumberFormat {
         output.push_str(sign);
         match self.grouping() {
             Some(grouping) => {
-                group_digits(integer, grouping, &self.thousand_separator, &mut output)
+                group_digits(integer, grouping, &self.thousand_separator, &mut output);
             }
             None => output.push_str(integer),
         }
