@@ -575,33 +575,54 @@ impl ResolveFilter for ExternalFilter {
     }
 }
 
+/// A filter argument resolved once, so a native port and Django's filter see
+/// the same value.
+enum ResolvedArgument<'t, 'py> {
+    /// The filter was used without an argument.
+    Absent,
+    /// The argument's value, `None` when it resolved to nothing. Django's
+    /// filter then receives `None`.
+    Present(Option<Content<'t, 'py>>),
+}
+
+impl<'t, 'py> ResolvedArgument<'t, 'py> {
+    fn value(&self) -> Option<&Content<'t, 'py>> {
+        match self {
+            Self::Absent => None,
+            Self::Present(value) => value.as_ref(),
+        }
+    }
+
+    fn into_value(self) -> Option<Content<'t, 'py>> {
+        match self {
+            Self::Absent => None,
+            Self::Present(value) => value,
+        }
+    }
+}
+
 impl DjangoFilter {
-    /// Resolves the argument once, so a native port and Django's filter see
-    /// the same value. The outer `None` means the filter has no argument.
-    #[expect(
-        clippy::option_option,
-        reason = "no argument differs from an argument that resolved to nothing"
-    )]
     fn resolve_argument<'t, 'py>(
         &self,
         py: Python<'py>,
         template: TemplateString<'t>,
         context: &mut Context,
-    ) -> Result<Option<Option<Content<'t, 'py>>>, PyRenderError> {
-        self.argument
-            .as_ref()
-            .map(|argument| argument.resolve(py, template, context, ResolveFailures::Raise))
-            .transpose()
+    ) -> Result<ResolvedArgument<'t, 'py>, PyRenderError> {
+        Ok(match &self.argument {
+            None => ResolvedArgument::Absent,
+            Some(argument) => ResolvedArgument::Present(argument.resolve(
+                py,
+                template,
+                context,
+                ResolveFailures::Raise,
+            )?),
+        })
     }
 
-    #[expect(
-        clippy::option_option,
-        reason = "no argument differs from an argument that resolved to nothing"
-    )]
     fn call<'t, 'py>(
         &self,
         variable: Option<Content<'t, 'py>>,
-        argument: Option<Option<Content<'t, 'py>>>,
+        argument: ResolvedArgument<'t, 'py>,
         py: Python<'py>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
@@ -610,7 +631,7 @@ impl DjangoFilter {
         if filter.is(TIME_FILTER.import(py, "django.template.defaultfilters", "time")?) {
             return Ok(Some(format_date(
                 value,
-                argument.flatten(),
+                argument.into_value(),
                 Formatter::Time,
                 filter,
                 context,
@@ -630,8 +651,11 @@ impl DjangoFilter {
             .is_ok_and(|flag| flag.is_truthy().unwrap_or(false))
             && value.is_instance(safe_type)?;
         let mut args = vec![value];
-        if let Some(argument) = argument {
-            args.push(argument.map_or_else(|| py.None().into_bound(py), |value| value.to_py(py)));
+        match argument {
+            ResolvedArgument::Absent => {}
+            ResolvedArgument::Present(value) => {
+                args.push(value.map_or_else(|| py.None().into_bound(py), |value| value.to_py(py)));
+            }
         }
         let kwargs = if filter
             .getattr("needs_autoescape")
@@ -685,7 +709,7 @@ fn integer_argument(argument: &Content<'_, '_>) -> Option<i64> {
         Content::Py(object) if object.is_exact_instance_of::<PyString>() => {
             parse(object.cast::<PyString>().ok()?.to_str().ok()?)
         }
-        _ => None,
+        Content::Py(_) | Content::Float(_) | Content::Bool(_) => None,
     }
 }
 
@@ -902,6 +926,22 @@ impl TruncationText {
     }
 }
 
+/// A string `truncatechars` can shorten natively.
+#[derive(Clone, Copy)]
+enum Text<'a> {
+    Plain(&'a str),
+    /// Marked safe, so the result stays safe.
+    Safe(&'a str),
+}
+
+impl<'a> Text<'a> {
+    const fn as_str(self) -> &'a str {
+        match self {
+            Self::Plain(text) | Self::Safe(text) => text,
+        }
+    }
+}
+
 /// `Truncator(text).chars(length)` for ASCII text, where every character
 /// counts once and NFC normalization changes nothing. `None` defers to Django.
 fn truncate_ascii_chars(
@@ -943,20 +983,17 @@ impl ResolveFilter for TruncateCharsFilter {
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
         let argument = self.django.resolve_argument(py, template, context)?;
-        let length = argument
-            .as_ref()
-            .and_then(Option::as_ref)
-            .and_then(integer_argument);
+        let length = argument.value().and_then(integer_argument);
         // Plain and safe strings, which `str()` in Django's filter leaves as they are.
         let text = match &variable {
-            None => Some(("", false)),
-            Some(Content::String(content)) => Some((
-                content.as_raw().as_ref(),
-                matches!(content, ContentString::HtmlSafe(_)),
-            )),
+            None => Some(Text::Plain("")),
+            Some(Content::String(ContentString::HtmlSafe(content))) => Some(Text::Safe(content)),
+            Some(Content::String(
+                ContentString::String(content) | ContentString::HtmlUnsafe(content),
+            )) => Some(Text::Plain(content)),
             Some(Content::Py(object)) => match object.cast::<PyString>() {
                 Ok(string) if string.is_exact_instance_of::<PyString>() => {
-                    string.to_str().ok().map(|text| (text, false))
+                    string.to_str().ok().map(Text::Plain)
                 }
                 Ok(string)
                     if string.get_type().is(SAFESTRING.import(
@@ -965,23 +1002,21 @@ impl ResolveFilter for TruncateCharsFilter {
                         "SafeString",
                     )?) =>
                 {
-                    string.to_str().ok().map(|text| (text, true))
+                    string.to_str().ok().map(Text::Safe)
                 }
                 _ => None,
             },
-            Some(_) => None,
+            Some(Content::Float(_) | Content::Int(_) | Content::Bool(_)) => None,
         };
         if let Some(length) = length
-            && let Some((text, safe)) = text
-            && let Some(truncated) = truncate_ascii_chars(text, length, py, context)?
+            && let Some(text) = text
+            && let Some(truncated) = truncate_ascii_chars(text.as_str(), length, py, context)?
         {
             let truncated = Cow::Owned(truncated);
-            return Ok(Some(Content::String(if safe {
-                ContentString::HtmlSafe(truncated)
-            } else if context.autoescape {
-                ContentString::HtmlUnsafe(truncated)
-            } else {
-                ContentString::String(truncated)
+            return Ok(Some(Content::String(match text {
+                Text::Safe(_) => ContentString::HtmlSafe(truncated),
+                Text::Plain(_) if context.autoescape => ContentString::HtmlUnsafe(truncated),
+                Text::Plain(_) => ContentString::String(truncated),
             })));
         }
         self.django.call(variable, argument, py, context)
