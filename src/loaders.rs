@@ -1,4 +1,4 @@
-use crate::gc::Gc;
+use crate::gc::{Gc, Trace};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -8,9 +8,10 @@ use pyo3::exceptions::PyUnicodeError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyDict;
+use pyo3::{PyTraverseError, PyVisit};
 use sugar_path::SugarPath;
 
-use crate::template::django_rusty_templates::{Engine, Template};
+use crate::template::django_rusty_templates::{Engine, Template, TemplateDoesNotExist};
 
 static APPS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -181,10 +182,65 @@ impl AppDirsLoader {
         filesystem_loader.find_template(py, template_name, engine)
     }
 }
+/// The Python `get_template_cache` dict, kept in step with the native cache.
+#[derive(Debug)]
+pub struct CacheView {
+    dict: Py<PyDict>,
+    /// The cached loader's position in the engine's loader tree, prefixed to
+    /// each entry's relative `loader_path` so the exposed origin is correct.
+    path: Vec<usize>,
+}
+
+impl Trace for CacheView {
+    fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.dict.trace(visit)
+    }
+}
+
+impl CacheView {
+    /// Set `key`, returning the value it replaces.
+    fn set_item(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        entry: &Result<Template, LoaderError>,
+        engine: &Engine,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let dict = self.dict.bind(py);
+        let previous = dict.get_item(key)?.map(Bound::unbind);
+        match entry {
+            Ok(template) => {
+                let mut template = template.clone();
+                let mut path = self.path.clone();
+                path.extend(&template.loader_path);
+                template.loader_path = path;
+                dict.set_item(key, template)
+            }
+            // Like Django's cached loader, debug mode stores an exception
+            // instance and production stores the class.
+            Err(_) if engine.debug() => dict.set_item(
+                key,
+                TemplateDoesNotExist::new_err(key.to_string()).value(py),
+            ),
+            Err(_) => dict.set_item(key, py.get_type::<TemplateDoesNotExist>()),
+        }?;
+        Ok(previous)
+    }
+}
+
+/// Cache state removed while the loader lock is held. Python finalizers may
+/// call back into a loader, so drop it only after releasing the lock.
+#[must_use]
+#[derive(Default)]
+pub struct Discarded {
+    entries: Vec<Result<Template, LoaderError>>,
+    values: Vec<Py<PyAny>>,
+}
+
 #[derive(Debug)]
 pub struct CachedLoader {
     pub cache: HashMap<String, Result<Template, LoaderError>>,
-    pub cache_view: Option<Py<PyDict>>,
+    pub cache_view: Option<CacheView>,
     pub loaders: Vec<Loader>,
 }
 
@@ -195,6 +251,62 @@ impl CachedLoader {
             cache: HashMap::new(),
             cache_view: None,
         }
+    }
+
+    /// Return the Python view of the cache, building it once from the native
+    /// cache. Afterwards `store` and `clear` update it entry by entry, so
+    /// reads are O(1) and never observe a partially rebuilt dict.
+    pub fn view<'py>(
+        &mut self,
+        py: Python<'py>,
+        path: &[usize],
+        engine: &Engine,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if let Some(view) = &self.cache_view {
+            return Ok(view.dict.bind(py).clone());
+        }
+        let view = CacheView {
+            dict: PyDict::new(py).unbind(),
+            path: path.to_vec(),
+        };
+        for (key, entry) in &self.cache {
+            view.set_item(py, key, entry, engine)?;
+        }
+        let dict = view.dict.bind(py).clone();
+        self.cache_view = Some(view);
+        Ok(dict)
+    }
+
+    /// Insert a cache entry, mirroring it into the Python view if one exists.
+    pub fn store(
+        &mut self,
+        py: Python<'_>,
+        key: String,
+        entry: Result<Template, LoaderError>,
+        engine: &Engine,
+    ) -> PyResult<Discarded> {
+        let mut discarded = Discarded::default();
+        if let Some(view) = &self.cache_view {
+            discarded
+                .values
+                .extend(view.set_item(py, &key, &entry, engine)?);
+        }
+        discarded.entries.extend(self.cache.insert(key, entry));
+        Ok(discarded)
+    }
+
+    pub fn clear(&mut self, py: Python<'_>) -> Discarded {
+        let mut discarded = Discarded {
+            entries: self.cache.drain().map(|(_, entry)| entry).collect(),
+            values: Vec::new(),
+        };
+        if let Some(view) = &self.cache_view {
+            // Keep the dict itself: callers may hold it, as with Django's.
+            let dict = view.dict.bind(py);
+            discarded.values.push(dict.values().into_any().unbind());
+            dict.clear();
+        }
+        discarded
     }
 
     /// A miss is cached immediately, but a found source is only cached once
@@ -215,8 +327,16 @@ impl CachedLoader {
                         Ok(Ok(mut lookup)) => {
                             lookup.loader_path_mut().insert(0, index);
                             if let Lookup::Cached(template) = &lookup {
-                                self.cache
-                                    .insert(template_name.to_string(), Ok(template.clone()));
+                                // The name was not cached, so nothing substantial
+                                // is discarded while the engine holds the lock.
+                                if let Err(e) = self.store(
+                                    py,
+                                    template_name.to_string(),
+                                    Ok(template.clone()),
+                                    engine,
+                                ) {
+                                    return Ok(Err(e));
+                                }
                             }
                             return Ok(Ok(lookup));
                         }
@@ -225,26 +345,39 @@ impl CachedLoader {
                     }
                 }
                 let error = LoaderError { tried };
-                self.cache
-                    .insert(template_name.to_string(), Err(error.clone()));
+                if let Err(e) =
+                    self.store(py, template_name.to_string(), Err(error.clone()), engine)
+                {
+                    return Ok(Err(e));
+                }
                 Err(error)
             }
         }
     }
 
-    fn cache_template(&mut self, template_name: &str, template: &Template, path: &[usize]) {
-        self.cache
-            .entry(template_name.to_string())
-            .or_insert_with(|| {
-                let mut template = template.clone();
-                template.loader_path = path.to_vec();
-                Ok(template)
-            });
+    /// Cache a template compiled from a [`Lookup::Source`] here and in every
+    /// nested cached loader along `path`. Entries cached by another caller
+    /// while this one compiled are kept, so nothing is discarded.
+    fn cache_template(
+        &mut self,
+        py: Python<'_>,
+        template_name: &str,
+        template: &Template,
+        path: &[usize],
+        engine: &Engine,
+    ) -> PyResult<()> {
+        if !self.cache.contains_key(template_name) {
+            let mut template = template.clone();
+            template.loader_path = path.to_vec();
+            let discarded = self.store(py, template_name.to_string(), Ok(template), engine)?;
+            drop(discarded);
+        }
         if let Some((index, rest)) = path.split_first()
             && let Loader::Cached(loader) = &mut self.loaders[*index]
         {
-            loader.cache_template(template_name, template, rest);
+            loader.cache_template(py, template_name, template, rest, engine)?;
         }
+        Ok(())
     }
 }
 #[derive(Debug)]
@@ -319,10 +452,17 @@ impl Loader {
     /// loader along its `loader_path`, which is relative to `self`.
     ///
     /// Entries cached by another caller while this one compiled are kept.
-    pub fn cache_template(&mut self, template_name: &str, template: &Template) {
+    pub fn cache_template(
+        &mut self,
+        py: Python<'_>,
+        template_name: &str,
+        template: &Template,
+        engine: &Engine,
+    ) -> PyResult<()> {
         if let Self::Cached(loader) = self {
-            loader.cache_template(template_name, template, &template.loader_path);
+            loader.cache_template(py, template_name, template, &template.loader_path, engine)?;
         }
+        Ok(())
     }
 }
 
@@ -446,9 +586,9 @@ mod tests {
             Ok(self
                 .find_template(py, template_name, &engine)?
                 .and_then(|lookup| {
-                    let template = lookup.into_template(py, template_name, engine)?;
+                    let template = lookup.into_template(py, template_name, engine.clone())?;
                     let path = template.loader_path.clone();
-                    self.cache_template(template_name, &template, &path);
+                    self.cache_template(py, template_name, &template, &path, &engine)?;
                     Ok(template)
                 }))
         }

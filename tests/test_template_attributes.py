@@ -83,6 +83,22 @@ def test_cached_missing(engine_class, debug):
     assert loader.get_template_cache == {}
 
 
+def test_cache_entries_survive_later_loads(engine_class, tmp_path):
+    (tmp_path / "first.html").write_text("first")
+    (tmp_path / "second.html").write_text("second")
+    engine = engine_class(dirs=[tmp_path])
+    loader = engine.template_loaders[0]
+    engine.get_template("first.html")
+    cache = loader.get_template_cache
+    first = cache["first.html"]
+    engine.get_template("second.html")
+    with pytest.raises(TemplateDoesNotExist):
+        engine.get_template("missing.html")
+    assert loader.get_template_cache is cache
+    assert cache["first.html"] is first
+    assert set(cache) == {"first.html", "second.html", "missing.html"}
+
+
 def test_explicit_dirs_remain_fixed(engine_class, tmp_path):
     engine = engine_class(
         loaders=[("django.template.loaders.filesystem.Loader", [tmp_path])]

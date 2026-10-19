@@ -261,14 +261,11 @@ pub mod django_rusty_templates {
         }
 
         fn reset(&self, py: Python<'_>) {
-            self.with_loader(py, |loader| {
-                if let Loader::Cached(loader) = loader {
-                    loader.cache.clear();
-                    if let Some(view) = loader.cache_view.as_ref() {
-                        view.bind(py).clear();
-                    }
-                }
+            let discarded = self.with_loader(py, |loader| match loader {
+                Loader::Cached(loader) => loader.clear(py),
+                _ => crate::loaders::Discarded::default(),
             });
+            drop(discarded);
             for loader in self.loaders(py) {
                 loader.reset(py);
             }
@@ -276,41 +273,10 @@ pub mod django_rusty_templates {
 
         #[getter(get_template_cache)]
         fn get_template_cache<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-            let dict = self.with_loader(py, |loader| match loader {
-                Loader::Cached(loader) => loader
-                    .cache_view
-                    .get_or_insert_with(|| PyDict::new(py).unbind())
-                    .bind(py)
-                    .clone(),
-                _ => PyDict::new(py),
-            });
-            dict.clear();
-            self.with_loader(py, |loader| -> PyResult<()> {
-                if let Loader::Cached(loader) = loader {
-                    for (name, entry) in &loader.cache {
-                        match entry {
-                            Ok(template) => {
-                                let mut template = template.clone();
-                                let mut path = self.path.clone();
-                                path.extend(&template.loader_path);
-                                template.loader_path = path;
-                                dict.set_item(name, template)?;
-                            }
-                            Err(_) if self.engine.debug.load(Ordering::Relaxed) => {
-                                dict.set_item(
-                                    name,
-                                    TemplateDoesNotExist::new_err(name.clone()).value(py),
-                                )?;
-                            }
-                            Err(_) => {
-                                dict.set_item(name, py.get_type::<TemplateDoesNotExist>())?;
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            })?;
-            Ok(dict)
+            self.with_loader(py, |loader| match loader {
+                Loader::Cached(loader) => loader.view(py, &self.path, &self.engine),
+                _ => Ok(PyDict::new(py)),
+            })
         }
 
         #[pyo3(signature = (template_name, skip=None))]
@@ -347,14 +313,23 @@ pub mod django_rusty_templates {
             Ok(format!("{name}-{hash}"))
         }
 
-        fn _cache_missing(&self, py: Python<'_>, key: String, tried: Vec<(String, String)>) {
-            self.with_loader(py, |loader| {
-                if let Loader::Cached(loader) = loader {
-                    loader
-                        .cache
-                        .insert(key, Err(crate::loaders::LoaderError { tried }));
-                }
-            });
+        fn _cache_missing(
+            &self,
+            py: Python<'_>,
+            key: String,
+            tried: Vec<(String, String)>,
+        ) -> PyResult<()> {
+            let discarded = self.with_loader(py, |loader| match loader {
+                Loader::Cached(loader) => loader.store(
+                    py,
+                    key,
+                    Err(crate::loaders::LoaderError { tried }),
+                    &self.engine,
+                ),
+                _ => Ok(crate::loaders::Discarded::default()),
+            })?;
+            drop(discarded);
+            Ok(())
         }
 
         fn _cache_template(
@@ -385,12 +360,11 @@ pub mod django_rusty_templates {
                     python_renderer: Some(Gc::new(renderer.unbind())),
                 }
             };
-            self.with_loader(py, |loader| {
-                if let Loader::Cached(loader) = loader {
-                    loader.cache.insert(key, Ok(template));
-                }
-            });
-            self.get_template_cache(py)?;
+            let discarded = self.with_loader(py, |loader| match loader {
+                Loader::Cached(loader) => loader.store(py, key, Ok(template), &self.engine),
+                _ => Ok(crate::loaders::Discarded::default()),
+            })?;
+            drop(discarded);
             Ok(())
         }
 
@@ -406,8 +380,8 @@ pub mod django_rusty_templates {
                 source @ Lookup::Source { .. } => {
                     let template = source.into_template(py, &template_name, self.engine.clone())?;
                     self.with_loader(py, |loader| {
-                        loader.cache_template(&template_name, &template);
-                    });
+                        loader.cache_template(py, &template_name, &template, &self.engine)
+                    })?;
                     template
                 }
             };
@@ -791,6 +765,10 @@ pub mod django_rusty_templates {
             Some(template)
         }
 
+        pub(crate) fn debug(&self) -> bool {
+            self.debug.load(Ordering::Relaxed)
+        }
+
         pub fn dirs(&self, py: Python<'_>) -> PyResult<Vec<PathBuf>> {
             if let Some(configuration) = &self.configuration {
                 return configuration
@@ -883,7 +861,6 @@ pub mod django_rusty_templates {
             match loader.find_template(py, &template_name, &engine) {
                 Ok(Ok(Lookup::Cached(mut template))) => {
                     template.loader_path.insert(0, index);
-                    update_cache_view(py, loader, &template_name, &template)?;
                     return Ok(template);
                 }
                 Ok(Ok(source @ Lookup::Source { .. })) => {
@@ -905,10 +882,9 @@ pub mod django_rusty_templates {
                 .lock_py_attached(py)
                 .expect("Mutex should not be poisoned");
             let loader = &mut loaders[index];
-            loader.cache_template(&template_name, &template);
-            template.loader_path.insert(0, index);
-            update_cache_view(py, loader, &template_name, &template)?;
+            loader.cache_template(py, &template_name, &template, &engine)?;
             drop(loaders);
+            template.loader_path.insert(0, index);
             return Ok(template);
         }
         let requested_name = template_name.to_string();
@@ -928,20 +904,6 @@ pub mod django_rusty_templates {
                 })
                 .collect::<Vec<_>>(),
         )))
-    }
-
-    fn update_cache_view(
-        py: Python<'_>,
-        loader: &Loader,
-        template_name: &str,
-        template: &Template,
-    ) -> PyResult<()> {
-        if let Loader::Cached(cached) = loader
-            && let Some(view) = &cached.cache_view
-        {
-            view.bind(py).set_item(template_name, template.clone())?;
-        }
-        Ok(())
     }
 
     pub fn select_template(
