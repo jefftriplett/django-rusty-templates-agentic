@@ -1,6 +1,9 @@
 use crate::gc::Gc;
+mod builtin_filter;
 mod stock;
 pub use stock::StockNode;
+
+use builtin_filter::{BuiltinFilter, FilterArgument};
 
 use dtl_lexer::DelimitedToken;
 use num_traits::Zero;
@@ -206,58 +209,24 @@ impl Filter {
                 filter: FilterType::External(ExternalFilter::new(filter.clone().unbind(), right)),
             });
         }
-        let django_filter = match parser.template.content(at) {
-            "pluralize" => Some((0, "pluralize", false, true)),
-            "join" => Some((1, "join", true, true)),
-            "ljust" => Some((2, "ljust", true, true)),
-            "rjust" => Some((3, "rjust", true, true)),
-            "slice" => Some((4, "slice", true, true)),
-            "stringformat" => Some((5, "stringformat", true, true)),
-            "truncatechars" => Some((6, "truncatechars", true, true)),
-            "truncatewords" => Some((7, "truncatewords", true, true)),
-            "time" => Some((8, "time", false, true)),
-            "timesince" => Some((9, "timesince", false, true)),
-            "timeuntil" => Some((10, "timeuntil", false, true)),
-            "urlencode" => Some((11, "urlencode", false, true)),
-            "urlize" => Some((12, "urlize", false, false)),
-            "urlizetrunc" => Some((13, "urlizetrunc", true, true)),
-            "json_script" => Some((14, "json_script", false, true)),
-            "floatformat" => Some((15, "floatformat", false, true)),
-            "unordered_list" => Some((16, "unordered_list", false, false)),
-            "make_list" => Some((17, "make_list", false, false)),
-            "escapeseq" => Some((18, "escapeseq", false, false)),
-            "safeseq" => Some((19, "safeseq", false, false)),
-            "iriencode" => Some((20, "iriencode", false, false)),
-            "random" => Some((21, "random", false, false)),
-            "phone2numeric" => Some((27, "phone2numeric", false, false)),
-            "striptags" => Some((22, "striptags", false, false)),
-            "linebreaks" => Some((23, "linebreaks", false, false)),
-            "linebreaksbr" => Some((24, "linebreaksbr", false, false)),
-            "linenumbers" => Some((25, "linenumbers", false, false)),
-            "first" => Some((26, "first", false, false)),
-            "truncatechars_html" => Some((28, "truncatechars_html", true, true)),
-            "truncatewords_html" => Some((29, "truncatewords_html", true, true)),
-            "dictsort" => Some((30, "dictsort", true, true)),
-            "dictsortreversed" => Some((31, "dictsortreversed", true, true)),
-            "get_digit" => Some((32, "get_digit", true, true)),
-            "filesizeformat" => Some((33, "filesizeformat", false, false)),
-            "pprint" => Some((34, "pprint", false, false)),
-            _ => None,
-        };
-        if let Some((index, name, required, accepts_argument)) = django_filter {
-            if required && right.is_none() {
-                return Err(ParseError::MissingArgument { at: at.into() });
-            }
-            if !accepts_argument && let Some(right) = right {
-                return Err(unexpected_argument(name, right));
-            }
+        if let Some(builtin) = BuiltinFilter::from_name(parser.template.content(at)) {
+            let argument = match (builtin.argument(), right) {
+                (FilterArgument::Required, None) => {
+                    return Err(ParseError::MissingArgument { at: at.into() });
+                }
+                (FilterArgument::Forbidden, Some(right)) => {
+                    return Err(unexpected_argument(builtin.name(), right));
+                }
+                (FilterArgument::Optional | FilterArgument::Required, right) => right,
+                (FilterArgument::Forbidden, None) => None,
+            };
             return Ok(Self {
                 at,
                 all_at,
                 left,
                 filter: FilterType::Django(DjangoFilter {
-                    filter: parser.builtin_filter(index, name, at)?,
-                    argument: right,
+                    filter: parser.builtin_filter(builtin, at)?,
+                    argument,
                 }),
             });
         }
@@ -1446,8 +1415,7 @@ enum TagContext<'py> {
     Opaque(Bound<'py, PyAny>),
 }
 
-const BUILTIN_FILTER_COUNT: usize = 35;
-type BuiltinFilterCache = [Option<Gc<Py<PyAny>>>; BUILTIN_FILTER_COUNT];
+type BuiltinFilterCache = [Option<Gc<Py<PyAny>>>; BuiltinFilter::COUNT];
 
 pub struct Parser<'t, 'py> {
     py: Python<'py>,
@@ -1543,15 +1511,11 @@ impl<'t, 'py> Parser<'t, 'py> {
         }
     }
 
-    fn builtin_filter(
-        &self,
-        index: usize,
-        name: &'static str,
-        at: At,
-    ) -> Result<Gc<Py<PyAny>>, ParseError> {
+    fn builtin_filter(&self, builtin: BuiltinFilter, at: At) -> Result<Gc<Py<PyAny>>, ParseError> {
         static DEFAULT_FILTERS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+        let name = builtin.name();
         if let Some(cache) = self.builtin_filters.borrow().as_ref()
-            && let Some(filter) = &cache[index]
+            && let Some(filter) = &cache[builtin.index()]
         {
             return Ok(filter.clone());
         }
@@ -1574,8 +1538,8 @@ impl<'t, 'py> Parser<'t, 'py> {
         );
         self.builtin_filters
             .borrow_mut()
-            .get_or_insert_with(|| Box::new([const { None }; BUILTIN_FILTER_COUNT]))[index] =
-            Some(filter.clone());
+            .get_or_insert_with(|| Box::new([const { None }; BuiltinFilter::COUNT]))
+            [builtin.index()] = Some(filter.clone());
         Ok(filter)
     }
 
