@@ -255,7 +255,7 @@ def test_now_timezone_naive(assert_render):
         pytest.param(
             {"USE_TZ": False, "TIME_ZONE": "America/Chicago"},
             '{% now "Y-m-d H:i" %}',
-            "2026-10-16 22:30",
+            None,
             id="use_tz_false",
         ),
     ],
@@ -263,6 +263,10 @@ def test_now_timezone_naive(assert_render):
 @time_machine.travel(datetime(2026, 10, 17, 3, 30, tzinfo=dt_timezone.utc), tick=False)
 def test_now_uses_current_timezone(assert_render, tz_settings, template, expected):
     with override_settings(**tz_settings):
+        if expected is None:
+            # Without time.tzset(), Django cannot change the process timezone.
+            # Naive now uses the platform's local clock on every engine.
+            expected = datetime.now().strftime("%Y-%m-%d %H:%M")
         assert_render(template, {}, expected)
 
 

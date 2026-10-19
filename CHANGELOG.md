@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2026.10.14
+
 Enforce workspace lints and simplify builtin filter registration, template caches, and fallback errors. ([#173](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/173), [#174](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/174), [#175](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/175), [#176](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/176))
 
 Fix loader reentry, Django 6 cache updates, and timezone handling; speed up date, number, and string formatting and callable rendering; and add realistic page benchmarks with memory checks. ([#177](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/177), [#178](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/178), [#179](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/179), [#180](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/180), [#181](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/181), [#182](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/182), [#183](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/183), [#184](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/184), [#185](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/185))

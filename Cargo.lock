@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "django-rusty-templates"
-version = "2026.10.13"
+version = "2026.10.14"
 dependencies = [
  "cargo-llvm-cov",
  "dtl-core",
