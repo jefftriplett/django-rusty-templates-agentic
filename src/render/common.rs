@@ -33,40 +33,50 @@ pub fn gettext(py: Python<'_>, text: &str) -> PyResult<String> {
     get_text.call1((text,))?.extract::<String>()
 }
 
-/// The attribute dictionary of a Python function, or of a bound method's
-/// function. Neither type defines `do_not_call_in_templates` or `alters_data`
-/// and a bound method forwards other lookups to its function, so Django's
-/// `getattr` can only find the flags here. Reading the dictionary avoids
-/// raising two `AttributeError`s for every call.
-fn function_attributes<'py>(variable: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyDict>>> {
-    let py = variable.py();
-    let function = if variable
-        .get_type()
-        .is(METHOD_TYPE.import(py, "types", "MethodType")?)
-    {
-        variable.getattr(intern!(py, "__func__"))?
-    } else {
-        variable.clone()
-    };
-    if !function.is_exact_instance_of::<PyFunction>() {
-        return Ok(None);
-    }
-    Ok(function
-        .getattr(intern!(py, "__dict__"))?
-        .cast_into_exact::<PyDict>()
-        .ok())
+/// Where Django's `getattr` finds `do_not_call_in_templates` and
+/// `alters_data` on a callable.
+enum FlagSource<'a, 'py> {
+    /// The `__dict__` of a Python function, or of a bound method's function.
+    /// Neither type defines the flags and a bound method forwards other
+    /// lookups to its function, so `getattr` can only find them here.
+    /// Reading the dictionary avoids raising two `AttributeError`s per call.
+    FunctionDict(Bound<'py, PyDict>),
+    /// Any other callable, whose flags need a full attribute lookup.
+    Object(&'a Bound<'py, PyAny>),
 }
 
-fn has_truthy_attr(
-    variable: &Bound<'_, PyAny>,
-    attributes: Option<&Bound<'_, PyDict>>,
-    attr: &Bound<'_, PyString>,
-) -> PyResult<bool> {
-    let value = match attributes {
-        Some(attributes) => attributes.get_item(attr)?,
-        None => variable.getattr_opt(attr)?,
-    };
-    value.map_or(Ok(false), |value| value.is_truthy())
+impl<'a, 'py> FlagSource<'a, 'py> {
+    fn new(variable: &'a Bound<'py, PyAny>) -> PyResult<Self> {
+        let py = variable.py();
+        let function = if variable
+            .get_type()
+            .is(METHOD_TYPE.import(py, "types", "MethodType")?)
+        {
+            variable.getattr(intern!(py, "__func__"))?
+        } else {
+            variable.clone()
+        };
+        if !function.is_exact_instance_of::<PyFunction>() {
+            return Ok(Self::Object(variable));
+        }
+        Ok(
+            match function
+                .getattr(intern!(py, "__dict__"))?
+                .cast_into_exact::<PyDict>()
+            {
+                Ok(attributes) => Self::FunctionDict(attributes),
+                Err(_) => Self::Object(variable),
+            },
+        )
+    }
+
+    fn is_set(&self, flag: &Bound<'py, PyString>) -> PyResult<bool> {
+        let value = match self {
+            Self::FunctionDict(attributes) => attributes.get_item(flag)?,
+            Self::Object(variable) => variable.getattr_opt(flag)?,
+        };
+        value.map_or(Ok(false), |value| value.is_truthy())
+    }
 }
 
 fn resolve_callable<'py>(
@@ -77,15 +87,11 @@ fn resolve_callable<'py>(
         return Ok(Some(variable));
     }
     let py = variable.py();
-    let attributes = function_attributes(&variable)?;
-    if has_truthy_attr(
-        &variable,
-        attributes.as_ref(),
-        intern!(py, "do_not_call_in_templates"),
-    )? {
+    let flags = FlagSource::new(&variable)?;
+    if flags.is_set(intern!(py, "do_not_call_in_templates"))? {
         return Ok(Some(variable));
     }
-    if has_truthy_attr(&variable, attributes.as_ref(), intern!(py, "alters_data"))? {
+    if flags.is_set(intern!(py, "alters_data"))? {
         return Ok(None);
     }
     match context.call_variable(py, &variable) {
