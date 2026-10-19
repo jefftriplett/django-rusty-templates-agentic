@@ -13,16 +13,33 @@ use super::types::Context;
 static GET_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
+/// How Django groups the digits of a number's integer part.
+#[derive(Clone, Debug)]
+pub enum Grouping {
+    /// No thousand separators: `USE_THOUSAND_SEPARATOR` is off or
+    /// `NUMBER_GROUPING` is 0.
+    Off,
+    /// `NUMBER_GROUPING` as group sizes from the right. An integer setting is
+    /// a single size.
+    Sizes(Vec<i64>),
+}
+
+impl Grouping {
+    /// Appends `digits`, inserting `separator` between groups.
+    pub fn push_digits(&self, digits: &str, separator: &str, output: &mut String) {
+        match self {
+            Self::Off => output.push_str(digits),
+            Self::Sizes(sizes) => group_digits(digits, sizes, separator, output),
+        }
+    }
+}
+
 /// The values `number_format` passes to `django.utils.numberformat.format`.
 #[derive(Clone, Debug)]
 pub struct NumberFormat {
-    use_thousand_separator: bool,
     decimal_separator: String,
     thousand_separator: String,
-    /// `NUMBER_GROUPING` as group sizes from the right. An integer setting is
-    /// a single size; `None` is an integer setting of 0, which disables
-    /// grouping.
-    grouping: Option<Vec<i64>>,
+    grouping: Grouping,
 }
 
 impl NumberFormat {
@@ -45,10 +62,13 @@ impl NumberFormat {
         ) else {
             return Ok(None);
         };
-        let grouping = if grouping.is_exact_instance_of::<PyInt>() {
+        // Django only reads NUMBER_GROUPING when it inserts separators.
+        let grouping = if !use_thousand_separator {
+            Grouping::Off
+        } else if grouping.is_exact_instance_of::<PyInt>() {
             match grouping.extract::<i64>() {
-                Ok(0) => None,
-                Ok(size) => Some(vec![size]),
+                Ok(0) => Grouping::Off,
+                Ok(size) => Grouping::Sizes(vec![size]),
                 Err(_) => return Ok(None),
             }
         } else if grouping.is_exact_instance_of::<PyTuple>()
@@ -64,25 +84,17 @@ impl NumberFormat {
                 .collect::<PyResult<Option<Vec<_>>>>()?;
             // Django fails on an empty sequence once it groups digits.
             match sizes {
-                Some(sizes) if !sizes.is_empty() => Some(sizes),
+                Some(sizes) if !sizes.is_empty() => Grouping::Sizes(sizes),
                 _ => return Ok(None),
             }
         } else {
             return Ok(None);
         };
         Ok(Some(Self {
-            use_thousand_separator,
             decimal_separator: decimal_separator.extract()?,
             thousand_separator: thousand_separator.extract()?,
             grouping,
         }))
-    }
-
-    /// Group sizes when Django inserts thousand separators.
-    fn grouping(&self) -> Option<&[i64]> {
-        self.grouping
-            .as_deref()
-            .filter(|_| self.use_thousand_separator)
     }
 
     /// Port of the string branch of `numberformat.format` without
@@ -98,12 +110,8 @@ impl NumberFormat {
         };
         let mut output = String::with_capacity(number.len() + 8);
         output.push_str(sign);
-        match self.grouping() {
-            Some(grouping) => {
-                group_digits(integer, grouping, &self.thousand_separator, &mut output);
-            }
-            None => output.push_str(integer),
-        }
+        self.grouping
+            .push_digits(integer, &self.thousand_separator, &mut output);
         if let Some(decimals) = decimals.filter(|decimals| !decimals.is_empty()) {
             output.push_str(&self.decimal_separator);
             output.push_str(decimals);
@@ -154,6 +162,13 @@ impl Context {
     }
 }
 
+/// The number types `localize_number` formats natively.
+#[derive(Clone, Copy)]
+enum Number {
+    Int,
+    Float,
+}
+
 /// `localize(value, use_l10n)` for exact ints, floats and bools. `None` for
 /// other values and for floats Django formats as decimals.
 pub fn localize_number(value: &Bound<'_, PyAny>, context: &Context) -> PyResult<Option<String>> {
@@ -161,13 +176,19 @@ pub fn localize_number(value: &Bound<'_, PyAny>, context: &Context) -> PyResult<
         let text = if value.is_truthy()? { "True" } else { "False" };
         return Ok(Some(text.to_owned()));
     }
-    let is_int = value.is_exact_instance_of::<PyInt>();
-    if !is_int && !value.is_exact_instance_of::<PyFloat>() {
+    let kind = if value.is_exact_instance_of::<PyInt>() {
+        Number::Int
+    } else if value.is_exact_instance_of::<PyFloat>() {
+        Number::Float
+    } else {
         return Ok(None);
-    }
-    let number = match is_int.then(|| value.extract::<i64>()) {
-        Some(Ok(number)) => number.to_string(),
-        _ => value.str()?.extract()?,
+    };
+    let number = match kind {
+        Number::Int => match value.extract::<i64>() {
+            Ok(number) => number.to_string(),
+            Err(_) => value.str()?.extract()?,
+        },
+        Number::Float => value.str()?.extract()?,
     };
     if context.use_l10n == Some(false) {
         return Ok(Some(number));
@@ -175,12 +196,10 @@ pub fn localize_number(value: &Bound<'_, PyAny>, context: &Context) -> PyResult<
     let Some(format) = context.number_format(value.py())? else {
         return Ok(None);
     };
-    if is_int && format.grouping().is_none() {
-        return Ok(Some(number));
+    match kind {
+        Number::Int if matches!(format.grouping, Grouping::Off) => Ok(Some(number)),
+        // Django formats floats with an exponent through Decimal.
+        Number::Float if number.contains('e') => Ok(None),
+        Number::Int | Number::Float => Ok(Some(format.format(&number))),
     }
-    // Django formats floats with an exponent through Decimal.
-    if number.contains('e') {
-        return Ok(None);
-    }
-    Ok(Some(format.format(&number)))
 }
