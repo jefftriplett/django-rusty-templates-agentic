@@ -406,7 +406,7 @@ pub mod django_rusty_templates {
                 source @ Lookup::Source { .. } => {
                     let template = source.into_template(py, &template_name, self.engine.clone())?;
                     self.with_loader(py, |loader| {
-                        loader.cache_template(&template_name, &template)
+                        loader.cache_template(&template_name, &template);
                     });
                     template
                 }
@@ -907,6 +907,7 @@ pub mod django_rusty_templates {
             loader.cache_template(&template_name, &template);
             template.loader_path.insert(0, index);
             update_cache_view(py, loader, &template_name, &template)?;
+            drop(loaders);
             return Ok(template);
         }
         let requested_name = template_name.to_string();
