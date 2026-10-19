@@ -116,7 +116,9 @@ impl Render for StockNode {
                 scope.call_method0("__enter__")?;
                 // The cached language or timezone is stale inside the override.
                 let date_cache = std::mem::take(&mut context.date_cache);
+                let previous_format = std::mem::take(&mut context.number_format);
                 let output = nodes.render(py, template, context);
+                context.number_format = previous_format;
                 context.date_cache = date_cache;
                 scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
                 output?
@@ -358,7 +360,9 @@ impl StockNode {
                 .call1(("language", py.None()))?;
             override_scope.call_method0("__enter__")?;
             let date_cache = std::mem::take(&mut context.date_cache);
+            let previous_format = std::mem::take(&mut context.number_format);
             let output = self.render_block_translation(py, template, context, true);
+            context.number_format = previous_format;
             context.date_cache = date_cache;
             override_scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
             return output;

@@ -1,7 +1,7 @@
 use crate::gc::{Gc, GcOnceLock, Trace};
 use pyo3::{PyTraverseError, PyVisit};
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -20,6 +20,7 @@ use pyo3::sync::{MutexExt, PyOnceLock};
 use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyType};
 
 use super::inheritance::{BlockEntry, BlockMarker};
+use super::l10n::{NumberFormat, localize_number};
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::parse::CycleId;
 use crate::render::RenderResult;
@@ -163,6 +164,10 @@ pub struct Context {
     pub format_values: bool,
     pub instrument_render: bool,
     pub formatting_context: Option<Py<PyAny>>,
+    // Number formats of the active language, read on the first localized
+    // number. `{% language %}` replaces it for its body. It holds only Rust
+    // strings, so `Trace` has nothing to visit.
+    pub(crate) number_format: OnceCell<Option<NumberFormat>>,
     // Weak reference to an input Context, used only while calling Python code.
     pub callback_input: Option<Gc<Py<PyAny>>>,
     pub inheritance_blocks: HashMap<String, Vec<BlockEntry>>,
@@ -248,6 +253,7 @@ impl Context {
             format_values: false,
             instrument_render: true,
             formatting_context: None,
+            number_format: OnceCell::new(),
             callback_input: None,
             inheritance_blocks: HashMap::new(),
             python_blocks: None,
@@ -284,6 +290,7 @@ impl Context {
             format_values: self.format_values,
             instrument_render: self.instrument_render,
             formatting_context: self.formatting_context.as_ref().map(|v| v.clone_ref(py)),
+            number_format: self.number_format.clone(),
             callback_input: self.callback_input.clone(),
             inheritance_blocks: self.inheritance_blocks.clone(),
             python_blocks: self.python_blocks.as_ref().map(|v| v.clone_ref(py)),
@@ -1329,6 +1336,17 @@ impl<'t, 'py> Content<'t, 'py> {
                     return append_python_string(&content, autoescape, output);
                 }
                 if context.format_values
+                    && context.formatting_context.is_none()
+                    && let Some(number) = localize_number(&content, context)?
+                {
+                    if context.autoescape {
+                        append_escaped(&number, output);
+                    } else {
+                        output.push_str(&number);
+                    }
+                    return Ok(());
+                }
+                if context.format_values
                     && (context.formatting_context.is_some()
                         || !content.is_instance_of::<PyString>())
                 {
@@ -1429,6 +1447,15 @@ impl<'t, 'py> Content<'t, 'py> {
                     && (context.formatting_context.is_some()
                         || !content.is_instance_of::<PyString>()) =>
             {
+                if context.formatting_context.is_none()
+                    && let Some(number) = localize_number(&content, context)?
+                {
+                    return Ok(Cow::Owned(if context.autoescape {
+                        encode_quoted_attribute(&number).into_owned()
+                    } else {
+                        number
+                    }));
+                }
                 let py = content.py();
                 let rendered = RENDER_VALUE
                     .import(py, "django.template.base", "render_value_in_context")?
