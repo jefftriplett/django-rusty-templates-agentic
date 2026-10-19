@@ -578,6 +578,10 @@ impl ResolveFilter for ExternalFilter {
 impl DjangoFilter {
     /// Resolves the argument once, so a native port and Django's filter see
     /// the same value. The outer `None` means the filter has no argument.
+    #[expect(
+        clippy::option_option,
+        reason = "no argument differs from an argument that resolved to nothing"
+    )]
     fn resolve_argument<'t, 'py>(
         &self,
         py: Python<'py>,
@@ -590,6 +594,10 @@ impl DjangoFilter {
             .transpose()
     }
 
+    #[expect(
+        clippy::option_option,
+        reason = "no argument differs from an argument that resolved to nothing"
+    )]
     fn call<'t, 'py>(
         &self,
         variable: Option<Content<'t, 'py>>,
