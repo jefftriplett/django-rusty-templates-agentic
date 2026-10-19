@@ -23,6 +23,7 @@ use super::inheritance::{BlockEntry, BlockMarker};
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::parse::CycleId;
 use crate::render::RenderResult;
+use crate::render::dateformat::DateCache;
 use crate::template::django_rusty_templates::{Engine, Template, get_template, select_template};
 use crate::utils::PyResultMethods;
 use dtl_lexer::types::{At, TemplateString};
@@ -158,6 +159,7 @@ pub struct Context {
     pub autoescape: bool,
     pub use_l10n: Option<bool>,
     pub use_tz: Option<bool>,
+    pub(crate) date_cache: DateCache,
     pub format_values: bool,
     pub instrument_render: bool,
     pub formatting_context: Option<Py<PyAny>>,
@@ -190,6 +192,7 @@ impl Trace for Context {
         self.loops.trace(visit)?;
         self.request.trace(visit)?;
         self.formatting_context.trace(visit)?;
+        self.date_cache.trace(visit)?;
         self.callback_input.trace(visit)?;
         self.inheritance_blocks.trace(visit)?;
         self.python_blocks.trace(visit)?;
@@ -241,6 +244,7 @@ impl Context {
             autoescape,
             use_l10n: None,
             use_tz: None,
+            date_cache: DateCache::default(),
             format_values: false,
             instrument_render: true,
             formatting_context: None,
@@ -276,6 +280,7 @@ impl Context {
             autoescape: self.autoescape,
             use_l10n: self.use_l10n,
             use_tz: self.use_tz,
+            date_cache: DateCache::default(),
             format_values: self.format_values,
             instrument_render: self.instrument_render,
             formatting_context: self.formatting_context.as_ref().map(|v| v.clone_ref(py)),

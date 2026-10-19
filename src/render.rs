@@ -1,5 +1,6 @@
 mod callbacks;
 pub mod common;
+pub mod dateformat;
 pub mod filters;
 pub mod inheritance;
 pub mod lorem;

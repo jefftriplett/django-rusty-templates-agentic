@@ -114,7 +114,10 @@ impl Render for StockNode {
                 let input = value(expression, py, template, context)?;
                 let scope = service.getattr("override")?.call1((kind, input))?;
                 scope.call_method0("__enter__")?;
+                // The cached language or timezone is stale inside the override.
+                let date_cache = std::mem::take(&mut context.date_cache);
                 let output = nodes.render(py, template, context);
+                context.date_cache = date_cache;
                 scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
                 output?
             }
@@ -354,7 +357,9 @@ impl StockNode {
                 .getattr("override")?
                 .call1(("language", py.None()))?;
             override_scope.call_method0("__enter__")?;
+            let date_cache = std::mem::take(&mut context.date_cache);
             let output = self.render_block_translation(py, template, context, true);
+            context.date_cache = date_cache;
             override_scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
             return output;
         }
