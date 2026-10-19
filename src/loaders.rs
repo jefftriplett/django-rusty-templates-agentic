@@ -103,12 +103,12 @@ impl FileSystemLoader {
         }
     }
 
-    fn get_template(
+    fn find_template(
         &self,
         py: Python<'_>,
         template_name: &str,
-        engine: Gc<Engine>,
-    ) -> Result<PyResult<Template>, LoaderError> {
+        engine: &Engine,
+    ) -> Result<PyResult<Lookup>, LoaderError> {
         let mut tried = Vec::new();
         let dirs: Cow<'_, [PathBuf]> = if self.uses_engine_dirs {
             match engine.dirs(py) {
@@ -137,14 +137,8 @@ impl FileSystemLoader {
                 let contents = pyo3::types::PyBytes::new(py, &bytes)
                     .call_method1("decode", (&engine.file_charset,))
                     .and_then(|value| value.extract::<String>());
-                return Ok(contents.and_then(|contents| {
-                    Template::new(
-                        py,
-                        &normalize_newlines(&contents),
-                        path,
-                        template_name,
-                        engine,
-                    )
+                return Ok(contents.map(|contents| {
+                    Lookup::source(normalize_newlines(&contents).into_owned(), path)
                 }));
             }
             let (contents, encoding, malformed) = self.encoding.decode(&bytes);
@@ -155,13 +149,10 @@ impl FileSystemLoader {
                     encoding.name()
                 ))));
             }
-            return Ok(Template::new(
-                py,
-                &normalize_newlines(&contents),
+            return Ok(Ok(Lookup::source(
+                normalize_newlines(&contents).into_owned(),
                 path,
-                template_name,
-                engine,
-            ));
+            )));
         }
         Err(LoaderError { tried })
     }
@@ -176,18 +167,18 @@ impl AppDirsLoader {
         Self { encoding }
     }
 
-    fn get_template(
+    fn find_template(
         &self,
         py: Python<'_>,
         template_name: &str,
-        engine: Gc<Engine>,
-    ) -> Result<PyResult<Template>, LoaderError> {
+        engine: &Engine,
+    ) -> Result<PyResult<Lookup>, LoaderError> {
         let dirs = match get_app_template_dirs(py, "templates") {
             Ok(dirs) => dirs,
             Err(e) => return Ok(Err(e)),
         };
         let filesystem_loader = FileSystemLoader::from_pathbuf(dirs, self.encoding);
-        filesystem_loader.get_template(py, template_name, engine)
+        filesystem_loader.find_template(py, template_name, engine)
     }
 }
 #[derive(Debug)]
@@ -206,24 +197,28 @@ impl CachedLoader {
         }
     }
 
-    fn get_template(
+    /// A miss is cached immediately, but a found source is only cached once
+    /// the caller has compiled it and passes it to [`Loader::cache_template`].
+    fn find_template(
         &mut self,
         py: Python<'_>,
         template_name: &str,
-        engine: Gc<Engine>,
-    ) -> Result<PyResult<Template>, LoaderError> {
+        engine: &Engine,
+    ) -> Result<PyResult<Lookup>, LoaderError> {
         match self.cache.get(template_name) {
-            Some(Ok(template)) => Ok(Ok((*template).clone())),
+            Some(Ok(template)) => Ok(Ok(Lookup::Cached(template.clone()))),
             Some(Err(e)) => Err(e.clone()),
             None => {
                 let mut tried = Vec::new();
                 for (index, loader) in self.loaders.iter_mut().enumerate() {
-                    match loader.get_template(py, template_name, engine.clone()) {
-                        Ok(Ok(mut template)) => {
-                            template.loader_path.insert(0, index);
-                            self.cache
-                                .insert(template_name.to_string(), Ok(template.clone()));
-                            return Ok(Ok(template));
+                    match loader.find_template(py, template_name, engine) {
+                        Ok(Ok(mut lookup)) => {
+                            lookup.loader_path_mut().insert(0, index);
+                            if let Lookup::Cached(template) = &lookup {
+                                self.cache
+                                    .insert(template_name.to_string(), Ok(template.clone()));
+                            }
+                            return Ok(Ok(lookup));
                         }
                         Ok(Err(e)) => return Ok(Err(e)),
                         Err(mut e) => tried.append(&mut e.tried),
@@ -234,6 +229,21 @@ impl CachedLoader {
                     .insert(template_name.to_string(), Err(error.clone()));
                 Err(error)
             }
+        }
+    }
+
+    fn cache_template(&mut self, template_name: &str, template: &Template, path: &[usize]) {
+        self.cache
+            .entry(template_name.to_string())
+            .or_insert_with(|| {
+                let mut template = template.clone();
+                template.loader_path = path.to_vec();
+                Ok(template)
+            });
+        if let Some((index, rest)) = path.split_first()
+            && let Loader::Cached(loader) = &mut self.loaders[*index]
+        {
+            loader.cache_template(template_name, template, rest);
         }
     }
 }
@@ -248,20 +258,12 @@ impl LocMemLoader {
         Self { templates }
     }
 
-    fn get_template(
-        &self,
-        py: Python<'_>,
-        template_name: &str,
-        engine: Gc<Engine>,
-    ) -> Result<PyResult<Template>, LoaderError> {
+    fn find_template(&self, template_name: &str) -> Result<PyResult<Lookup>, LoaderError> {
         if let Some(contents) = self.templates.get(template_name) {
-            Ok(Template::new(
-                py,
-                contents,
+            Ok(Ok(Lookup::source(
+                contents.clone(),
                 PathBuf::from(template_name),
-                template_name,
-                engine,
-            ))
+            )))
         } else {
             Err(LoaderError {
                 tried: vec![(
@@ -276,12 +278,7 @@ impl LocMemLoader {
 pub struct ExternalLoader {}
 
 impl ExternalLoader {
-    fn get_template(
-        &self,
-        _py: Python<'_>,
-        _template_name: &str,
-        _engine: Gc<Engine>,
-    ) -> Result<PyResult<Template>, LoaderError> {
+    fn find_template(&self) -> Result<PyResult<Lookup>, LoaderError> {
         std::todo!() // Bail here because it does not make much sense to convert from PyErr to empty LoaderError
     }
 }
@@ -298,18 +295,83 @@ pub enum Loader {
 }
 
 impl Loader {
-    pub fn get_template(
+    /// Find `template_name` without compiling it.
+    ///
+    /// Compiling can run Python tag compile functions, which may load other
+    /// templates from the same engine, so callers must not hold the engine's
+    /// loader lock while they compile a [`Lookup::Source`].
+    pub fn find_template(
         &mut self,
         py: Python<'_>,
         template_name: &str,
-        engine: Gc<Engine>,
-    ) -> Result<PyResult<Template>, LoaderError> {
+        engine: &Engine,
+    ) -> Result<PyResult<Lookup>, LoaderError> {
         match self {
-            Self::FileSystem(loader) => loader.get_template(py, template_name, engine),
-            Self::AppDirs(loader) => loader.get_template(py, template_name, engine),
-            Self::Cached(loader) => loader.get_template(py, template_name, engine),
-            Self::LocMem(loader) => loader.get_template(py, template_name, engine),
-            Self::External(loader) => loader.get_template(py, template_name, engine),
+            Self::FileSystem(loader) => loader.find_template(py, template_name, engine),
+            Self::AppDirs(loader) => loader.find_template(py, template_name, engine),
+            Self::Cached(loader) => loader.find_template(py, template_name, engine),
+            Self::LocMem(loader) => loader.find_template(template_name),
+            Self::External(loader) => loader.find_template(),
+        }
+    }
+
+    /// Store a template compiled from a [`Lookup::Source`] in every cached
+    /// loader along its `loader_path`, which is relative to `self`.
+    ///
+    /// Entries cached by another caller while this one compiled are kept.
+    pub fn cache_template(&mut self, template_name: &str, template: &Template) {
+        if let Self::Cached(loader) = self {
+            loader.cache_template(template_name, template, &template.loader_path);
+        }
+    }
+}
+
+/// The result of finding a template in a loader.
+#[derive(Debug)]
+pub enum Lookup {
+    /// A template a cached loader has already compiled.
+    Cached(Template),
+    /// Source that still needs compiling.
+    Source {
+        contents: String,
+        path: PathBuf,
+        loader_path: Vec<usize>,
+    },
+}
+
+impl Lookup {
+    fn source(contents: String, path: PathBuf) -> Self {
+        Self::Source {
+            contents,
+            path,
+            loader_path: Vec::new(),
+        }
+    }
+
+    fn loader_path_mut(&mut self) -> &mut Vec<usize> {
+        match self {
+            Self::Cached(template) => &mut template.loader_path,
+            Self::Source { loader_path, .. } => loader_path,
+        }
+    }
+
+    pub fn into_template(
+        self,
+        py: Python<'_>,
+        template_name: &str,
+        engine: Gc<Engine>,
+    ) -> PyResult<Template> {
+        match self {
+            Self::Cached(template) => Ok(template),
+            Self::Source {
+                contents,
+                path,
+                loader_path,
+            } => {
+                let mut template = Template::new(py, &contents, path, template_name, engine)?;
+                template.loader_path = loader_path;
+                Ok(template)
+            }
         }
     }
 }
@@ -318,6 +380,79 @@ impl Loader {
 mod tests {
     use super::*;
     use pyo3::{BoundObject, IntoPyObjectExt};
+
+    /// Find and compile a template the way the engine does, so the loaders
+    /// can be tested on their own.
+    trait GetTemplate {
+        fn get_template(
+            self,
+            py: Python<'_>,
+            template_name: &str,
+            engine: Gc<Engine>,
+        ) -> Result<PyResult<Template>, LoaderError>;
+    }
+
+    fn compile(
+        py: Python<'_>,
+        found: Result<PyResult<Lookup>, LoaderError>,
+        template_name: &str,
+        engine: Gc<Engine>,
+    ) -> Result<PyResult<Template>, LoaderError> {
+        Ok(found?.and_then(|lookup| lookup.into_template(py, template_name, engine)))
+    }
+
+    impl GetTemplate for &FileSystemLoader {
+        fn get_template(
+            self,
+            py: Python<'_>,
+            template_name: &str,
+            engine: Gc<Engine>,
+        ) -> Result<PyResult<Template>, LoaderError> {
+            let found = self.find_template(py, template_name, &engine);
+            compile(py, found, template_name, engine)
+        }
+    }
+
+    impl GetTemplate for &AppDirsLoader {
+        fn get_template(
+            self,
+            py: Python<'_>,
+            template_name: &str,
+            engine: Gc<Engine>,
+        ) -> Result<PyResult<Template>, LoaderError> {
+            let found = self.find_template(py, template_name, &engine);
+            compile(py, found, template_name, engine)
+        }
+    }
+
+    impl GetTemplate for &LocMemLoader {
+        fn get_template(
+            self,
+            py: Python<'_>,
+            template_name: &str,
+            engine: Gc<Engine>,
+        ) -> Result<PyResult<Template>, LoaderError> {
+            compile(py, self.find_template(template_name), template_name, engine)
+        }
+    }
+
+    impl GetTemplate for &mut CachedLoader {
+        fn get_template(
+            self,
+            py: Python<'_>,
+            template_name: &str,
+            engine: Gc<Engine>,
+        ) -> Result<PyResult<Template>, LoaderError> {
+            Ok(self
+                .find_template(py, template_name, &engine)?
+                .and_then(|lookup| {
+                    let template = lookup.into_template(py, template_name, engine)?;
+                    let path = template.loader_path.clone();
+                    self.cache_template(template_name, &template, &path);
+                    Ok(template)
+                }))
+        }
+    }
 
     use proptest::prelude::*;
 
