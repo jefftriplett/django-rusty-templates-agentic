@@ -4,7 +4,7 @@ use pyo3::exceptions::{PyAttributeError, PyIndexError, PyKeyError, PyTypeError, 
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyString};
+use pyo3::types::{PyDict, PyFunction, PyString, PyType};
 
 use dtl_lexer::types::TemplateString;
 
@@ -23,6 +23,7 @@ use dtl_lexer::types::Variable;
 static BASE_CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DIR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SIGNATURE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static METHOD_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
 static GETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -32,11 +33,49 @@ pub fn gettext(py: Python<'_>, text: &str) -> PyResult<String> {
     get_text.call1((text,))?.extract::<String>()
 }
 
-fn has_truthy_attr(variable: &Bound<'_, PyAny>, attr: &Bound<'_, PyString>) -> PyResult<bool> {
-    match variable.getattr(attr) {
-        Ok(attr) => attr.is_truthy(),
-        Err(error) if error.is_instance_of::<PyAttributeError>(variable.py()) => Ok(false),
-        Err(error) => Err(error),
+/// Where Django's `getattr` finds `do_not_call_in_templates` and
+/// `alters_data` on a callable.
+enum FlagSource<'a, 'py> {
+    /// The `__dict__` of a Python function, or of a bound method's function.
+    /// Neither type defines the flags and a bound method forwards other
+    /// lookups to its function, so `getattr` can only find them here.
+    /// Reading the dictionary avoids raising two `AttributeError`s per call.
+    FunctionDict(Bound<'py, PyDict>),
+    /// Any other callable, whose flags need a full attribute lookup.
+    Object(&'a Bound<'py, PyAny>),
+}
+
+impl<'a, 'py> FlagSource<'a, 'py> {
+    fn new(variable: &'a Bound<'py, PyAny>) -> PyResult<Self> {
+        let py = variable.py();
+        let function = if variable
+            .get_type()
+            .is(METHOD_TYPE.import(py, "types", "MethodType")?)
+        {
+            variable.getattr(intern!(py, "__func__"))?
+        } else {
+            variable.clone()
+        };
+        if !function.is_exact_instance_of::<PyFunction>() {
+            return Ok(Self::Object(variable));
+        }
+        Ok(
+            match function
+                .getattr(intern!(py, "__dict__"))?
+                .cast_into_exact::<PyDict>()
+            {
+                Ok(attributes) => Self::FunctionDict(attributes),
+                Err(_) => Self::Object(variable),
+            },
+        )
+    }
+
+    fn is_set(&self, flag: &Bound<'py, PyString>) -> PyResult<bool> {
+        let value = match self {
+            Self::FunctionDict(attributes) => attributes.get_item(flag)?,
+            Self::Object(variable) => variable.getattr_opt(flag)?,
+        };
+        value.map_or(Ok(false), |value| value.is_truthy())
     }
 }
 
@@ -48,10 +87,11 @@ fn resolve_callable<'py>(
         return Ok(Some(variable));
     }
     let py = variable.py();
-    if has_truthy_attr(&variable, intern!(py, "do_not_call_in_templates"))? {
+    let flags = FlagSource::new(&variable)?;
+    if flags.is_set(intern!(py, "do_not_call_in_templates"))? {
         return Ok(Some(variable));
     }
-    if has_truthy_attr(&variable, intern!(py, "alters_data"))? {
+    if flags.is_set(intern!(py, "alters_data"))? {
         return Ok(None);
     }
     match context.call_variable(py, &variable) {

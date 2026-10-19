@@ -1,3 +1,7 @@
+import functools
+import types
+
+import pytest
 from inline_snapshot import snapshot
 
 
@@ -209,3 +213,98 @@ def test_do_not_call_and_alters_data(assert_render):
     context = {"foo": both}
     assert_render(template=template, context=context, expected="0")
     assert both.data == 0
+
+
+class AttributeDict(dict):
+    pass
+
+
+class CallableTarget:
+    def __init__(self, record):
+        self.record = record
+
+    def __call__(self, *args):
+        return self.record()
+
+
+def callable_value(kind, record):
+    """Return a context value whose "method" is a callable of the given kind,
+    and the object that carries that callable's template flags."""
+
+    def function(*args):
+        return record()
+
+    if kind == "function":
+        return {"method": function}, function
+    if kind == "method":
+        owner = type("Owner", (), {"method": function})()
+        return owner, function
+    if kind == "classmethod":
+        owner = type("Owner", (), {"method": classmethod(function)})()
+        return owner, function
+    if kind == "function with dict subclass":
+        function.__dict__ = AttributeDict()
+        return {"method": function}, function
+    if kind == "method of callable object":
+        target = CallableTarget(record)
+        return {"method": types.MethodType(target, object())}, target
+    if kind == "callable object":
+        target = CallableTarget(record)
+        return {"method": target}, target
+    if kind == "partial":
+        target = functools.partial(function)
+        return {"method": target}, target
+    raise ValueError(kind)
+
+
+CALLABLE_KINDS = [
+    "function",
+    "method",
+    "classmethod",
+    "function with dict subclass",
+    "method of callable object",
+    "callable object",
+    "partial",
+]
+
+
+@pytest.mark.parametrize("kind", CALLABLE_KINDS)
+@pytest.mark.parametrize(
+    ("flags", "source", "expected", "calls"),
+    [
+        ({}, "{{ value.method }}", "called", 1),
+        ({"alters_data": True}, "{{ value.method }}", "", 0),
+        ({"alters_data": 0}, "{{ value.method }}", "called", 1),
+        ({"do_not_call_in_templates": ""}, "{{ value.method }}", "called", 1),
+        ({"do_not_call_in_templates": True}, "{{ value.method.label }}", "kept", 0),
+        (
+            {"do_not_call_in_templates": True, "alters_data": True},
+            "{{ value.method.label }}",
+            "kept",
+            0,
+        ),
+    ],
+)
+def test_callable_template_flags(template_engine, kind, flags, source, expected, calls):
+    record = []
+    value, target = callable_value(kind, lambda: record.append(1) or "called")
+    target.label = "kept"
+    for name, flag in flags.items():
+        setattr(target, name, flag)
+    template = template_engine.from_string(source)
+    assert template.render({"value": value}) == expected
+    assert len(record) == calls
+
+
+class BrokenFlag:
+    def __bool__(self):
+        raise ZeroDivisionError
+
+
+@pytest.mark.parametrize("kind", CALLABLE_KINDS)
+def test_callable_template_flag_errors(template_engine, kind):
+    value, target = callable_value(kind, lambda: "called")
+    target.alters_data = BrokenFlag()
+    template = template_engine.from_string("{{ value.method }}")
+    with pytest.raises(ZeroDivisionError):
+        template.render({"value": value})
