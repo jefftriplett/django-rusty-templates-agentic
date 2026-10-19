@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% load i18n %}
+{% block title %}{{ category.name }} &ndash; {{ block.super }}{% endblock %}
+{% block content %}
+<h1>{{ category.name|title }}</h1>
+<p>{{ category.description|truncatewords:20 }}</p>
+{% for post in posts %}{% include "post_card.html" %}{% empty %}<p>{% translate "No posts." %}</p>{% endfor %}
+<div class="pager">{% blocktranslate with n=page.number total=page.num_pages %}Page {{ n }} of {{ total }}{% endblocktranslate %}
+{% if page.has_next %}<a href="?page={{ page.next_page_number }}">next</a>{% endif %}</div>
+<table class="stats">
+{% for row in stats %}<tr><td>{{ row.label }}</td><td>{{ row.count }}</td><td>{{ row.total|floatformat:2 }}</td><td>{{ row.updated|date:"Y-m-d H:i" }}</td></tr>
+{% endfor %}</table>
+{% endblock %}

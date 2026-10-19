@@ -1,0 +1,17 @@
+{% load i18n static %}<!doctype html>
+<html lang="{{ LANGUAGE_CODE }}">
+<head>
+<meta charset="utf-8">
+<title>{% block title %}{% translate "My Site" %}{% endblock %}</title>
+<link rel="stylesheet" href="{% static 'css/site.css' %}">
+</head>
+<body>
+<nav>
+{% for link in nav %}<a href="{{ link.href }}"{% if link.href == request.path %} class="active"{% endif %}>{{ link.label }}</a>{% endfor %}
+{% if user.is_authenticated %}<span>{% blocktranslate with name=user.get_full_name|default:user.username %}Hi {{ name }}{% endblocktranslate %}</span>{% else %}<a href="/login/">{% translate "Log in" %}</a>{% endif %}
+</nav>
+{% if messages %}<ul class="messages">{% for message in messages %}<li class="{{ message.tags }}">{{ message }}</li>{% endfor %}</ul>{% endif %}
+<main>{% block content %}{% endblock %}</main>
+<footer>&copy; {% now "Y" %} {{ site_name }} &middot; {% translate "All rights reserved." %}</footer>
+</body>
+</html>
