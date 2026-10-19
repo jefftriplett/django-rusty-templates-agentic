@@ -771,11 +771,14 @@ impl FloatNumberFormat {
 
     /// `django.utils.numberformat.format()` for a number already rounded to
     /// its decimal places.
-    fn format(&self, negative: bool, integer: &str, fraction: &str) -> String {
+    fn format(&self, number: &Rounded) -> String {
+        let Rounded {
+            sign,
+            integer,
+            fraction,
+        } = number;
         let mut output = String::with_capacity(integer.len() * 2 + fraction.len() + 2);
-        if negative {
-            output.push('-');
-        }
+        output.push_str(sign.prefix());
         if self.grouping.is_empty() {
             output.push_str(integer);
         } else {
@@ -807,10 +810,32 @@ impl FloatNumberFormat {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sign {
+    Plus,
+    Minus,
+}
+
+impl Sign {
+    const fn prefix(self) -> &'static str {
+        match self {
+            Self::Plus => "",
+            Self::Minus => "-",
+        }
+    }
+}
+
+/// A number rounded to its decimal places, ready to localize.
+struct Rounded {
+    sign: Sign,
+    integer: String,
+    fraction: String,
+}
+
 /// A finite decimal number, `digits × 10^exponent`, as `Decimal(str(value))`
 /// sees an `int`, `float` or `Decimal`.
 struct DecimalNumber {
-    negative: bool,
+    sign: Sign,
     digits: Vec<u8>,
     exponent: i64,
 }
@@ -818,9 +843,9 @@ struct DecimalNumber {
 impl DecimalNumber {
     /// Parses Python's `str()` of a number. Infinities and NaNs return `None`.
     fn parse(text: &str) -> Option<Self> {
-        let (negative, text) = match text.strip_prefix('-') {
-            Some(text) => (true, text),
-            None => (false, text),
+        let (sign, text) = match text.strip_prefix('-') {
+            Some(text) => (Sign::Minus, text),
+            None => (Sign::Plus, text),
         };
         let (mantissa, exponent) = match text.split_once(['e', 'E']) {
             Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
@@ -836,15 +861,15 @@ impl DecimalNumber {
             return None;
         }
         Some(Self {
-            negative,
+            sign,
             digits,
             exponent: exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?,
         })
     }
 
     /// Rounds half up to `places` decimal places, like `Decimal.quantize()`
-    /// with `ROUND_HALF_UP`. Returns the sign, integer and fractional digits.
-    fn round(&self, places: usize) -> Option<(bool, String, String)> {
+    /// with `ROUND_HALF_UP`, which rounds the magnitude half away from zero.
+    fn round(&self, places: usize) -> Option<Rounded> {
         let shift = self.exponent.checked_add(i64::try_from(places).ok()?)?;
         let mut digits = self.digits.clone();
         if let Ok(zeros) = usize::try_from(shift) {
@@ -867,7 +892,12 @@ impl DecimalNumber {
                 }
             }
         }
-        let negative = self.negative && digits.iter().any(|&digit| digit != 0);
+        // Like Django, a number that rounds to zero loses its sign: -0.01 is "0.0".
+        let sign = if digits.iter().all(|&digit| digit == 0) {
+            Sign::Plus
+        } else {
+            self.sign
+        };
         let leading_zeros = digits.iter().take_while(|&&digit| digit == 0).count();
         let digits = &digits[leading_zeros..];
         let split = digits.len().saturating_sub(places);
@@ -882,7 +912,11 @@ impl DecimalNumber {
             _ => to_text(&digits[..split]),
         };
         let fraction = format!("{:0>places$}", to_text(&digits[split..]));
-        Some((negative, integer, fraction))
+        Some(Rounded {
+            sign,
+            integer,
+            fraction,
+        })
     }
 }
 
@@ -936,7 +970,7 @@ fn floatformat(
         .take(fraction_digits)
         .all(|&digit| digit == 0);
     let places = if whole && precision <= 0 { 0 } else { places };
-    let Some((negative, integer, fraction)) = number.round(places) else {
+    let Some(rounded) = number.round(places) else {
         return Ok(None);
     };
     let Some(Some(format)) = context
@@ -945,7 +979,7 @@ fn floatformat(
     else {
         return Ok(None);
     };
-    Ok(Some(format.format(negative, &integer, &fraction)))
+    Ok(Some(format.format(&rounded)))
 }
 
 impl ResolveFilter for FloatFormatFilter {
