@@ -5,9 +5,10 @@ https://github.com/django/django/blob/5.1/tests/template_tests/filter_tests/test
 
 from inline_snapshot import snapshot
 
-from datetime import datetime, time
+from datetime import datetime, time, timezone as dt_timezone
 
 import pytest
+from django.test import override_settings
 from django.utils import timezone, translation
 
 
@@ -204,3 +205,156 @@ def test_date_error_propagation(assert_render_error):
    ╰────
 """),
     )
+
+
+AWARE_UTC = datetime(2026, 10, 17, 3, 30, tzinfo=dt_timezone.utc)
+AWARE_PLUS_0530 = datetime(2026, 10, 17, 3, 30, tzinfo=timezone.get_fixed_timezone(330))
+NAIVE = datetime(2026, 10, 17, 3, 30)
+CHICAGO = {"USE_TZ": True, "TIME_ZONE": "America/Chicago"}
+KOLKATA = {"USE_TZ": True, "TIME_ZONE": "Asia/Kolkata"}
+NO_TZ = {"USE_TZ": False, "TIME_ZONE": "America/Chicago"}
+
+
+@pytest.mark.parametrize(
+    "tz_settings,template,value,expected",
+    [
+        pytest.param(
+            CHICAGO,
+            '{{ d|date:"Y-m-d H:i T" }}',
+            AWARE_UTC,
+            "2026-10-16 22:30 CDT",
+            id="aware_utc_to_chicago",
+        ),
+        pytest.param(
+            CHICAGO,
+            '{{ d|date:"Y-m-d H:i O" }}',
+            AWARE_PLUS_0530,
+            "2026-10-16 17:00 -0500",
+            id="aware_offset_to_chicago",
+        ),
+        pytest.param(
+            KOLKATA,
+            '{{ d|date:"Y-m-d H:i" }}',
+            AWARE_UTC,
+            "2026-10-17 09:00",
+            id="aware_utc_to_kolkata",
+        ),
+        pytest.param(
+            CHICAGO,
+            '{{ d|date:"Y-m-d H:i" }}',
+            NAIVE,
+            "2026-10-17 03:30",
+            id="naive_unchanged",
+        ),
+        pytest.param(
+            NO_TZ,
+            '{{ d|date:"Y-m-d H:i e" }}',
+            AWARE_UTC,
+            "2026-10-17 03:30 UTC",
+            id="use_tz_false_unchanged",
+        ),
+        pytest.param(
+            CHICAGO,
+            '{% load tz %}{% localtime off %}{{ d|date:"Y-m-d H:i" }}{% endlocaltime %}',
+            AWARE_UTC,
+            "2026-10-17 03:30",
+            id="localtime_off_unchanged",
+        ),
+        pytest.param(
+            CHICAGO,
+            '{% load tz %}{% timezone "Asia/Kolkata" %}{{ d|date:"Y-m-d H:i" }}'
+            "{% endtimezone %}",
+            AWARE_UTC,
+            "2026-10-17 09:00",
+            id="timezone_tag",
+        ),
+        pytest.param(
+            CHICAGO, "{{ d|date }}", AWARE_UTC, "Oct. 16, 2026", id="default_format"
+        ),
+        pytest.param(
+            CHICAGO,
+            '{{ d|date:"SHORT_DATE_FORMAT" }}',
+            AWARE_UTC,
+            "10/16/2026",
+            id="short_date_format_aware",
+        ),
+        pytest.param(
+            CHICAGO,
+            '{{ d|date:"DATETIME_FORMAT" }}',
+            AWARE_UTC,
+            "Oct. 16, 2026, 10:30 p.m.",
+            id="datetime_format_aware",
+        ),
+        pytest.param(
+            CHICAGO,
+            '{{ d|date:"SHORT_DATETIME_FORMAT" }}',
+            NAIVE,
+            "10/17/2026 3:30 a.m.",
+            id="short_datetime_format_naive",
+        ),
+        pytest.param(
+            NO_TZ,
+            '{{ d|date:"SHORT_DATE_FORMAT" }}',
+            NAIVE.date(),
+            "10/17/2026",
+            id="short_date_format_date",
+        ),
+    ],
+)
+def test_date_localtime_and_format_names(
+    assert_render, tz_settings, template, value, expected
+):
+    with override_settings(**tz_settings):
+        assert_render(template, {"d": value}, expected)
+
+
+@pytest.mark.parametrize(
+    "tz_settings,template,value,expected",
+    [
+        pytest.param(
+            CHICAGO, '{{ d|time:"H:i" }}', AWARE_UTC, "22:30", id="aware_utc_to_chicago"
+        ),
+        pytest.param(
+            KOLKATA, '{{ d|time:"H:i" }}', AWARE_UTC, "09:00", id="aware_utc_to_kolkata"
+        ),
+        pytest.param(
+            CHICAGO, '{{ d|time:"H:i" }}', NAIVE, "03:30", id="naive_unchanged"
+        ),
+        pytest.param(
+            CHICAGO, '{{ d|time:"H:i" }}', NAIVE.time(), "03:30", id="time_unchanged"
+        ),
+        pytest.param(
+            NO_TZ, '{{ d|time:"H:i" }}', AWARE_UTC, "03:30", id="use_tz_false_unchanged"
+        ),
+        pytest.param(
+            CHICAGO,
+            '{% load tz %}{% localtime off %}{{ d|time:"H:i" }}{% endlocaltime %}',
+            AWARE_UTC,
+            "03:30",
+            id="localtime_off_unchanged",
+        ),
+        pytest.param(
+            CHICAGO,
+            '{% load tz %}{% timezone "Asia/Kolkata" %}{{ d|time:"H:i" }}'
+            "{% endtimezone %}",
+            AWARE_UTC,
+            "09:00",
+            id="timezone_tag",
+        ),
+        pytest.param(
+            CHICAGO, "{{ d|time }}", AWARE_UTC, "10:30 p.m.", id="default_format"
+        ),
+        pytest.param(
+            CHICAGO,
+            '{{ d|time:"TIME_FORMAT" }}',
+            AWARE_UTC,
+            "10:30 p.m.",
+            id="time_format_aware",
+        ),
+    ],
+)
+def test_time_localtime_and_format_names(
+    assert_render, tz_settings, template, value, expected
+):
+    with override_settings(**tz_settings):
+        assert_render(template, {"d": value}, expected)

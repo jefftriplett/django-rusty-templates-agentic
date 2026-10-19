@@ -2,7 +2,7 @@ from django import VERSION
 from django.template import TemplateSyntaxError
 import pytest
 import time_machine
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 from django.utils import timezone
 from django.utils.formats import date_format
 from django.utils.dateformat import format as django_format
@@ -210,6 +210,60 @@ def test_now_timezone_aware(assert_render):
 def test_now_timezone_naive(assert_render):
     expected = FIXED_TIME.strftime("%H")
     assert_render(template="{% now 'H' %}", context={}, expected=expected)
+
+
+@pytest.mark.parametrize(
+    "tz_settings,template,expected",
+    [
+        pytest.param(
+            {"USE_TZ": True, "TIME_ZONE": "America/Chicago"},
+            '{% now "Y-m-d H:i O T" %}',
+            "2026-10-16 22:30 -0500 CDT",
+            id="chicago",
+        ),
+        pytest.param(
+            {"USE_TZ": True, "TIME_ZONE": "Asia/Kolkata"},
+            '{% now "Y-m-d H:i O" %}',
+            "2026-10-17 09:00 +0530",
+            id="kolkata",
+        ),
+        pytest.param(
+            {"USE_TZ": True, "TIME_ZONE": "America/Chicago"},
+            '{% now "SHORT_DATETIME_FORMAT" %}',
+            "10/16/2026 10:30 p.m.",
+            id="format_name",
+        ),
+        pytest.param(
+            {"USE_TZ": True, "TIME_ZONE": "America/Chicago"},
+            '{% now "O" as offset %}[{{ offset }}]',
+            "[-0500]",
+            id="asvar",
+        ),
+        pytest.param(
+            {"USE_TZ": True, "TIME_ZONE": "America/Chicago"},
+            '{% load tz %}{% timezone "Asia/Kolkata" %}{% now "H:i" %}'
+            "{% endtimezone %}",
+            "09:00",
+            id="timezone_tag",
+        ),
+        pytest.param(
+            {"USE_TZ": True, "TIME_ZONE": "America/Chicago"},
+            '{% load tz %}{% localtime off %}{% now "H:i" %}{% endlocaltime %}',
+            "22:30",
+            id="localtime_off_ignored",
+        ),
+        pytest.param(
+            {"USE_TZ": False, "TIME_ZONE": "America/Chicago"},
+            '{% now "Y-m-d H:i" %}',
+            "2026-10-16 22:30",
+            id="use_tz_false",
+        ),
+    ],
+)
+@time_machine.travel(datetime(2026, 10, 17, 3, 30, tzinfo=dt_timezone.utc), tick=False)
+def test_now_uses_current_timezone(assert_render, tz_settings, template, expected):
+    with override_settings(**tz_settings):
+        assert_render(template, {}, expected)
 
 
 @time_machine.travel(FIXED_TIME)
