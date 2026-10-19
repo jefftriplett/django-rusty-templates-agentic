@@ -17,6 +17,7 @@ use crate::filters::{
 use crate::parse::Filter;
 use crate::render::common::gettext;
 use crate::render::dateformat::{Formatted, Formatter, template_localtime};
+use crate::render::l10n::Grouping;
 use crate::render::types::{AsBorrowedContent, Content, ContentString, Context, IntoOwnedContent};
 use crate::render::{Resolve, ResolveFailures, ResolveResult};
 use dtl_lexer::types::TemplateString;
@@ -723,9 +724,7 @@ fn integer_argument(argument: &Content<'_, '_>) -> Option<i64> {
 pub struct FloatNumberFormat {
     decimal_separator: String,
     thousand_separator: String,
-    /// Django's digit group sizes, read from the right; empty when
-    /// `USE_THOUSAND_SEPARATOR` is off or `NUMBER_GROUPING` is `0`.
-    grouping: Vec<i64>,
+    grouping: Grouping,
 }
 
 impl FloatNumberFormat {
@@ -747,16 +746,16 @@ impl FloatNumberFormat {
             .is_truthy()?
             && grouping.ne(0)?;
         let grouping = if !use_grouping {
-            Vec::new()
+            Grouping::Off
         } else if grouping.is_exact_instance_of::<PyInt>() {
             match grouping.extract() {
-                Ok(size) => vec![size, 0],
+                Ok(size) => Grouping::Sizes(vec![size]),
                 Err(_) => return Ok(None),
             }
         } else if grouping.is_instance_of::<PyList>() || grouping.is_instance_of::<PyTuple>() {
             // An empty sequence makes Django raise IndexError.
             match grouping.extract::<Vec<i64>>() {
-                Ok(sizes) if !sizes.is_empty() => sizes,
+                Ok(sizes) if !sizes.is_empty() => Grouping::Sizes(sizes),
                 _ => return Ok(None),
             }
         } else {
@@ -779,29 +778,8 @@ impl FloatNumberFormat {
         } = number;
         let mut output = String::with_capacity(integer.len() * 2 + fraction.len() + 2);
         output.push_str(sign.prefix());
-        if self.grouping.is_empty() {
-            output.push_str(integer);
-        } else {
-            // Port of Django's loop, which builds the grouped digits reversed.
-            let mut sizes = self.grouping.iter().copied();
-            let mut size = sizes.next().unwrap_or_default();
-            let mut count = 0;
-            let mut reversed = String::with_capacity(integer.len() * 2);
-            for digit in integer.chars().rev() {
-                if count != 0 && count == size {
-                    if let Some(next) = sizes.next()
-                        && next != 0
-                    {
-                        size = next;
-                    }
-                    reversed.extend(self.thousand_separator.chars().rev());
-                    count = 0;
-                }
-                reversed.push(digit);
-                count += 1;
-            }
-            output.extend(reversed.chars().rev());
-        }
+        self.grouping
+            .push_digits(integer, &self.thousand_separator, &mut output);
         if !fraction.is_empty() {
             output.push_str(&self.decimal_separator);
             output.push_str(fraction);
@@ -947,7 +925,7 @@ fn floatformat(
                 Err(_) => return Ok(None),
             }
         }
-        _ => return Ok(None),
+        Content::Py(_) | Content::String(_) | Content::Bool(_) => return Ok(None),
     };
     let Some(number) = DecimalNumber::parse(&text) else {
         return Ok(None);
