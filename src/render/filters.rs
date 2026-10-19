@@ -78,30 +78,30 @@ impl ResolveFilter for FilterType {
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
         match self {
-            FilterType::Add(filter) => filter.resolve(variable, py, template, context),
-            FilterType::AddSlashes(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Capfirst(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Center(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Cut(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Default(filter) => filter.resolve(variable, py, template, context),
-            FilterType::DefaultIfNone(filter) => filter.resolve(variable, py, template, context),
-            FilterType::DivisibleBy(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Date(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Django(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Escape(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Escapejs(filter) => filter.resolve(variable, py, template, context),
-            FilterType::External(filter) => filter.resolve(variable, py, template, context),
-            FilterType::ForceEscape(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Last(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Lower(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Length(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Safe(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Slugify(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Title(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Upper(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Wordcount(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Wordwrap(filter) => filter.resolve(variable, py, template, context),
-            FilterType::Yesno(filter) => filter.resolve(variable, py, template, context),
+            Self::Add(filter) => filter.resolve(variable, py, template, context),
+            Self::AddSlashes(filter) => filter.resolve(variable, py, template, context),
+            Self::Capfirst(filter) => filter.resolve(variable, py, template, context),
+            Self::Center(filter) => filter.resolve(variable, py, template, context),
+            Self::Cut(filter) => filter.resolve(variable, py, template, context),
+            Self::Default(filter) => filter.resolve(variable, py, template, context),
+            Self::DefaultIfNone(filter) => filter.resolve(variable, py, template, context),
+            Self::DivisibleBy(filter) => filter.resolve(variable, py, template, context),
+            Self::Date(filter) => filter.resolve(variable, py, template, context),
+            Self::Django(filter) => filter.resolve(variable, py, template, context),
+            Self::Escape(filter) => filter.resolve(variable, py, template, context),
+            Self::Escapejs(filter) => filter.resolve(variable, py, template, context),
+            Self::External(filter) => filter.resolve(variable, py, template, context),
+            Self::ForceEscape(filter) => filter.resolve(variable, py, template, context),
+            Self::Last(filter) => filter.resolve(variable, py, template, context),
+            Self::Lower(filter) => filter.resolve(variable, py, template, context),
+            Self::Length(filter) => filter.resolve(variable, py, template, context),
+            Self::Safe(filter) => filter.resolve(variable, py, template, context),
+            Self::Slugify(filter) => filter.resolve(variable, py, template, context),
+            Self::Title(filter) => filter.resolve(variable, py, template, context),
+            Self::Upper(filter) => filter.resolve(variable, py, template, context),
+            Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
+            Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
+            Self::Yesno(filter) => filter.resolve(variable, py, template, context),
         }
     }
 }
@@ -384,15 +384,12 @@ impl ResolveFilter for DivisibleByFilter {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
-        let variable = match variable {
-            Some(v) => v,
-            None => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "invalid literal for int() with base 10: 'None'",
-                )
-                .annotate(py, self.at, "here", template)
-                .into());
-            }
+        let Some(variable) = variable else {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "invalid literal for int() with base 10: 'None'",
+            )
+            .annotate(py, self.at, "here", template)
+            .into());
         };
 
         if let Content::Py(ref obj) = variable
@@ -428,7 +425,7 @@ impl ResolveFilter for DivisibleByFilter {
 
         let Some(left_val) = variable.to_bigint() else {
             let value_str = variable.render(context)?;
-            let msg = format!("invalid literal for int() with base 10: '{}'", value_str);
+            let msg = format!("invalid literal for int() with base 10: '{value_str}'");
 
             return Err(pyo3::exceptions::PyValueError::new_err(msg)
                 .annotate(py, self.at, "here", template)
@@ -616,9 +613,8 @@ impl ResolveFilter for LastFilter {
         template: TemplateString<'t>,
         _context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
-        let content = match variable {
-            Some(content) => content,
-            None => return Ok(Some("".as_content())),
+        let Some(content) = variable else {
+            return Ok(Some("".as_content()));
         };
 
         let obj = content.to_py(py);
@@ -702,16 +698,17 @@ impl ResolveFilter for SafeFilter {
 }
 
 /// Convert spaces or repeated dashes to single dashes.
+///
 /// Remove characters that aren't ascii alphanumerics, underscores, or hyphens.
 /// Convert to lowercase. Also strip leading and trailing whitespace, dashes, and underscores.
 ///
-/// See https://github.com/django/django/blob/stable/5.2.x/django/utils/text.py#L453
+/// See <https://github.com/django/django/blob/stable/5.2.x/django/utils/text.py#L453>
 pub fn slugify(content: Cow<str>) -> Cow<str> {
     let mut slug = String::with_capacity(content.len());
 
     // treat start as if preceded by dash to strip leading dashes
     let mut prev_dash = true;
-    for c in content.as_ref().nfkd().filter(|c| c.is_ascii()) {
+    for c in content.as_ref().nfkd().filter(char::is_ascii) {
         if c.is_ascii_alphanumeric() || c == '_' {
             slug.push(c.to_ascii_lowercase());
             prev_dash = false;

@@ -92,7 +92,7 @@ impl Resolve for Url {
             for arg in &self.args {
                 py_args.append(
                     arg.resolve(py, template, context, failures)?
-                        .unwrap_or("".as_content()),
+                        .unwrap_or_else(|| "".as_content()),
                 )?;
             }
             reverse.call1((
@@ -174,12 +174,12 @@ impl PyCmp<Content<'_, '_>> for Content<'_, '_> {
             (Self::Bool(obj), Content::Py(other)) => other.eq(obj).unwrap_or(false),
             (Self::Float(obj), Content::Float(other)) => obj == other,
             (Self::Int(obj), Content::Int(other)) => obj == other,
-            (Self::Int(obj), Content::Bool(other)) => u8::try_from(obj)
-                .map(|o| o == u8::from(*other))
-                .unwrap_or(false),
-            (Self::Bool(obj), Content::Int(other)) => u8::try_from(other)
-                .map(|o| o == u8::from(*obj))
-                .unwrap_or(false),
+            (Self::Int(obj), Content::Bool(other)) => {
+                u8::try_from(obj).is_ok_and(|o| o == u8::from(*other))
+            }
+            (Self::Bool(obj), Content::Int(other)) => {
+                u8::try_from(other).is_ok_and(|o| o == u8::from(*obj))
+            }
             (Self::Float(obj), Content::Int(other)) => {
                 match other.to_f64().expect("BigInt to f64 is always possible") {
                     f64::INFINITY | f64::NEG_INFINITY => false,
@@ -221,15 +221,11 @@ impl PyCmp<Content<'_, '_>> for Content<'_, '_> {
             (Self::Int(obj), Content::Int(other)) => obj < other,
             (Self::Int(obj), Content::Bool(other)) => match obj.sign() {
                 Sign::Minus => true,
-                _ => u8::try_from(obj)
-                    .map(|o| o < u8::from(*other))
-                    .unwrap_or(false),
+                _ => u8::try_from(obj).is_ok_and(|o| o < u8::from(*other)),
             },
             (Self::Bool(obj), Content::Int(other)) => match other.sign() {
                 Sign::Minus => false,
-                _ => u8::try_from(other)
-                    .map(|o| o > u8::from(*obj))
-                    .unwrap_or(true),
+                _ => u8::try_from(other).map_or(true, |o| o > u8::from(*obj)),
             },
             (Self::Float(obj), Content::Int(other)) => {
                 match other.to_f64().expect("BigInt to f64 is always possible") {
@@ -274,15 +270,11 @@ impl PyCmp<Content<'_, '_>> for Content<'_, '_> {
             (Self::Int(obj), Content::Int(other)) => obj > other,
             (Self::Int(obj), Content::Bool(other)) => match obj.sign() {
                 Sign::Minus => false,
-                _ => u8::try_from(obj)
-                    .map(|o| o > u8::from(*other))
-                    .unwrap_or(true),
+                _ => u8::try_from(obj).map_or(true, |o| o > u8::from(*other)),
             },
             (Self::Bool(obj), Content::Int(other)) => match other.sign() {
                 Sign::Minus => true,
-                _ => u8::try_from(other)
-                    .map(|o| o < u8::from(*obj))
-                    .unwrap_or(false),
+                _ => u8::try_from(other).is_ok_and(|o| o < u8::from(*obj)),
             },
             (Self::Float(obj), Content::Int(other)) => {
                 match other.to_f64().expect("BigInt to f64 is always possible") {
@@ -327,15 +319,11 @@ impl PyCmp<Content<'_, '_>> for Content<'_, '_> {
             (Self::Int(obj), Content::Int(other)) => obj <= other,
             (Self::Int(obj), Content::Bool(other)) => match obj.sign() {
                 Sign::Minus => true,
-                _ => u8::try_from(obj)
-                    .map(|o| o <= u8::from(*other))
-                    .unwrap_or(false),
+                _ => u8::try_from(obj).is_ok_and(|o| o <= u8::from(*other)),
             },
             (Self::Bool(obj), Content::Int(other)) => match other.sign() {
                 Sign::Minus => false,
-                _ => u8::try_from(other)
-                    .map(|o| o >= u8::from(*obj))
-                    .unwrap_or(true),
+                _ => u8::try_from(other).map_or(true, |o| o >= u8::from(*obj)),
             },
             (Self::Float(obj), Content::Int(other)) => {
                 match other.to_f64().expect("BigInt to f64 is always possible") {
@@ -380,15 +368,11 @@ impl PyCmp<Content<'_, '_>> for Content<'_, '_> {
             (Self::Int(obj), Content::Int(other)) => obj >= other,
             (Self::Int(obj), Content::Bool(other)) => match obj.sign() {
                 Sign::Minus => false,
-                _ => u8::try_from(obj)
-                    .map(|o| o >= u8::from(*other))
-                    .unwrap_or(true),
+                _ => u8::try_from(obj).map_or(true, |o| o >= u8::from(*other)),
             },
             (Self::Bool(obj), Content::Int(other)) => match other.sign() {
                 Sign::Minus => true,
-                _ => u8::try_from(other)
-                    .map(|o| o <= u8::from(*obj))
-                    .unwrap_or(false),
+                _ => u8::try_from(other).is_ok_and(|o| o <= u8::from(*obj)),
             },
             (Self::Float(obj), Content::Int(other)) => {
                 match other.to_f64().expect("BigInt to f64 is always possible") {
@@ -852,6 +836,7 @@ impl Render for Tag {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "one match arm per builtin tag")]
     fn render<'t>(
         &self,
         py: Python<'_>,
@@ -1628,11 +1613,11 @@ impl Render for Include {
     }
 }
 
-fn call_tag<'t, 'py>(
+fn call_tag<'py>(
     py: Python<'py>,
     func: &Gc<Py<PyAny>>,
     at: At,
-    template: TemplateString<'t>,
+    template: TemplateString<'_>,
     args: VecDeque<Bound<'py, PyAny>>,
     kwargs: Option<Bound<'py, PyDict>>,
 ) -> Result<Bound<'py, PyAny>, PyRenderError> {
@@ -2105,27 +2090,28 @@ impl Render for Lorem {
         let text = match self.method {
             LoremMethod::Words => {
                 let final_count = match (val, self.common) {
-                    (val, true) if val < 0 => (COMMON_WORDS.len() as i64 + val).max(0) as usize,
+                    // A negative count drops that many words from the common words.
+                    (val, true) if val < 0 => usize::try_from(val.unsigned_abs())
+                        .map_or(0, |drop| COMMON_WORDS.len().saturating_sub(drop)),
                     (val, false) if val < 0 => 0,
-                    (val, _) => val as usize,
+                    (val, _) => usize::try_from(val).unwrap_or(usize::MAX),
                 };
                 words(final_count, self.common)
             }
             LoremMethod::Paragraphs | LoremMethod::Blocks => {
                 if val <= 0 {
                     return Ok(Cow::Borrowed(""));
+                }
+                let count = usize::try_from(val).unwrap_or(usize::MAX);
+                let paras = paragraphs(count, self.common);
+                if matches!(self.method, LoremMethod::Paragraphs) {
+                    paras
+                        .into_iter()
+                        .map(|p| format!("<p>{p}</p>"))
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
                 } else {
-                    let count = val as usize;
-                    let paras = paragraphs(count, self.common);
-                    if matches!(self.method, LoremMethod::Paragraphs) {
-                        paras
-                            .into_iter()
-                            .map(|p| format!("<p>{}</p>", p))
-                            .collect::<Vec<_>>()
-                            .join("\n\n")
-                    } else {
-                        paras.join("\n\n")
-                    }
+                    paras.join("\n\n")
                 }
             }
         };
@@ -2153,7 +2139,7 @@ impl Render for FirstOf {
                     let rendered = RENDER_FIRSTOF_VALUE
                         .import(py, "django.template.base", "render_value_in_context")?
                         .call1((content.to_py(py), context.django_context(py)?))?;
-                    context.insert(asvar.to_string(), rendered)?;
+                    context.insert(asvar.clone(), rendered)?;
                     return Ok(Cow::Borrowed(""));
                 }
 
@@ -2162,7 +2148,7 @@ impl Render for FirstOf {
             }
         }
         if let Some(asvar) = &self.asvar {
-            context.insert(asvar.to_string(), PyString::new(py, "").into_any())?;
+            context.insert(asvar.clone(), PyString::new(py, "").into_any())?;
         }
         Ok(Cow::Borrowed(""))
     }

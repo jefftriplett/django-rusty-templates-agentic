@@ -57,7 +57,7 @@ fn get_app_template_dir(path: Bound<'_, PyAny>, dirname: &str) -> PyResult<Optio
     Ok(None)
 }
 
-pub(crate) fn get_app_template_dirs(py: Python<'_>, dirname: &str) -> Result<Vec<PathBuf>, PyErr> {
+pub fn get_app_template_dirs(py: Python<'_>, dirname: &str) -> Result<Vec<PathBuf>, PyErr> {
     let apps = APPS.import(py, "django.apps", "apps")?;
     let app_configs = apps.call_method0("get_app_configs")?;
 

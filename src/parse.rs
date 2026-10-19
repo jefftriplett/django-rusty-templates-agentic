@@ -96,10 +96,10 @@ pub struct Lorem {
     pub common: bool,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Comment;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct CsrfToken;
 
 impl Parse<Argument> for ArgumentToken {
@@ -190,6 +190,7 @@ pub struct Filter {
 }
 
 impl Filter {
+    #[expect(clippy::too_many_lines, reason = "one match arm per builtin filter")]
     pub fn new(
         parser: &Parser,
         at: At,
@@ -423,9 +424,9 @@ impl Parse<TagElement> for TagElementKwargToken {
 /// Extracts "as variable" from the end of the tokens list (and truncates it).
 ///
 /// This will return:
-/// - Ok(Some(variable_name)) if found and valid
+/// - `Ok(Some(variable_name))` if found and valid
 /// - Ok(None) if "as" not found
-/// - ParseError if as is not at the end or missing a variable
+/// - `ParseError` if as is not at the end or missing a variable
 fn extract_as_variable(
     tokens: &mut Vec<TagElementKwargToken>,
     template: &TemplateString<'_>,
@@ -1548,12 +1549,12 @@ impl<'t, 'py> Parser<'t, 'py> {
         name: &'static str,
         at: At,
     ) -> Result<Gc<Py<PyAny>>, ParseError> {
+        static DEFAULT_FILTERS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
         if let Some(cache) = self.builtin_filters.borrow().as_ref()
             && let Some(filter) = &cache[index]
         {
             return Ok(filter.clone());
         }
-        static DEFAULT_FILTERS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
         let lookup = (|| -> PyResult<_> {
             let library = match self.engine.template_builtins.get(1) {
                 Some(library) => library.bind(self.py),
@@ -1839,7 +1840,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(var)
     }
 
-    fn parse_lorem(&mut self, _at: At, parts: TagParts) -> Result<Lorem, PyParseError> {
+    fn parse_lorem(&self, _at: At, parts: TagParts) -> Result<Lorem, PyParseError> {
         let mut lexer = LoremLexer::new(self.template, parts);
 
         let first = match lexer.next() {
@@ -1899,7 +1900,9 @@ impl<'t, 'py> Parser<'t, 'py> {
                         common: false,
                     });
                 }
-                _ => unreachable!("Count in second position should already have errored"),
+                LoremTokenType::Count(_) => {
+                    unreachable!("Count in second position should already have errored")
+                }
             },
             Some(third) => third.map_err(ParseError::from)?,
         };
@@ -1923,7 +1926,7 @@ impl<'t, 'py> Parser<'t, 'py> {
 
     fn parse_comment(&mut self, at: At, _parts: TagParts) -> Result<Comment, PyParseError> {
         for token in self.lexer.by_ref() {
-            if let TokenType::Tag = token.token_type {
+            if token.token_type == TokenType::Tag {
                 let content = token.content(self.template).trim();
                 if content.split_whitespace().next() == Some("endcomment") {
                     return Ok(Comment);
@@ -1971,14 +1974,14 @@ impl<'t, 'py> Parser<'t, 'py> {
         tokens
     }
 
-    fn parse_now(&mut self, parts: TagParts) -> Result<Now, PyParseError> {
+    fn parse_now(&self, parts: TagParts) -> Result<Now, PyParseError> {
         let version = self.py.import("django")?.getattr("VERSION")?;
         let series = (
             version.get_item(0)?.extract::<u8>()?,
             version.get_item(1)?.extract::<u8>()?,
         );
         if series >= (6, 2) {
-            let mut tokens = self.argument_spans(parts.clone());
+            let mut tokens = self.argument_spans(parts);
             let asvar = if tokens.len() == 3 && self.template.content(tokens[1]) == "as" {
                 let target = tokens.pop();
                 tokens.pop();
@@ -2254,7 +2257,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(TokenTree::Tag(Tag::WidthRatio { args, asvar }))
     }
 
-    fn parse_firstof(&mut self, parts: TagParts) -> Result<TokenTree, PyParseError> {
+    fn parse_firstof(&self, parts: TagParts) -> Result<TokenTree, PyParseError> {
         let mut tokens = TagElementKwargLexer::new(self.template, parts.clone())
             .with_modern_syntax(self.engine.django_series >= (6, 0))
             .collect::<Result<Vec<_>, _>>()
@@ -2370,6 +2373,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(cycle)
     }
 
+    #[expect(clippy::too_many_lines, reason = "one match arm per builtin tag")]
     fn parse_tag(
         &mut self,
         tag: &'t str,
@@ -2994,7 +2998,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                     .setattr("_rusty_compiler_error", true)?;
                 return Err(error);
             }
-            todo!("Fully custom tag")
+            todo!("Fully custom tag");
         }
         self.external_tags
             .insert(name.to_string(), TagContext::Opaque(compiler.clone()));

@@ -12,7 +12,7 @@ use crate::parse::{StockNode, TagElement};
 
 static SERVICES: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 
-fn services<'py>(py: Python<'py>) -> PyResult<&'py Bound<'py, PyModule>> {
+fn services(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     Ok(SERVICES
         .get_or_try_init(py, || {
             py.import("django_rusty_templates.stock").map(Bound::unbind)
@@ -33,6 +33,7 @@ fn value<'py>(
 }
 
 impl Render for StockNode {
+    #[expect(clippy::too_many_lines, reason = "one match arm per stock node")]
     fn render<'t>(
         &self,
         py: Python<'_>,
@@ -188,7 +189,7 @@ impl Render for StockNode {
                         safe,
                     ))?;
                     let mut result = Some(Content::Py(initial));
-                    if !(missing && !context.string_if_invalid.is_empty()) {
+                    if !missing || context.string_if_invalid.is_empty() {
                         for filter in filters {
                             result = filter.resolve(result, py, template, context)?;
                         }
@@ -252,6 +253,10 @@ impl Render for StockNode {
 }
 
 impl StockNode {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "follows Django's BlockTranslateNode.render step by step"
+    )]
     fn render_block_translation<'t>(
         &self,
         py: Python<'_>,
