@@ -4,19 +4,20 @@ use html_escape::encode_quoted_attribute_to_string;
 use num_traits::{ToPrimitive, Zero};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDateTime, PyInt, PyString, PyType};
+use pyo3::types::{PyDateTime, PyFloat, PyInt, PyList, PyString, PyTuple, PyType};
 
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
-    EscapejsFilter, ExternalFilter, FilterType, ForceEscapeFilter, LastFilter, LengthFilter,
-    LowerFilter, SafeFilter, SlugifyFilter, TitleFilter, TruncateCharsFilter, UpperFilter,
-    WordcountFilter, WordwrapFilter, YesnoFilter,
+    EscapejsFilter, ExternalFilter, FilterType, FloatFormatFilter, ForceEscapeFilter, LastFilter,
+    LengthFilter, LowerFilter, SafeFilter, SlugifyFilter, TitleFilter, TruncateCharsFilter,
+    UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
 use crate::render::dateformat::{Formatted, Formatter, template_localtime};
+use crate::render::l10n::Grouping;
 use crate::render::types::{AsBorrowedContent, Content, ContentString, Context, IntoOwnedContent};
 use crate::render::{Resolve, ResolveFailures, ResolveResult};
 use dtl_lexer::types::TemplateString;
@@ -30,6 +31,9 @@ static TIME_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static PGETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static COMBINING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SAFESTRING: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static GET_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
 impl Resolve for Filter {
     fn resolve<'t, 'py>(
@@ -94,6 +98,7 @@ impl ResolveFilter for FilterType {
             Self::Escape(filter) => filter.resolve(variable, py, template, context),
             Self::Escapejs(filter) => filter.resolve(variable, py, template, context),
             Self::External(filter) => filter.resolve(variable, py, template, context),
+            Self::FloatFormat(filter) => filter.resolve(variable, py, template, context),
             Self::ForceEscape(filter) => filter.resolve(variable, py, template, context),
             Self::Last(filter) => filter.resolve(variable, py, template, context),
             Self::Lower(filter) => filter.resolve(variable, py, template, context),
@@ -710,6 +715,273 @@ fn integer_argument(argument: &Content<'_, '_>) -> Option<i64> {
             parse(object.cast::<PyString>().ok()?.to_str().ok()?)
         }
         Content::Py(_) | Content::Float(_) | Content::Bool(_) => None,
+    }
+}
+
+/// The number formatting `django.utils.formats.number_format()` reads for
+/// the active language.
+#[derive(Clone, Debug)]
+pub struct FloatNumberFormat {
+    decimal_separator: String,
+    thousand_separator: String,
+    grouping: Grouping,
+}
+
+impl FloatNumberFormat {
+    /// Returns `None` for settings Django would reject or treat specially,
+    /// leaving those to Django.
+    fn new(py: Python<'_>, language: &Bound<'_, PyString>) -> PyResult<Option<Self>> {
+        let get_format = GET_FORMAT.import(py, "django.utils.formats", "get_format")?;
+        let format = |name| get_format.call1((name, language, true));
+        let (Ok(decimal_separator), Ok(thousand_separator)) = (
+            format("DECIMAL_SEPARATOR")?.extract(),
+            format("THOUSAND_SEPARATOR")?.extract(),
+        ) else {
+            return Ok(None);
+        };
+        let grouping = format("NUMBER_GROUPING")?;
+        let use_grouping = SETTINGS
+            .import(py, "django.conf", "settings")?
+            .getattr("USE_THOUSAND_SEPARATOR")?
+            .is_truthy()?
+            && grouping.ne(0)?;
+        let grouping = if !use_grouping {
+            Grouping::Off
+        } else if grouping.is_exact_instance_of::<PyInt>() {
+            match grouping.extract() {
+                Ok(size) => Grouping::Sizes(vec![size]),
+                Err(_) => return Ok(None),
+            }
+        } else if grouping.is_instance_of::<PyList>() || grouping.is_instance_of::<PyTuple>() {
+            // An empty sequence makes Django raise IndexError.
+            match grouping.extract::<Vec<i64>>() {
+                Ok(sizes) if !sizes.is_empty() => Grouping::Sizes(sizes),
+                _ => return Ok(None),
+            }
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            decimal_separator,
+            thousand_separator,
+            grouping,
+        }))
+    }
+
+    /// `django.utils.numberformat.format()` for a number already rounded to
+    /// its decimal places.
+    fn format(&self, number: &Rounded) -> String {
+        let Rounded {
+            sign,
+            integer,
+            fraction,
+        } = number;
+        let mut output = String::with_capacity(integer.len() * 2 + fraction.len() + 2);
+        output.push_str(sign.prefix());
+        self.grouping
+            .push_digits(integer, &self.thousand_separator, &mut output);
+        if !fraction.is_empty() {
+            output.push_str(&self.decimal_separator);
+            output.push_str(fraction);
+        }
+        output
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sign {
+    Plus,
+    Minus,
+}
+
+impl Sign {
+    const fn prefix(self) -> &'static str {
+        match self {
+            Self::Plus => "",
+            Self::Minus => "-",
+        }
+    }
+}
+
+/// A number rounded to its decimal places, ready to localize.
+struct Rounded {
+    sign: Sign,
+    integer: String,
+    fraction: String,
+}
+
+/// A finite decimal number, `digits × 10^exponent`, as `Decimal(str(value))`
+/// sees an `int`, `float` or `Decimal`.
+struct DecimalNumber {
+    sign: Sign,
+    digits: Vec<u8>,
+    exponent: i64,
+}
+
+impl DecimalNumber {
+    /// Parses Python's `str()` of a number. Infinities and NaNs return `None`.
+    fn parse(text: &str) -> Option<Self> {
+        let (sign, text) = match text.strip_prefix('-') {
+            Some(text) => (Sign::Minus, text),
+            None => (Sign::Plus, text),
+        };
+        let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+            Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+            None => (text, 0),
+        };
+        let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        let digits: Vec<u8> = integer
+            .bytes()
+            .chain(fraction.bytes())
+            .map(|byte| byte.is_ascii_digit().then(|| byte - b'0'))
+            .collect::<Option<_>>()?;
+        if digits.is_empty() {
+            return None;
+        }
+        Some(Self {
+            sign,
+            digits,
+            exponent: exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?,
+        })
+    }
+
+    /// Rounds half up to `places` decimal places, like `Decimal.quantize()`
+    /// with `ROUND_HALF_UP`, which rounds the magnitude half away from zero.
+    fn round(&self, places: usize) -> Option<Rounded> {
+        let shift = self.exponent.checked_add(i64::try_from(places).ok()?)?;
+        let mut digits = self.digits.clone();
+        if let Ok(zeros) = usize::try_from(shift) {
+            digits.resize(digits.len() + zeros, 0);
+        } else {
+            let dropped = usize::try_from(shift.unsigned_abs()).ok()?;
+            let kept = digits.len().saturating_sub(dropped);
+            let round_up = dropped <= digits.len() && digits[kept] >= 5;
+            digits.truncate(kept);
+            if round_up {
+                match digits.iter().rposition(|&digit| digit != 9) {
+                    Some(index) => {
+                        digits[index] += 1;
+                        digits[index + 1..].fill(0);
+                    }
+                    None => {
+                        digits.fill(0);
+                        digits.insert(0, 1);
+                    }
+                }
+            }
+        }
+        // Like Django, a number that rounds to zero loses its sign: -0.01 is "0.0".
+        let sign = if digits.iter().all(|&digit| digit == 0) {
+            Sign::Plus
+        } else {
+            self.sign
+        };
+        let leading_zeros = digits.iter().take_while(|&&digit| digit == 0).count();
+        let digits = &digits[leading_zeros..];
+        let split = digits.len().saturating_sub(places);
+        let to_text = |digits: &[u8]| -> String {
+            digits
+                .iter()
+                .map(|&digit| char::from(b'0' + digit))
+                .collect()
+        };
+        let integer = match split {
+            0 => "0".to_string(),
+            _ => to_text(&digits[..split]),
+        };
+        let fraction = format!("{:0>places$}", to_text(&digits[split..]));
+        Some(Rounded {
+            sign,
+            integer,
+            fraction,
+        })
+    }
+}
+
+/// Django's limit on digits plus exponent, beyond which `floatformat`
+/// returns the input unchanged. Larger precisions are also left to Django.
+const FLOATFORMAT_MAX_DIGITS: usize = 200;
+
+/// `floatformat` for exact `int`, `float` and `Decimal` values and an
+/// integer precision. `None` defers to Django.
+fn floatformat(
+    value: &Content<'_, '_>,
+    precision: i64,
+    py: Python<'_>,
+    context: &mut Context,
+) -> PyResult<Option<String>> {
+    let text = match value {
+        Content::Int(n) => n.to_string(),
+        Content::Float(n) => PyFloat::new(py, *n).str()?.to_string(),
+        Content::Py(object)
+            if object.is_exact_instance_of::<PyInt>()
+                || object.is_exact_instance_of::<PyFloat>()
+                || object
+                    .get_type()
+                    .is(DECIMAL.import(py, "decimal", "Decimal")?) =>
+        {
+            match object.str() {
+                Ok(text) => text.to_string(),
+                Err(_) => return Ok(None),
+            }
+        }
+        Content::Py(_) | Content::String(_) | Content::Bool(_) => return Ok(None),
+    };
+    let Some(number) = DecimalNumber::parse(&text) else {
+        return Ok(None);
+    };
+    let places = usize::try_from(precision.unsigned_abs()).unwrap_or(usize::MAX);
+    if places > FLOATFORMAT_MAX_DIGITS
+        || usize::try_from(number.exponent.unsigned_abs())
+            .ok()
+            .and_then(|exponent| exponent.checked_add(number.digits.len()))
+            .is_none_or(|size| size > FLOATFORMAT_MAX_DIGITS)
+    {
+        return Ok(None);
+    }
+    // Whole numbers drop their decimal places unless the precision is positive.
+    let fraction_digits = usize::try_from(-number.exponent).unwrap_or(0);
+    let whole = number
+        .digits
+        .iter()
+        .rev()
+        .take(fraction_digits)
+        .all(|&digit| digit == 0);
+    let places = if whole && precision <= 0 { 0 } else { places };
+    let Some(rounded) = number.round(places) else {
+        return Ok(None);
+    };
+    let Some(Some(format)) = context
+        .float_number_format
+        .get_or_try_init(py, |language| FloatNumberFormat::new(py, language))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(format.format(&rounded)))
+}
+
+impl ResolveFilter for FloatFormatFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        let precision = match &argument {
+            ResolvedArgument::Absent => Some(-1),
+            ResolvedArgument::Present(value) => value.as_ref().and_then(integer_argument),
+        };
+        if let Some(precision) = precision
+            && let Some(value) = &variable
+            && let Some(formatted) = floatformat(value, precision, py, context)?
+        {
+            return Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
+                formatted,
+            )))));
+        }
+        self.django.call(variable, argument, py, context)
     }
 }
 

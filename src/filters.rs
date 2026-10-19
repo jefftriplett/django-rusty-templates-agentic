@@ -20,6 +20,7 @@ pub enum FilterType {
     Escape(EscapeFilter),
     Escapejs(EscapejsFilter),
     External(ExternalFilter),
+    FloatFormat(FloatFormatFilter),
     ForceEscape(ForceEscapeFilter),
     Last(LastFilter),
     Lower(LowerFilter),
@@ -227,4 +228,11 @@ impl PartialEq for DjangoFilter {
     fn eq(&self, other: &Self) -> bool {
         self.argument == other.argument && self.filter.as_ptr() == other.filter.as_ptr()
     }
+}
+
+/// Django's `floatformat`, computed natively for `int`, `float` and `Decimal`
+/// values and an integer precision. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FloatFormatFilter {
+    pub django: DjangoFilter,
 }

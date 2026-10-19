@@ -216,3 +216,166 @@ def test_required_argument(template_engine, name):
 def test_unexpected_argument(template_engine, name):
     with pytest.raises(TemplateSyntaxError):
         template_engine.from_string("{{ value|" + name + ":2 }}")
+
+
+FLOATFORMAT_VALUES = {
+    "negative": [
+        -1,
+        -0.0,
+        -0.4,
+        -0.5,
+        -1.25,
+        -1234567.891,
+        Decimal("-0"),
+        Decimal("-0.005"),
+    ],
+    "half": [
+        0.5,
+        1.5,
+        2.5,
+        0.05,
+        0.15,
+        1.005,
+        2.675,
+        9.995,
+        999.995,
+        Decimal("2.5"),
+        Decimal("0.125"),
+    ],
+    "large": [
+        1234567,
+        10**15,
+        1e16,
+        1e21,
+        1.5e300,
+        10**30,
+        10**199,
+        10**250,
+        12345678.125,
+    ],
+    "small": [1e-7, 0.0004, 1.23e-5, 5e-324, Decimal("1.2E-7"), Decimal("0E-10")],
+    "decimal": [
+        Decimal("34.23234"),
+        Decimal("34.00000"),
+        Decimal("1E+2"),
+        Decimal("123456.7890"),
+        Decimal("9.9999"),
+    ],
+    "invalid": [
+        None,
+        "",
+        "abc",
+        "1.5",
+        True,
+        [1],
+        float("inf"),
+        float("nan"),
+        Decimal("NaN"),
+        Decimal("-Infinity"),
+    ],
+}
+FLOATFORMAT_PRECISIONS = [
+    0,
+    1,
+    2,
+    3,
+    -1,
+    -2,
+    -3,
+    30,
+    "2",
+    "-2",
+    "0",
+    "abc",
+    "1.5",
+    "g",
+    "2g",
+    "-2g",
+    "u",
+    "2u",
+    "gu",
+    "2ug",
+]
+
+
+@pytest.mark.parametrize("thousand_separator", [False, True], ids=["plain", "grouped"])
+@pytest.mark.parametrize("language", ["en", "de", "fr"])
+@pytest.mark.parametrize("values", FLOATFORMAT_VALUES.values(), ids=FLOATFORMAT_VALUES)
+def test_floatformat_matches_django(settings, values, language, thousand_separator):
+    settings.USE_THOUSAND_SEPARATOR = thousand_separator
+    source = (
+        "{% for v in values %}[{{ v|floatformat }}]"
+        "{% for p in precisions %}[{{ v|floatformat:p }}]{% endfor %}{% endfor %}"
+    )
+    context = {"values": values, "precisions": FLOATFORMAT_PRECISIONS}
+    with translation.override(language):
+        django, rusty = render_both(source, context)
+    assert rusty == django
+
+
+def test_floatformat_literals(settings):
+    settings.USE_THOUSAND_SEPARATOR = True
+    source = (
+        "{{ 1234567|floatformat:2 }} {{ -2.5|floatformat:0 }} {{ 1.5|floatformat }} "
+        '{{ 0.125|floatformat:"2" }} {{ 2|floatformat:"-2" }}'
+    )
+    django, rusty = render_both(source, {})
+    assert rusty == django == "1,234,567.00 -3 1.5 0.13 2"
+
+
+@pytest.mark.parametrize(
+    "grouping", [(3, 2, 0), (3, 0), (1,), (2, 0, 1), 0, 2, (-1, 3), ()], ids=repr
+)
+def test_floatformat_number_grouping(settings, grouping):
+    settings.USE_THOUSAND_SEPARATOR = True
+    settings.NUMBER_GROUPING = grouping
+    settings.THOUSAND_SEPARATOR = "&"
+    settings.DECIMAL_SEPARATOR = ",,"
+    # Afrikaans has no format module, so these settings apply.
+    source = (
+        "{% for v in values %}[{{ v|floatformat:2 }}][{{ v|floatformat }}]{% endfor %}"
+    )
+    context = {"values": [0, -12345678, 1234567.891, Decimal("98765432.1")]}
+    with translation.override("af"):
+        django, rusty = render_both(source, context)
+    assert rusty == django
+
+
+def test_floatformat_follows_language_changes(settings):
+    settings.USE_THOUSAND_SEPARATOR = True
+
+    def activate():
+        translation.activate("de")
+        return ""
+
+    source = (
+        "{% load i18n %}{{ value|floatformat:2 }} "
+        "{% language 'fr' %}{{ value|floatformat:2 }}{% endlanguage %} "
+        "{{ value|floatformat:2 }}{{ activate }} {{ value|floatformat:2 }}"
+    )
+    context = {"value": 1234.5, "activate": activate}
+    with translation.override("en"):
+        django = engines["django"].from_string(source).render(context)
+    with translation.override("en"):
+        rusty = engines["rusty"].from_string(source).render(context)
+    assert rusty == django == "1,234.50 1\xa0234,50 1,234.50 1.234,50"
+
+
+@pytest.mark.parametrize(
+    "precision",
+    [None, [2], "", "1.5", 2.5],
+    ids=["none", "list", "empty", "float_text", "float"],
+)
+def test_floatformat_invalid_precision(precision):
+    django, rusty = render_both(
+        "{{ value|floatformat:precision }}", {"value": 1.25, "precision": precision}
+    )
+    assert rusty == django
+
+
+def test_floatformat_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(
+        register.filters, "floatformat", lambda value, precision=-1: "replacement"
+    )
+    django, rusty = render_both("{{ value|floatformat:2 }}", {"value": 1.5})
+    assert rusty == django == "replacement"
