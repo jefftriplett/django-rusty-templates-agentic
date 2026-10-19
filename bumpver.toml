@@ -1,5 +1,5 @@
 [bumpver]
-current_version = "2026.10.13"
+current_version = "2026.10.14"
 version_pattern = "YYYY.MM.INC1"
 # `just release-prepare` commits on a release branch; `just release` tags after merge.
 commit = false
