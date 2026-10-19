@@ -1341,13 +1341,24 @@ pub enum Unimplemented {
     FullyCustomTag,
 }
 
+/// What happens to a template the native parser cannot compile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fallback {
+    /// Django's parser compiles it, and Rust renders what it can.
+    Django,
+    /// No parser can compile it.
+    Unsupported,
+}
+
 impl Unimplemented {
-    /// Whether Django's parser can compile the template instead.
-    pub fn has_python_fallback(&self) -> bool {
+    pub fn fallback(&self) -> Fallback {
         match self {
             // Partials only parse natively from Django 6.0.
-            Self::Tag(name) => matches!(name.as_str(), "partialdef" | "partial"),
-            Self::FullyCustomTag => true,
+            Self::Tag(name) if matches!(name.as_str(), "partialdef" | "partial") => {
+                Fallback::Django
+            }
+            Self::Tag(_) => Fallback::Unsupported,
+            Self::FullyCustomTag => Fallback::Django,
         }
     }
 }

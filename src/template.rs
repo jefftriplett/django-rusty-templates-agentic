@@ -24,7 +24,7 @@ pub mod django_rusty_templates {
 
     use crate::error::{PyRenderError, RenderError};
     use crate::loaders::{AppDirsLoader, CachedLoader, FileSystemLoader, Loader, LocMemLoader};
-    use crate::parse::{Parser, PartialDefinition, Tag, TokenTree};
+    use crate::parse::{Fallback, Parser, PartialDefinition, Tag, TokenTree};
     use crate::render::types::{Context, PyContext};
     use crate::render::{Render, RenderResult};
     use crate::utils::PyResultMethods;
@@ -1227,12 +1227,12 @@ pub mod django_rusty_templates {
             let unimplemented = match parser.parse() {
                 Ok(_) => None,
                 Err(crate::parse::PyParseError::Unimplemented(error)) => {
-                    Some((error.has_python_fallback(), error.to_string()))
+                    Some((error.fallback(), error.to_string()))
                 }
                 Err(crate::parse::PyParseError::PyErr(error))
                     if error.is_instance_of::<PyNotImplementedError>(py) =>
                 {
-                    Some((false, error.value(py).to_string()))
+                    Some((Fallback::Unsupported, error.value(py).to_string()))
                 }
                 Err(error) => {
                     return Err(canonical_parse_error(
@@ -1245,15 +1245,12 @@ pub mod django_rusty_templates {
                     ));
                 }
             };
-            if let Some((python_fallback, reason)) = unimplemented {
-                report.set_item(
-                    "mode",
-                    if python_fallback {
-                        "hybrid"
-                    } else {
-                        "unsupported"
-                    },
-                )?;
+            if let Some((fallback, reason)) = unimplemented {
+                let mode = match fallback {
+                    Fallback::Django => "hybrid",
+                    Fallback::Unsupported => "unsupported",
+                };
+                report.set_item("mode", mode)?;
                 report.set_item("reason", reason)?;
                 if let Some(at) = parser.last_tag {
                     let token = TemplateString(source).content(at);
@@ -1771,7 +1768,7 @@ pub mod django_rusty_templates {
             let nodes = match parsed {
                 Ok(nodes) => nodes,
                 Err(crate::parse::PyParseError::Unimplemented(error))
-                    if error.has_python_fallback() =>
+                    if error.fallback() == Fallback::Django =>
                 {
                     python_renderer = Some(Gc::new(
                         py.import("django_rusty_templates.interop")?
