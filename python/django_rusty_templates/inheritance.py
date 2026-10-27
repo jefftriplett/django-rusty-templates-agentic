@@ -4,13 +4,20 @@ Supported inheritance is managed in Rust and never calls this module. At an
 unsupported parent, export compiled overrides to Django's fallback renderer.
 """
 
-from django.template.base import Node, NodeList
+from contextlib import nullcontext
+from types import SimpleNamespace
+
+from django.template import TemplateSyntaxError
+from django.template.base import Node, NodeList, TextNode, Variable
+from django.template.base import Template as DjangoTemplate
 from django.template.loader_tags import (
     BLOCK_CONTEXT_KEY,
     BlockContext,
     BlockNode,
     ExtendsNode,
 )
+
+from .django_rusty_templates import Template as NativeTemplate
 
 
 class CompiledBody(Node):
@@ -32,11 +39,7 @@ def make_block(name, template):
 
 def render_fallback_parent(parent, blocks, context, root, history):
     """Bridge a native override stack only when the parent needs Python."""
-    from contextlib import nullcontext
-    from django.template.base import TextNode
-    from .django_rusty_templates import Template
-
-    if isinstance(parent, Template):
+    if isinstance(parent, NativeTemplate):
         parent = parent._django_template
     binding = context.bind_template(root) if context.template is None else nullcontext()
     with binding, context.render_context.push_state(root):
@@ -63,10 +66,6 @@ class NativeExtendsNode(ExtendsNode):
     """Django block adapter that uses native ancestors without inspection parses."""
 
     def get_parent(self, context):
-        from django.template.base import Template as DjangoTemplate, Variable
-        from django.template import TemplateSyntaxError
-        from .django_rusty_templates import Template as NativeTemplate
-
         parent = self.parent_name.resolve(context)
         if not parent:
             message = "Invalid template name in 'extends' tag: %r." % parent
@@ -79,9 +78,6 @@ class NativeExtendsNode(ExtendsNode):
         return self.find_template(parent, context)
 
     def render(self, context):
-        from django.template.base import TextNode
-        from .django_rusty_templates import Template as NativeTemplate
-
         parent = self.get_parent(context)
         block_context = context.render_context.setdefault(
             BLOCK_CONTEXT_KEY, BlockContext()
@@ -109,8 +105,6 @@ class NativeExtendsNode(ExtendsNode):
 
 def render_native_parent(parent, blocks, origin, context):
     """Resolve a native extends node against an existing Python block context."""
-    from types import SimpleNamespace
-
     expression = SimpleNamespace(
         resolve=lambda context: parent, filters=[], var=None, token=""
     )
@@ -122,6 +116,7 @@ def render_native_parent(parent, blocks, origin, context):
 
 def make_partial(name, template, origin, start, end):
     """Project an already-compiled Rust body into Django's partial protocol."""
+    # Only exists on Django 6.0+, where Rust can produce partials.
     from django.template.base import PartialTemplate
 
     partial = PartialTemplate(

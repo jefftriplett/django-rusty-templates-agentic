@@ -1,8 +1,24 @@
 """Django-compatible diagnostics for templates rejected by the native parser."""
 
+import warnings
+from datetime import datetime
 from types import SimpleNamespace
 
-from django.template.base import DebugLexer, Lexer, Origin, Parser, Template
+from django.conf import settings
+from django.template import Context
+from django.template.base import (
+    DebugLexer,
+    Lexer,
+    Node,
+    NodeList,
+    Origin,
+    Parser,
+    Template,
+)
+from django.template.defaultfilters import date
+from django.urls import reverse
+from django.utils import timezone
+from django.utils.html import conditional_escape
 
 
 def validate_syntax(source, engine, filename=None, template_name=None):
@@ -57,8 +73,6 @@ def get_exception_info(source, origin, exception, token):
 
 
 def render_url(view_name, urlconf, args, kwargs, current_app):
-    from django.urls import reverse
-
     try:
         # Arguments are already resolved in Rust. Successful reversals need no
         # Django Context, node objects or render hooks.
@@ -76,9 +90,6 @@ def render_url(view_name, urlconf, args, kwargs, current_app):
     except Exception as error:
         # Keep Python template render frames on the cold failure path, including
         # the original exception and resolver traceback. Do not reverse twice.
-        from django.template import Context
-        from django.template.base import Node, NodeList
-
         failure = error
 
         class ResolverFailure(Node):
@@ -92,12 +103,6 @@ def render_url(view_name, urlconf, args, kwargs, current_app):
 
 def format_now(format_string, escape):
     """Format the current time for {% now %} as Django's NowNode does."""
-    from datetime import datetime
-    from django.conf import settings
-    from django.template.defaultfilters import date
-    from django.utils import timezone
-    from django.utils.html import conditional_escape
-
     tzinfo = timezone.get_current_timezone() if settings.USE_TZ else None
     formatted = date(datetime.now(tz=tzinfo), format_string)
     return conditional_escape(formatted) if escape else formatted
@@ -105,7 +110,7 @@ def format_now(format_string, escape):
 
 def warn_double_dot(source, offset, origin):
     """Match Django 6.1's variable-tag deprecation without invoking its parser."""
-    import warnings
+    # Only exists on Django 6.1+; Rust calls this only for 6.1 syntax.
     from django.utils.deprecation import RemovedInDjango2028Warning
 
     line = source[:offset].count("\n") + 1

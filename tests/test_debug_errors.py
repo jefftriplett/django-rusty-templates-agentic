@@ -46,7 +46,9 @@ def test_compile_debug_metadata(debug):
 def test_url_render_bridge_keeps_result_unsafe(monkeypatch):
     from django_rusty_templates.diagnostics import render_url
 
-    monkeypatch.setattr("django.urls.reverse", lambda *args, **kwargs: "/a&b'")
+    monkeypatch.setattr(
+        "django_rusty_templates.diagnostics.reverse", lambda *args, **kwargs: "/a&b'"
+    )
     result = render_url("example", None, (), {}, None)
     assert type(result) is str
     assert result == "/a&b'"
@@ -60,7 +62,9 @@ def test_successful_url_reversal_does_not_construct_context(monkeypatch):
         raise AssertionError("Successful URL reversal constructed a Context")
 
     monkeypatch.setattr(Context, "_reset_dicts", unexpected)
-    monkeypatch.setattr("django.urls.reverse", lambda *args, **kwargs: "/ok/")
+    monkeypatch.setattr(
+        "django_rusty_templates.diagnostics.reverse", lambda *args, **kwargs: "/ok/"
+    )
     assert render_url("example", None, (), {}, None) == "/ok/"
 
 
@@ -74,7 +78,7 @@ def test_url_failure_preserves_exception_and_reverses_once(monkeypatch):
         calls.append(1)
         raise error
 
-    monkeypatch.setattr("django.urls.reverse", failing_reverse)
+    monkeypatch.setattr("django_rusty_templates.diagnostics.reverse", failing_reverse)
     with pytest.raises(ValueError) as caught:
         render_url("example", None, (), {}, None)
     assert caught.value is error

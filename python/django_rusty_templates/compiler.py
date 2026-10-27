@@ -11,6 +11,8 @@ from django.template.base import DebugLexer, NodeList, Parser, TokenType
 from django.template.defaulttags import load
 from django.template import Origin
 
+from .diagnostics import get_exception_info
+
 
 class CompilerParser(Parser):
     def __init__(self, source, engine, filename=None, template_name=None):
@@ -78,8 +80,6 @@ class CompilerParser(Parser):
             # may fail for readonly exceptions; neither error may replay a call.
             self.compiler_failed = True
             if isinstance(error, Exception) and self.engine.debug:
-                from .diagnostics import get_exception_info
-
                 error.template_debug = get_exception_info(
                     self.source, self.origin, error, error.token
                 )
@@ -114,8 +114,6 @@ class CompilerParser(Parser):
             error.rusty_diagnostic = str(native_error)
             error.add_note(str(native_error))
             if self.engine.debug and hasattr(error, "token"):
-                from .diagnostics import get_exception_info
-
                 error.template_debug = get_exception_info(
                     self.source, self.origin, error, error.token
                 )

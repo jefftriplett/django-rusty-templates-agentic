@@ -1,12 +1,14 @@
 """Django parser/node interoperability with native variable rendering."""
 
 from django import VERSION
-from django.template import Context
+from django.template import Context, TemplateDoesNotExist
+from django.template.backends.django import copy_exception
 from django.template.context import make_context
 from django.template.base import (
     DebugLexer,
     Node,
     NodeList,
+    Origin,
     Parser,
     Template,
     TextNode,
@@ -15,6 +17,10 @@ from django.template.base import (
 from django.template.loader_tags import BlockNode, ExtendsNode, IncludeNode
 from django.template.defaulttags import CommentNode, ForNode, IfNode, LoadNode, URLNode
 from django.template.library import InclusionNode, SimpleNode
+
+from . import _django_get_template
+from .django_rusty_templates import Template as NativeTemplate
+from .inheritance import NativeExtendsNode
 
 
 class NativeVariableNode(VariableNode):
@@ -238,8 +244,6 @@ class NativeParser(Parser):
         if token.contents.startswith("load ") and token.token_type.value == 2:
             self.load_prefix += "{% " + token.contents + " %}"
         if type(node) is ExtendsNode:
-            from .inheritance import NativeExtendsNode
-
             node.__class__ = NativeExtendsNode
             node.parent_name = ParentExpression(node.parent_name)
         if (
@@ -344,8 +348,6 @@ class InteropTemplate(Template):
 
 
 def compile_template(source, engine, filename=None, template_name=None):
-    from django.template.base import Origin
-
     return InteropTemplate(
         source,
         origin=Origin(filename or "<unknown source>", template_name=template_name),
@@ -357,10 +359,6 @@ def compile_template(source, engine, filename=None, template_name=None):
 def find_template(engine, name, skip=None):
     # Base loader implements Django's origin skip semantics, including extending
     # the same filename from an earlier directory in the loader search order.
-    from django.template import TemplateDoesNotExist
-    from django.template.backends.django import copy_exception
-    from .django_rusty_templates import Template as NativeTemplate
-
     tried = []
     for loader in engine.template_loaders:
         try:
@@ -409,8 +407,6 @@ class ParentExpression:
         return getattr(self.expression, name)
 
     def resolve(self, context):
-        from .django_rusty_templates import Template as NativeTemplate
-
         parent = self.expression.resolve(context)
         native = getattr(parent, "template", parent)
         if isinstance(native, NativeTemplate):
@@ -442,8 +438,6 @@ class PartialRenderer:
 
 
 def compile_partial(name, engine):
-    from . import _django_get_template
-
     partial = _django_get_template(engine, name)
     parent = engine.get_template(name.partition("#")[0])
     return PartialRenderer(partial, parent.source)
