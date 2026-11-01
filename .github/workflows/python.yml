@@ -4,6 +4,10 @@ name: Python
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    # Docs-only changes don't need a rebuild and test run.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   workflow_dispatch:
   workflow_call:
 
