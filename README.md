@@ -4,9 +4,9 @@ Django Rusty Templates (Agentic) is a fork of [Lily's Django Rusty Templates lib
 
 The distribution is named `django-rusty-templates-agentic` to respect the original project's PyPI namespace. It is intended as a drop-in replacement while upstream develops: Python imports remain `django_rusty_templates`, and the Django backend remains `django_rusty_templates.RustyTemplates`. Lily and the upstream contributors retain credit for the original library; see [LICENSE](LICENSE).
 
-Template compatibility is tested against Django 5.2, 6.0, and 6.1. Django 6 requires Python 3.12 or newer. Supported templates, including `extends` and `block`, compile and execute inheritance in Rust in both debug modes. Rust manages block overrides, `block.super`, inheritance history, render state, and block scopes; ordinary variables read native context storage. Python contexts are exported at callback, signal, loader, and unsupported-template boundaries. A compatibility bridge preserves mixed native/custom-template inheritance. Partial templates and fully custom Python tag compilers use Django's parser/node interoperability layer. With debug disabled, mixed templates compile supported loops, conditions, variables, includes, URLs and standard helper tags into Rust regions. Opaque custom nodes execute against the original live Django Context at explicit AST boundaries; mixed inheritance keeps its Django block protocol. Debug mode retains Django node rendering for mixed templates. Django 6.2 development support is tested against a pinned `main` checkout; its `now` format expressions also use the interoperability layer. See [CONTRIBUTING.md](CONTRIBUTING.md) for local conformance checks.
+Template compatibility is tested against Django 5.2, 6.0, and 6.1. Django 6 requires Python 3.12 or newer. Supported templates, including `extends` and `block`, compile and execute inheritance in Rust in both debug modes. Rust manages block overrides, `block.super`, inheritance history, render state, and block scopes; ordinary variables read native context storage. Python contexts are exported at callback, signal, loader, and unsupported-template boundaries. A compatibility bridge preserves mixed native/custom-template inheritance. Partial templates and fully custom Python tag compilers use Django's parser/node interoperability layer. With debug disabled, mixed templates compile supported loops, conditions, variables, includes, URLs and standard helper tags into Rust regions. Opaque custom nodes execute against the original live Django Context at explicit AST boundaries; mixed inheritance keeps its Django block protocol. Debug mode retains Django node rendering for mixed templates. Django 6.2 development support is tested against Django's `main` branch; its `now` format expressions also use the interoperability layer. See [CONTRIBUTING.md](CONTRIBUTING.md) for local conformance checks.
 
-To measure inheritance compilation separately from warm rendering and uncached loading plus rendering, run `maturin develop --release` followed by `.venv/bin/python scripts/benchmark_inheritance.py`. The benchmark checks output equality and compares Django, native compilation, and the hybrid parser path on a synthetic template; it does not measure application request latency.
+To measure inheritance compilation separately from warm rendering and uncached loading plus rendering, run `uv run maturin develop --release` followed by `uv run python scripts/benchmark_inheritance.py`. The benchmark checks output equality and compares Django, native compilation, and the hybrid parser path on a synthetic template; it does not measure application request latency.
 
 ## Goals
 
@@ -84,7 +84,7 @@ Prebuilt wheels are used when available for your platform and Python version. In
 
 ## Usage
 
-Add an entry to your [`TEMPLATES` setting](https://docs.djangoproject.com/en/5.1/ref/settings/#std-setting-TEMPLATES) with `"BACKEND"` set to `"django_rusty_templates.RustyTemplates"`:
+Add an entry to your [`TEMPLATES` setting](https://docs.djangoproject.com/en/5.2/ref/settings/#std-setting-TEMPLATES) with `"BACKEND"` set to `"django_rusty_templates.RustyTemplates"`:
 
 ```python
 TEMPLATES = [
@@ -115,7 +115,7 @@ Django Rusty Templates (Agentic) is open to contributions. These can come in man
 
 For detailed instructions on setting up your development environment and contributing to the project, please see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-### Loop rendering regressions
+### Benchmarks
 
 `uv run python scripts/benchmark_loop_values.py --json-output results.json`
 measures integer loops, text-only loops, repeated variables, and mixed component
@@ -123,7 +123,8 @@ loops against Django.
 It checks output before timing and covers `from_string`, warm loaded rendering,
 and loading plus rendering with explicit cached/uncached loaders and both debug
 settings. Build the extension with `uv run maturin develop --release` first.
-These are synthetic timings, not HTTP request measurements.
+These are synthetic timings, not HTTP request measurements. Use `--baseline`
+with a previous JSON report to fail on regressions above 20%.
 
 Run performance comparisons locally on a controlled machine, using matching
 Python dependencies and release builds for both revisions. GitHub Actions runs
@@ -140,12 +141,12 @@ per rendering node;
 this avoids importing unrelated bindings and making callable snapshots. Retained
 dictionaries are the caller's live dictionaries, as in Django. Scoped templates,
 context subclasses and request contexts keep their existing synchronization path.
-Use `--baseline` locally to compare these cases with the same 15% regression gate.
+Use `--baseline` locally to compare these cases with a 15% regression gate.
 
 `uv run python scripts/benchmark_render_output.py --json-output output.json`
 also tracks block and `with` scopes with small and large caller contexts.
 Each case runs in fresh processes with matching Django controls; use
-`--baseline` to check a later revision locally.
+`--baseline` to check a later revision locally against a 15% regression gate.
 
 `uv run python scripts/benchmark_realistic_page.py --json-output page.json`
 renders a realistic page through the `DjangoTemplates` and `RustyTemplates`
@@ -153,10 +154,12 @@ backends: a base template with `extends`, 25 included cards, Django `User`
 objects, model-style methods, i18n tags and common filters, with and without
 a request and seven context processors. Templates live in
 `scripts/realistic_page/`. Each case checks output against Django and runs in
-fresh processes; `--baseline` applies the same 15% gate. A separate process
+fresh processes; `--baseline` applies a 15% regression gate. A separate process
 then uses `tracemalloc` to report memory growth across repeated renders and
 the memory retained by discarded engines, for Django and Rusty. The run fails
 if discarded engines leave GC-tracked objects behind.
+
+### Inspecting templates
 
 `engine.explain_template(source, template_name=None)` reports `mode` (`native`, `hybrid`, or
 `unsupported`) and the first native compilation blocker. For a tag blocker it
