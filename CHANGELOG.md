@@ -4,6 +4,8 @@
 
 Move shared Python imports to module level while retaining deferred imports for Django-version-specific features. ([#188](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/188))
 
+Refresh outdated README details, including the tested Django versions and benchmark regression gates, and skip pull request builds and tests for docs-only changes. ([#190](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/190))
+
 ## 2026.10.14
 
 Enforce workspace lints and simplify builtin filter registration, template caches, and fallback errors. ([#173](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/173), [#174](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/174), [#175](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/175), [#176](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/176))
