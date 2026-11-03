@@ -11,8 +11,8 @@ use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
     EscapejsFilter, ExternalFilter, FilterType, FloatFormatFilter, ForceEscapeFilter, LastFilter,
-    LengthFilter, LowerFilter, SafeFilter, SlugifyFilter, TitleFilter, TruncateCharsFilter,
-    UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
+    LengthFilter, LinebreaksbrFilter, LowerFilter, SafeFilter, SlugifyFilter, TitleFilter,
+    TruncateCharsFilter, UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -101,6 +101,7 @@ impl ResolveFilter for FilterType {
             Self::FloatFormat(filter) => filter.resolve(variable, py, template, context),
             Self::ForceEscape(filter) => filter.resolve(variable, py, template, context),
             Self::Last(filter) => filter.resolve(variable, py, template, context),
+            Self::Linebreaksbr(filter) => filter.resolve(variable, py, template, context),
             Self::Lower(filter) => filter.resolve(variable, py, template, context),
             Self::Length(filter) => filter.resolve(variable, py, template, context),
             Self::Safe(filter) => filter.resolve(variable, py, template, context),
@@ -1292,6 +1293,91 @@ impl ResolveFilter for TruncateCharsFilter {
             })));
         }
         self.django.call(variable, argument, py, context)
+    }
+}
+
+/// Django's `linebreaksbr` on text it has already converted with `str()`:
+/// `\r\n`, `\r` and `\n` each become `<br>`, and `escape` applies Django's
+/// `escape` to the rest. `None` when the text needs no change.
+fn linebreaksbr(text: &str, escape: bool) -> Option<String> {
+    let bytes = text.as_bytes();
+    let changes = |byte: u8| match byte {
+        b'\n' | b'\r' => true,
+        b'&' | b'<' | b'>' | b'"' | b'\'' => escape,
+        _ => false,
+    };
+    let first = bytes.iter().position(|&byte| changes(byte))?;
+    let mut output = String::with_capacity(text.len() + 16);
+    output.push_str(&text[..first]);
+    let mut start = first;
+    let mut index = first;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        index += 1;
+        if !changes(byte) {
+            continue;
+        }
+        output.push_str(&text[start..index - 1]);
+        output.push_str(match byte {
+            b'\r' => {
+                if bytes.get(index) == Some(&b'\n') {
+                    index += 1;
+                }
+                "<br>"
+            }
+            b'\n' => "<br>",
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'"' => "&quot;",
+            _ => "&#x27;",
+        });
+        start = index;
+    }
+    output.push_str(&text[start..]);
+    Some(output)
+}
+
+impl ResolveFilter for LinebreaksbrFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        _template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        /// `@stringfilter` calls `str()` and keeps the result safe only when
+        /// it is `SafeData`.
+        fn python_text<'t>(object: &Bound<'_, PyAny>) -> PyResult<(Cow<'t, str>, bool)> {
+            let string = object.str()?;
+            let safe = !string.is_exact_instance_of::<PyString>()
+                && string.is_instance(SAFEDATA.import(
+                    object.py(),
+                    "django.utils.safestring",
+                    "SafeData",
+                )?)?;
+            Ok((Cow::Owned(string.to_str()?.to_string()), safe))
+        }
+
+        // Digits, `True` and `False` need no escaping, so they count as safe.
+        let (text, safe) = match variable {
+            None => (Cow::Borrowed(""), true),
+            Some(Content::String(ContentString::HtmlSafe(text))) => (text, true),
+            Some(Content::String(
+                ContentString::String(text) | ContentString::HtmlUnsafe(text),
+            )) => (text, false),
+            Some(Content::Int(number)) => (Cow::Owned(number.to_string()), true),
+            Some(Content::Bool(true)) => (Cow::Borrowed("True"), true),
+            Some(Content::Bool(false)) => (Cow::Borrowed("False"), true),
+            // Python's `str()` spelling, such as `1.0` and `1e+16`.
+            Some(Content::Float(number)) => python_text(&PyFloat::new(py, number))?,
+            Some(Content::Py(object)) => python_text(&object)?,
+        };
+        let text = match linebreaksbr(&text, context.autoescape && !safe) {
+            Some(changed) => Cow::Owned(changed),
+            None => text,
+        };
+        Ok(Some(Content::String(ContentString::HtmlSafe(text))))
     }
 }
 

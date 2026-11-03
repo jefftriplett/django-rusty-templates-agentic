@@ -193,6 +193,78 @@ def test_truncatechars_replaced_builtin(monkeypatch):
     assert rusty == django == "replacement"
 
 
+class HtmlOnly:
+    """Has `__html__` but is not `SafeData`, so `str()` loses its safety."""
+
+    def __str__(self):
+        return "<i>a</i>\nb"
+
+    def __html__(self):
+        return "<i>a</i>"
+
+
+class SafeStr:
+    """`str()` returns a `SafeString`, which `@stringfilter` keeps safe."""
+
+    def __str__(self):
+        return mark_safe("<i>a</i>\r\nb")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("plain", id="plain"),
+        pytest.param("one\ntwo", id="lf"),
+        pytest.param("a\r\nb\rc\n\rd\r", id="mixed_newlines"),
+        pytest.param("\r\r\n\n\n", id="only_newlines"),
+        pytest.param("<b>&\"'</b>\nx", id="html"),
+        pytest.param("&amp;\r\n&lt;", id="entities"),
+        pytest.param("café\nü<ñ>\r日本", id="non_ascii"),
+        pytest.param(mark_safe("<b>x</b>\r\ny"), id="safe"),
+        pytest.param(translation.gettext_lazy("Goodbye"), id="lazy"),
+        pytest.param(123, id="int"),
+        pytest.param(1.0, id="float"),
+        pytest.param(1e16, id="float_exponent"),
+        pytest.param(True, id="bool"),
+        pytest.param(None, id="none"),
+        pytest.param(Decimal("1.50"), id="decimal"),
+        pytest.param(["<a>", "b\nc"], id="list"),
+        pytest.param(HtmlOnly(), id="html_only"),
+        pytest.param(SafeStr(), id="safe_str"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_linebreaksbr_matches_django(value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "[{{ value|linebreaksbr }}][{{ value|linebreaksbr|escape }}]"
+        "[{{ value|lower|linebreaksbr }}][{{ value|force_escape|linebreaksbr }}]"
+        "[{{ value|linebreaksbr|truncatechars:6 }}][{{ missing|linebreaksbr }}]"
+        "{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {"value": value})
+    assert rusty == django
+
+
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_linebreaksbr_literals(autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "[{{ '<a>\n&'|linebreaksbr }}][{{ 1.0|linebreaksbr }}]"
+        "[{{ 2|linebreaksbr }}][{{ 1e20|linebreaksbr }}]"
+        "{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {})
+    assert rusty == django
+
+
+def test_linebreaksbr_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "linebreaksbr", lambda value: "replacement")
+    django, rusty = render_both("{{ value|linebreaksbr }}", {"value": "a\nb"})
+    assert rusty == django == "replacement"
+
+
 @pytest.mark.parametrize(
     "name",
     [

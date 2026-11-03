@@ -41,6 +41,7 @@ use crate::filters::FloatFormatFilter;
 use crate::filters::ForceEscapeFilter;
 use crate::filters::LastFilter;
 use crate::filters::LengthFilter;
+use crate::filters::LinebreaksbrFilter;
 use crate::filters::LowerFilter;
 use crate::filters::SafeFilter;
 use crate::filters::SlugifyFilter;
@@ -245,6 +246,11 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::FloatFormat(FloatFormatFilter { django })
+                }
+                BuiltinFilter::Linebreaksbr
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Linebreaksbr(LinebreaksbrFilter)
                 }
                 _ => FilterType::Django(django),
             };
