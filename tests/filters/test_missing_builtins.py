@@ -379,3 +379,106 @@ def test_floatformat_replaced_builtin(monkeypatch):
     )
     django, rusty = render_both("{{ value|floatformat:2 }}", {"value": 1.5})
     assert rusty == django == "replacement"
+
+
+class JoinHtml:
+    def __html__(self):
+        return "<i>html</i>"
+
+    def __repr__(self):
+        return "JoinHtml"
+
+
+class JoinStr:
+    def __str__(self):
+        return "<str & obj>"
+
+    def __repr__(self):
+        return "JoinStr"
+
+
+class JoinHtmlNotString:
+    def __html__(self):
+        return 1
+
+    def __repr__(self):
+        return "JoinHtmlNotString"
+
+
+class JoinStrTypeError:
+    def __str__(self):
+        raise TypeError("no str")
+
+    def __repr__(self):
+        return "JoinStrTypeError"
+
+
+class JoinStrSubclass(str):
+    pass
+
+
+JOIN_VALUES = {
+    "strings": lambda: ["a", "<b>", "c & 'd'", '"e"'],
+    "empty": lambda: [],
+    "single": lambda: ["<only>"],
+    "tuple": lambda: ("<a>", "b"),
+    "safe_items": lambda: [mark_safe("<b>bold</b>"), "<i>"],
+    "ints": lambda: [1, -2, 10**30],
+    "mixed": lambda: [1.5, True, None, Decimal("2.50"), "<x>"],
+    "nested": lambda: [["<a>", 1], ("b",)],
+    "lazy": lambda: [translation.gettext_lazy("Goodbye"), "<x>"],
+    "html_object": lambda: [JoinHtml(), "<x>"],
+    "str_object": lambda: [JoinStr()],
+    "html_not_string": lambda: ["a", JoinHtmlNotString()],
+    "str_type_error": lambda: ["a", JoinStrTypeError()],
+    "str_subclass": lambda: [JoinStrSubclass("<sub>"), "b"],
+    "generator": lambda: (item for item in ["<a>", "b"]),
+    "range": lambda: range(3),
+    "dict": lambda: {"<k>": 1, "v": 2},
+    "string": lambda: "a<b",
+    "safe_string": lambda: mark_safe("<b>"),
+    "int": lambda: 5,
+    "none": lambda: None,
+}
+
+JOIN_SEPARATORS = {
+    "literal": '","',
+    "literal_html": '"<br>"',
+    "translated": '_("<sep>")',
+    "variable": "separator",
+    "safe_variable": "safe_separator",
+    "int_variable": "int_separator",
+    "none_variable": "none_separator",
+}
+
+
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+@pytest.mark.parametrize("separator", JOIN_SEPARATORS.values(), ids=JOIN_SEPARATORS)
+@pytest.mark.parametrize("value", JOIN_VALUES.values(), ids=JOIN_VALUES)
+def test_join_matches_django(value, separator, autoescape):
+    source = (
+        "{% load i18n %}{% autoescape " + autoescape + " %}"
+        "[{{ value|join:" + separator + " }}][{{ missing|join:" + separator + " }}]"
+        "{% endautoescape %}"
+    )
+    results = []
+    for name in ("django", "rusty"):
+        context = {
+            "value": value(),
+            "separator": "<&>",
+            "safe_separator": mark_safe("<hr>"),
+            "int_separator": 1,
+            "none_separator": None,
+        }
+        try:
+            results.append(engines[name].from_string(source).render(context))
+        except Exception as error:
+            results.append((type(error), str(error)))
+    django, rusty = results
+    assert rusty == django
+
+
+def test_join_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "join", lambda value, arg: "replacement")
+    django, rusty = render_both('{{ value|join:"," }}', {"value": ["a", "b"]})
+    assert rusty == django == "replacement"

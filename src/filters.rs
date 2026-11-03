@@ -22,6 +22,7 @@ pub enum FilterType {
     External(ExternalFilter),
     FloatFormat(FloatFormatFilter),
     ForceEscape(ForceEscapeFilter),
+    Join(JoinFilter),
     Last(LastFilter),
     Lower(LowerFilter),
     Length(LengthFilter),
@@ -234,5 +235,12 @@ impl PartialEq for DjangoFilter {
 /// values and an integer precision. Other inputs call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FloatFormatFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `join`, computed natively for lists and tuples and a string
+/// separator. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinFilter {
     pub django: DjangoFilter,
 }
