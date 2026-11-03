@@ -109,6 +109,7 @@ TRUNCATECHARS_LENGTHS = [
         pytest.param("héllo wörld", id="non_ascii"),
         pytest.param("e\u0301" * 6, id="combining"),
         pytest.param("日本語のテキスト", id="wide"),
+        pytest.param("\u0958\u0344abcdefghij", id="nfc_expands"),
         pytest.param(translation.gettext_lazy("Goodbye"), id="lazy"),
         pytest.param(12345678901, id="int"),
         pytest.param(Decimal("1234567.891"), id="decimal"),
@@ -157,22 +158,34 @@ def test_truncatechars_translated_text(monkeypatch, text):
         assert rusty == django
 
 
-def test_truncatechars_follows_language_changes():
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("abcdefghij", "abcd…abc\u202e…abcd…ab...abcd…"),
+        ("héllo wörld", "héll…hél\u202e…héll…hé...héll…"),
+    ],
+)
+def test_truncatechars_follows_language_changes(value, expected):
     def activate():
         translation.activate("ckb")
+        return ""
+
+    def deactivate():
+        translation.deactivate_all()
         return ""
 
     source = (
         "{% load i18n %}{{ value|truncatechars:5 }}"
         "{% language 'he' %}{{ value|truncatechars:5 }}{% endlanguage %}"
         "{{ value|truncatechars:5 }}{{ activate }}{{ value|truncatechars:5 }}"
+        "{{ deactivate }}{{ value|truncatechars:5 }}"
     )
-    context = {"value": "abcdefghij", "activate": activate}
+    context = {"value": value, "activate": activate, "deactivate": deactivate}
     with translation.override("en"):
         django = engines["django"].from_string(source).render(context)
     with translation.override("en"):
         rusty = engines["rusty"].from_string(source).render(context)
-    assert rusty == django == "abcd…abc\u202e…abcd…ab..."
+    assert rusty == django == expected
 
 
 @pytest.mark.parametrize("name", ["truncatechars", "truncatewords"])

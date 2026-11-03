@@ -30,6 +30,7 @@ static DATE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TIME_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static PGETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static COMBINING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static TRUNCATOR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SAFESTRING: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static GET_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -1156,10 +1157,18 @@ impl ResolveFilter for SlugifyFilter {
     }
 }
 
-/// Django's translated truncation text, `%(truncated_text)s…` in English,
-/// split around the placeholder.
+/// Django's translated truncation text, `%(truncated_text)s…` in English.
 #[derive(Clone, Debug)]
 pub struct TruncationText {
+    /// The translation itself, which Django's `Truncator` accepts as `truncate`.
+    text: String,
+    /// The translation split around its placeholder. `None` when it is not a
+    /// plain `%(truncated_text)s` template, leaving its %-formatting to Django.
+    split: Option<SplitTruncationText>,
+}
+
+#[derive(Clone, Debug)]
+struct SplitTruncationText {
     before: String,
     after: String,
     /// The number of characters Django counts: combining characters are free.
@@ -1167,9 +1176,7 @@ pub struct TruncationText {
 }
 
 impl TruncationText {
-    /// Returns `None` when the translation is not a plain
-    /// `%(truncated_text)s` template, leaving its %-formatting to Django.
-    fn new(py: Python<'_>) -> PyResult<Option<Self>> {
+    fn new(py: Python<'_>) -> PyResult<Self> {
         let text: String = PGETTEXT
             .import(py, "django.utils.translation", "pgettext")?
             .call1((
@@ -1177,25 +1184,25 @@ impl TruncationText {
                 "%(truncated_text)s…",
             ))?
             .extract()?;
-        if text.matches('%').count() != 1 {
-            return Ok(None);
-        }
-        let Some((before, after)) = text.split_once("%(truncated_text)s") else {
-            return Ok(None);
-        };
-        let combining = COMBINING.import(py, "unicodedata", "combining")?;
-        let mut width = 0;
-        for character in before.chars().chain(after.chars()) {
-            // Ask Python so the result follows its Unicode database.
-            if character.is_ascii() || !combining.call1((character,))?.is_truthy()? {
-                width += 1;
+        let split = match text.split_once("%(truncated_text)s") {
+            Some((before, after)) if text.matches('%').count() == 1 => {
+                let combining = COMBINING.import(py, "unicodedata", "combining")?;
+                let mut width = 0;
+                for character in before.chars().chain(after.chars()) {
+                    // Ask Python so the result follows its Unicode database.
+                    if character.is_ascii() || !combining.call1((character,))?.is_truthy()? {
+                        width += 1;
+                    }
+                }
+                Some(SplitTruncationText {
+                    before: before.to_string(),
+                    after: after.to_string(),
+                    width,
+                })
             }
-        }
-        Ok(Some(Self {
-            before: before.to_string(),
-            after: after.to_string(),
-            width,
-        }))
+            _ => None,
+        };
+        Ok(Self { text, split })
     }
 }
 
@@ -1257,35 +1264,46 @@ impl<'a> Text<'a> {
     }
 }
 
-/// `Truncator(text).chars(length)` for ASCII text, where every character
-/// counts once and NFC normalization changes nothing. `None` defers to Django.
-fn truncate_ascii_chars(
+/// `Truncator(text).chars(length)`. `None` defers to Django's filter.
+fn truncate_chars(
     text: &str,
     length: i64,
     py: Python<'_>,
     context: &mut Context,
 ) -> PyResult<Option<String>> {
-    if !text.is_ascii() {
-        return Ok(None);
-    }
     let Ok(length @ 1..) = usize::try_from(length) else {
         return Ok(Some(String::new()));
     };
-    if text.len() <= length {
+    // ASCII characters each count once and NFC normalization leaves them alone.
+    if text.is_ascii() && text.len() <= length {
         return Ok(Some(text.to_string()));
     }
-    let Some(Some(truncation)) = context
+    let Some(truncation) = context
         .truncation_text
         .get_or_try_init(py, |_| TruncationText::new(py))?
     else {
         return Ok(None);
     };
-    let end = length.saturating_sub(truncation.width);
+    if !text.is_ascii() {
+        // NFC normalization and combining characters follow Python's Unicode
+        // database, so Django truncates. Passing the cached translation saves
+        // its two `pgettext` calls per truncation.
+        let truncated = TRUNCATOR
+            .import(py, "django.utils.text", "Truncator")?
+            .call1((text,))?
+            .call_method1("chars", (length, &truncation.text))?
+            .extract()?;
+        return Ok(Some(truncated));
+    }
+    let Some(split) = &truncation.split else {
+        return Ok(None);
+    };
+    let end = length.saturating_sub(split.width);
     Ok(Some(format!(
         "{}{}{}",
-        truncation.before,
+        split.before,
         &text[..end],
-        truncation.after
+        split.after
     )))
 }
 
@@ -1301,7 +1319,7 @@ impl ResolveFilter for TruncateCharsFilter {
         let length = argument.value().and_then(integer_argument);
         if let Some(length) = length
             && let Some(text) = Text::from_variable(variable.as_ref(), py)?
-            && let Some(truncated) = truncate_ascii_chars(text.as_str(), length, py, context)?
+            && let Some(truncated) = truncate_chars(text.as_str(), length, py, context)?
         {
             return Ok(Some(text.into_content(truncated, context)));
         }
