@@ -27,6 +27,7 @@ pub enum FilterType {
     Length(LengthFilter),
     Safe(SafeFilter),
     Slugify(SlugifyFilter),
+    Timesince(TimesinceFilter),
     Title(TitleFilter),
     TruncateChars(TruncateCharsFilter),
     Upper(UpperFilter),
@@ -165,6 +166,15 @@ pub struct SafeFilter;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlugifyFilter;
+
+/// Django's `timesince` or `timeuntil`, computed natively for `date` and
+/// `datetime` values. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimesinceFilter {
+    pub django: DjangoFilter,
+    /// `timeuntil`, which measures from the comparison time to the value.
+    pub until: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TitleFilter;
