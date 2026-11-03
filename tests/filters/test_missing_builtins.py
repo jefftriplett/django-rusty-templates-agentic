@@ -175,22 +175,90 @@ def test_truncatechars_follows_language_changes():
     assert rusty == django == "abcd…abc\u202e…abcd…ab..."
 
 
+@pytest.mark.parametrize("name", ["truncatechars", "truncatewords"])
 @pytest.mark.parametrize(
     "length", [None, [5], "", "5.0"], ids=["none", "list", "empty", "float_text"]
 )
-def test_truncatechars_invalid_length(length):
+def test_truncate_invalid_length(name, length):
     django, rusty = render_both(
-        "{{ value|truncatechars:length }}", {"value": "abcdefghij", "length": length}
+        "{{ value|" + name + ":length }}",
+        {"value": "abc def ghi jkl mno", "length": length},
     )
     assert rusty == django
 
 
-def test_truncatechars_replaced_builtin(monkeypatch):
-    monkeypatch.setitem(
-        register.filters, "truncatechars", lambda value, length: "replacement"
+@pytest.mark.parametrize("name", ["truncatechars", "truncatewords"])
+def test_truncate_replaced_builtin(monkeypatch, name):
+    monkeypatch.setitem(register.filters, name, lambda value, length: "replacement")
+    django, rusty = render_both(
+        "{{ value|" + name + ":5 }}", {"value": "abc def ghi jkl mno"}
     )
-    django, rusty = render_both("{{ value|truncatechars:5 }}", {"value": "abcdefghij"})
     assert rusty == django == "replacement"
+
+
+TRUNCATEWORDS_LENGTHS = [
+    -1,
+    0,
+    1,
+    2,
+    3,
+    4,
+    10,
+    "2",
+    "-1",
+    "x",
+    " 2",
+    "1_0",
+    2.5,
+    10**30,
+]
+
+
+@pytest.mark.parametrize("language", ["en", "he"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("one", id="one_word"),
+        pytest.param(" \t\n ", id="only_whitespace"),
+        pytest.param("one two three four", id="ascii"),
+        pytest.param("  one \t two\n\nthree  ", id="collapsed_whitespace"),
+        pytest.param("one\r\ntwo\x0bthree\x0cfour", id="control_whitespace"),
+        pytest.param("one\xa0two\u3000three\x1cfour\x85five", id="unicode_whitespace"),
+        pytest.param("one\u200btwo three", id="zero_width_space"),
+        pytest.param("a <b> & 'c' \"d\"", id="html"),
+        pytest.param(mark_safe("<b>bold</b> and <i>italic</i> text"), id="safe"),
+        pytest.param("héllo wörld 日本語 e\u0301", id="non_ascii"),
+        pytest.param("a … b … c", id="ellipsis_words"),
+        pytest.param("a…  …", id="ellipsis_suffix"),
+        pytest.param(translation.gettext_lazy("Good morning"), id="lazy"),
+        pytest.param(12345678901, id="int"),
+        pytest.param(Decimal("1234567.891"), id="decimal"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_truncatewords_matches_django(language, value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "{% for n in lengths %}[{{ value|truncatewords:n }}]{% endfor %}"
+        '[{{ missing|truncatewords:3 }}][{{ value|truncatewords:"2" }}]'
+        "{% endautoescape %}"
+    )
+    context = {"value": value, "lengths": TRUNCATEWORDS_LENGTHS}
+    with translation.override(language):
+        django, rusty = render_both(source, context)
+    assert rusty == django
+
+
+def test_truncatewords_splits_like_python():
+    every_character = "".join(
+        f"x{chr(code)}" for code in range(0x110000) if not 0xD800 <= code <= 0xDFFF
+    )
+    source = "{{ value|truncatewords:n }}"
+    for n in [10**6, 3]:
+        django, rusty = render_both(source, {"value": every_character, "n": n})
+        assert rusty == django
 
 
 @pytest.mark.parametrize(

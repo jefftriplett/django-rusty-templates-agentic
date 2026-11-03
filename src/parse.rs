@@ -46,6 +46,7 @@ use crate::filters::SafeFilter;
 use crate::filters::SlugifyFilter;
 use crate::filters::TitleFilter;
 use crate::filters::TruncateCharsFilter;
+use crate::filters::TruncateWordsFilter;
 use crate::filters::UpperFilter;
 use crate::filters::WordcountFilter;
 use crate::filters::WordwrapFilter;
@@ -240,6 +241,11 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::TruncateChars(TruncateCharsFilter { django })
+                }
+                BuiltinFilter::Truncatewords
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::TruncateWords(TruncateWordsFilter { django })
                 }
                 BuiltinFilter::Floatformat
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
