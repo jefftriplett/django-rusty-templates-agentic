@@ -193,6 +193,95 @@ def test_truncatechars_replaced_builtin(monkeypatch):
     assert rusty == django == "replacement"
 
 
+SLICE_ARGUMENTS = [
+    "",
+    ":",
+    "::",
+    "2",
+    ":2",
+    "-1",
+    "1:-1",
+    "-3:",
+    "100:",
+    "-100:100",
+    "::2",
+    "::-1",
+    "5:1:-1",
+    "-1:-6:-2",
+    "::0",
+    "1:2:3:4",
+    "+2",
+    " 2",
+    "1_0",
+    "a",
+    "1.5",
+    "99999999999999999999",
+]
+
+
+class SliceRecorder:
+    def __getitem__(self, key):
+        return f"<{key!r}>"
+
+
+class SliceIndexError:
+    def __getitem__(self, key):
+        raise IndexError("no items")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("a <b> & 'c' d", id="ascii"),
+        pytest.param("héllo wörld ✓ 😀", id="non_ascii"),
+        pytest.param(mark_safe("<b>bold</b> ü"), id="safe"),
+        pytest.param(["a", "<b>", "c", "d", "e"], id="list"),
+        pytest.param((1, 2, 3, 4, 5, 6), id="tuple"),
+        pytest.param(range(10), id="range"),
+        pytest.param({"a": 1}, id="dict"),
+        pytest.param(SliceRecorder(), id="getitem"),
+        pytest.param(12345, id="int"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_slice_matches_django(value, autoescape):
+    # Context strings reach the filter as Python objects; `lower` and `safe`
+    # hand it native plain and safe strings.
+    literals = "".join(
+        "[{{ value" + prefix + "|slice:'" + argument + "' }}]"
+        for argument in SLICE_ARGUMENTS
+        for prefix in ["", "|lower", "|safe"]
+    )
+    source = (
+        "{% autoescape "
+        + autoescape
+        + " %}"
+        + literals
+        + "{% for argument in arguments %}"
+        "[{{ value|slice:argument }}][{{ value|lower|slice:argument }}]"
+        "{% endfor %}"
+        "[{{ value|slice:2 }}][{{ value|slice:-1 }}][{{ value|slice:1.5 }}]"
+        "[{{ missing|slice:':2' }}]"
+        "[{{ value|slice:'1:-1'|upper }}][{{ value|slice:'::-1'|length }}]"
+        "{% endautoescape %}"
+    )
+    arguments = [*SLICE_ARGUMENTS, 2, -1, 0, 10**30, 1.5, True, None, ["x"]]
+    django, rusty = render_both(source, {"value": value, "arguments": arguments})
+    assert rusty == django
+
+
+def test_slice_propagates_other_errors():
+    django, rusty = render_both("{{ value|slice:':2' }}", {"value": SliceIndexError()})
+    assert rusty == django == (IndexError, "no items")
+
+
+def test_slice_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "slice", lambda value, arg: "replacement")
+    django, rusty = render_both("{{ value|slice:':2' }}", {"value": "abcdefghij"})
+    assert rusty == django == "replacement"
+
+
 @pytest.mark.parametrize(
     "name",
     [
