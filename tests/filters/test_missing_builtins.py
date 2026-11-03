@@ -218,6 +218,10 @@ class SafeStr:
         pytest.param("one\ntwo", id="lf"),
         pytest.param("a\r\nb\rc\n\rd\r", id="mixed_newlines"),
         pytest.param("\r\r\n\n\n", id="only_newlines"),
+        pytest.param("a\n\nb\n\n\nc", id="paragraphs"),
+        pytest.param("a\r\n\r\nb\r\rc\n\rd\r\n\ne", id="paragraphs_mixed"),
+        pytest.param("\n\na\nb\n\n", id="paragraphs_at_edges"),
+        pytest.param("a\n \nb\n\t\n\nc", id="whitespace_line"),
         pytest.param("<b>&\"'</b>\nx", id="html"),
         pytest.param("&amp;\r\n&lt;", id="entities"),
         pytest.param("café\nü<ñ>\r日本", id="non_ascii"),
@@ -235,33 +239,36 @@ class SafeStr:
     ],
 )
 @pytest.mark.parametrize("autoescape", ["on", "off"])
-def test_linebreaksbr_matches_django(value, autoescape):
+@pytest.mark.parametrize("name", ["linebreaks", "linebreaksbr"])
+def test_linebreaks_matches_django(name, value, autoescape):
     source = (
         "{% autoescape " + autoescape + " %}"
-        "[{{ value|linebreaksbr }}][{{ value|linebreaksbr|escape }}]"
-        "[{{ value|lower|linebreaksbr }}][{{ value|force_escape|linebreaksbr }}]"
-        "[{{ value|linebreaksbr|truncatechars:6 }}][{{ missing|linebreaksbr }}]"
+        "[{{ value|NAME }}][{{ value|NAME|escape }}]"
+        "[{{ value|lower|NAME }}][{{ value|force_escape|NAME }}]"
+        "[{{ value|NAME|truncatechars:6 }}][{{ missing|NAME }}]"
         "{% endautoescape %}"
-    )
+    ).replace("NAME", name)
     django, rusty = render_both(source, {"value": value})
     assert rusty == django
 
 
 @pytest.mark.parametrize("autoescape", ["on", "off"])
-def test_linebreaksbr_literals(autoescape):
+@pytest.mark.parametrize("name", ["linebreaks", "linebreaksbr"])
+def test_linebreaks_literals(name, autoescape):
     source = (
         "{% autoescape " + autoescape + " %}"
-        "[{{ '<a>\n&'|linebreaksbr }}][{{ 1.0|linebreaksbr }}]"
-        "[{{ 2|linebreaksbr }}][{{ 1e20|linebreaksbr }}]"
+        "[{{ '<a>\n\n&'|NAME }}][{{ 1.0|NAME }}]"
+        "[{{ 2|NAME }}][{{ 1e20|NAME }}]"
         "{% endautoescape %}"
-    )
+    ).replace("NAME", name)
     django, rusty = render_both(source, {})
     assert rusty == django
 
 
-def test_linebreaksbr_replaced_builtin(monkeypatch):
-    monkeypatch.setitem(register.filters, "linebreaksbr", lambda value: "replacement")
-    django, rusty = render_both("{{ value|linebreaksbr }}", {"value": "a\nb"})
+@pytest.mark.parametrize("name", ["linebreaks", "linebreaksbr"])
+def test_linebreaks_replaced_builtin(name, monkeypatch):
+    monkeypatch.setitem(register.filters, name, lambda value: "replacement")
+    django, rusty = render_both("{{ value|" + name + " }}", {"value": "a\nb"})
     assert rusty == django == "replacement"
 
 
