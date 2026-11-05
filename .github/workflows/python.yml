@@ -30,6 +30,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
         with:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -38,7 +39,9 @@ jobs:
           cache-suffix: sanity-py313
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: sanity-py313
+          # PyO3 links against the exact Python install, so a new patch release needs a fresh cache.
+          # rust-cache ignores `key` when `shared-key` is set, so the version goes here.
+          shared-key: sanity-py${{ steps.python.outputs.python-version }}
       - name: Install gettext
         run: sudo apt-get install -y gettext
       - name: Build extension and translations

@@ -22,14 +22,17 @@ pub enum FilterType {
     External(ExternalFilter),
     FloatFormat(FloatFormatFilter),
     ForceEscape(ForceEscapeFilter),
+    Join(JoinFilter),
     Last(LastFilter),
     Linebreaksbr(LinebreaksbrFilter),
     Lower(LowerFilter),
     Length(LengthFilter),
     Safe(SafeFilter),
+    Slice(SliceFilter),
     Slugify(SlugifyFilter),
     Title(TitleFilter),
     TruncateChars(TruncateCharsFilter),
+    TruncateWords(TruncateWordsFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -167,6 +170,74 @@ pub struct LinebreaksbrFilter;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SafeFilter;
 
+/// Django's `slice`, computed natively for strings and Python objects. A
+/// literal argument is parsed once when the template is compiled.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SliceFilter {
+    pub django: DjangoFilter,
+    /// The parsed literal argument, or `None` to resolve it at render.
+    pub literal: Option<SliceArgument>,
+}
+
+/// The `slice(*bits)` Django builds from the filter argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SliceArgument {
+    Bounds {
+        start: Option<isize>,
+        stop: Option<isize>,
+        step: Option<isize>,
+    },
+    /// An argument Django rejects, so the value is returned unchanged.
+    Invalid,
+}
+
+impl SliceArgument {
+    /// `slice(n)` for an integer argument, which `str()` turns into one bit.
+    pub fn stop(stop: isize) -> Self {
+        Self::Bounds {
+            start: None,
+            stop: Some(stop),
+            step: None,
+        }
+    }
+
+    /// Parses `str(arg)` the way Django does. Returns `None` for bits that
+    /// are not plain optionally signed ASCII integers, leaving Python's
+    /// `int()` rules (whitespace, underscores, Unicode digits) to Django.
+    pub fn parse(text: &str) -> Option<Self> {
+        let bits: Vec<&str> = text.split(':').collect();
+        // `slice()` takes at most three arguments, so Django's TypeError
+        // returns the value whatever the bits are.
+        if bits.len() > 3 {
+            return Some(Self::Invalid);
+        }
+        let mut values = [None; 3];
+        for (value, bit) in values.iter_mut().zip(&bits) {
+            if bit.is_empty() {
+                continue;
+            }
+            let digits = bit.strip_prefix(['-', '+']).unwrap_or(bit);
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            *value = Some(bit.parse().ok()?);
+        }
+        let [first, second, step] = values;
+        Some(match bits.len() {
+            1 => Self::Bounds {
+                start: None,
+                stop: first,
+                step: None,
+            },
+            _ => Self::Bounds {
+                start: first,
+                stop: second,
+                step,
+            },
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlugifyFilter;
 
@@ -177,6 +248,13 @@ pub struct TitleFilter;
 /// integer length. Other inputs call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TruncateCharsFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `truncatewords`, computed natively for strings and an integer
+/// length. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TruncateWordsFilter {
     pub django: DjangoFilter,
 }
 
@@ -238,5 +316,12 @@ impl PartialEq for DjangoFilter {
 /// values and an integer precision. Other inputs call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FloatFormatFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `join`, computed natively for lists and tuples and a string
+/// separator. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinFilter {
     pub django: DjangoFilter,
 }
