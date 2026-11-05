@@ -6,6 +6,10 @@ Move shared Python imports to module level while retaining deferred imports for 
 
 Refresh outdated README details, including the tested Django versions and benchmark regression gates, and skip pull request builds and tests for docs-only changes. ([#190](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/190))
 
+Render `slice`, `join`, `truncatewords`, `linebreaks`, `linebreaksbr`, `timesince`, `timeuntil`, and `{% now %}` natively, cache translated text and non-ASCII truncation text per language, and benchmark built-in filters in loops. ([#192](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/192), [#193](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/193), [#194](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/194), [#195](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/195), [#196](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/196), [#197](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/197), [#198](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/198), [#199](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/199), [#200](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/200), [#201](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/201))
+
+Key the sanity CI Rust cache on the exact Python version so a Python patch release no longer breaks linking. ([#202](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/202), [#203](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/203))
+
 ## 2026.10.14
 
 Enforce workspace lints and simplify builtin filter registration, template caches, and fallback errors. ([#173](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/173), [#174](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/174), [#175](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/175), [#176](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/176))
