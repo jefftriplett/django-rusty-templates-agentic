@@ -6,7 +6,7 @@ pub use stock::StockNode;
 use builtin_filter::{BuiltinFilter, FilterArgument};
 
 use dtl_lexer::DelimitedToken;
-use num_traits::Zero;
+use num_traits::{ToPrimitive, Zero};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -39,15 +39,20 @@ use crate::filters::ExternalFilter;
 use crate::filters::FilterType;
 use crate::filters::FloatFormatFilter;
 use crate::filters::ForceEscapeFilter;
+use crate::filters::JoinFilter;
 use crate::filters::LastFilter;
 use crate::filters::LengthFilter;
 use crate::filters::LinebreaksFilter;
 use crate::filters::LinebreaksbrFilter;
 use crate::filters::LowerFilter;
 use crate::filters::SafeFilter;
+use crate::filters::SliceArgument;
+use crate::filters::SliceFilter;
 use crate::filters::SlugifyFilter;
+use crate::filters::TimesinceFilter;
 use crate::filters::TitleFilter;
 use crate::filters::TruncateCharsFilter;
+use crate::filters::TruncateWordsFilter;
 use crate::filters::UpperFilter;
 use crate::filters::WordcountFilter;
 use crate::filters::WordwrapFilter;
@@ -243,10 +248,38 @@ impl Filter {
                 {
                     FilterType::TruncateChars(TruncateCharsFilter { django })
                 }
+                BuiltinFilter::Truncatewords
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::TruncateWords(TruncateWordsFilter { django })
+                }
                 BuiltinFilter::Floatformat
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::FloatFormat(FloatFormatFilter { django })
+                }
+                BuiltinFilter::Slice
+                    if is_django_filter(parser.py, &django.filter, "slice_filter") =>
+                {
+                    let literal = django.argument.as_ref().and_then(|argument| {
+                        match &argument.argument_type {
+                            ArgumentType::Text(text) => {
+                                SliceArgument::parse(parser.template.content(text.at))
+                            }
+                            ArgumentType::Int(n) => n.to_isize().map(SliceArgument::stop),
+                            // `str()` of a float never converts with `int()`.
+                            ArgumentType::Float(_) => Some(SliceArgument::Invalid),
+                            ArgumentType::Variable(_)
+                            | ArgumentType::ForVariable(_)
+                            | ArgumentType::TranslatedText(_) => None,
+                        }
+                    });
+                    FilterType::Slice(SliceFilter { django, literal })
+                }
+                BuiltinFilter::Join
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Join(JoinFilter { django })
                 }
                 // `defaultfilters.linebreaks` is the `django.utils.html` helper;
                 // the registered filter is `linebreaks_filter`.
@@ -259,6 +292,22 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::Linebreaksbr(LinebreaksbrFilter)
+                }
+                BuiltinFilter::Timesince
+                    if is_django_filter(parser.py, &django.filter, "timesince_filter") =>
+                {
+                    FilterType::Timesince(TimesinceFilter {
+                        django,
+                        until: false,
+                    })
+                }
+                BuiltinFilter::Timeuntil
+                    if is_django_filter(parser.py, &django.filter, "timeuntil_filter") =>
+                {
+                    FilterType::Timesince(TimesinceFilter {
+                        django,
+                        until: true,
+                    })
                 }
                 _ => FilterType::Django(django),
             };
