@@ -1291,7 +1291,7 @@ fn render_value_in_context<'t>(value: ContentString<'t>, context: &Context) -> C
 
 /// Skip the escape writer for plain text: its per-byte bookkeeping is more
 /// expensive than scanning once and appending the unchanged slice in bulk.
-fn append_escaped(text: &str, output: &mut String) {
+pub(crate) fn append_escaped(text: &str, output: &mut String) {
     // The library's append writer regresses large values on some platforms.
     // Its Cow encoder still borrows unchanged text, and borrowing the Python
     // input avoids the source copy even when an escaped fragment is required.

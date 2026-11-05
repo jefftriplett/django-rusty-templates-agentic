@@ -39,6 +39,7 @@ use crate::filters::ExternalFilter;
 use crate::filters::FilterType;
 use crate::filters::FloatFormatFilter;
 use crate::filters::ForceEscapeFilter;
+use crate::filters::JoinFilter;
 use crate::filters::LastFilter;
 use crate::filters::LengthFilter;
 use crate::filters::LowerFilter;
@@ -265,6 +266,11 @@ impl Filter {
                         }
                     });
                     FilterType::Slice(SliceFilter { django, literal })
+                }
+                BuiltinFilter::Join
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Join(JoinFilter { django })
                 }
                 _ => FilterType::Django(django),
             };

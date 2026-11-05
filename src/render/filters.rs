@@ -11,15 +11,18 @@ use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
-    EscapejsFilter, ExternalFilter, FilterType, FloatFormatFilter, ForceEscapeFilter, LastFilter,
-    LengthFilter, LowerFilter, SafeFilter, SliceArgument, SliceFilter, SlugifyFilter, TitleFilter,
-    TruncateCharsFilter, UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
+    EscapejsFilter, ExternalFilter, FilterType, FloatFormatFilter, ForceEscapeFilter, JoinFilter,
+    LastFilter, LengthFilter, LowerFilter, SafeFilter, SliceArgument, SliceFilter, SlugifyFilter,
+    TitleFilter, TruncateCharsFilter, UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
 use crate::render::dateformat::{Formatted, Formatter, template_localtime};
 use crate::render::l10n::Grouping;
-use crate::render::types::{AsBorrowedContent, Content, ContentString, Context, IntoOwnedContent};
+use crate::render::types::{
+    AsBorrowedContent, Content, ContentString, Context, IntoOwnedContent, append_escaped,
+    append_python_string,
+};
 use crate::render::{Resolve, ResolveFailures, ResolveResult};
 use dtl_lexer::types::TemplateString;
 use unicode_normalization::UnicodeNormalization;
@@ -27,6 +30,7 @@ use unicode_normalization::UnicodeNormalization;
 static MARK_FILTER_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 pub static DATE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TIME_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static PGETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -101,6 +105,7 @@ impl ResolveFilter for FilterType {
             Self::External(filter) => filter.resolve(variable, py, template, context),
             Self::FloatFormat(filter) => filter.resolve(variable, py, template, context),
             Self::ForceEscape(filter) => filter.resolve(variable, py, template, context),
+            Self::Join(filter) => filter.resolve(variable, py, template, context),
             Self::Last(filter) => filter.resolve(variable, py, template, context),
             Self::Lower(filter) => filter.resolve(variable, py, template, context),
             Self::Length(filter) => filter.resolve(variable, py, template, context),
@@ -994,6 +999,122 @@ impl ResolveFilter for FloatFormatFilter {
             return Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
                 formatted,
             )))));
+        }
+        self.django.call(variable, argument, py, context)
+    }
+}
+
+/// What Django's `join` returns for a list or tuple.
+enum Joined {
+    /// `mark_safe` of the joined text.
+    Text(String),
+    /// The value itself: joining raised `TypeError`, which Django's filter
+    /// swallows.
+    Unchanged,
+}
+
+/// Whether `object` is exactly a `SafeString`, so `conditional_escape`
+/// returns it as it is.
+fn is_exact_safe_string(object: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = object.py();
+    Ok(object
+        .get_type()
+        .is(SAFESTRING.import(py, "django.utils.safestring", "SafeString")?))
+}
+
+/// The separator Django's `join` writes: `conditional_escape(arg)` when
+/// autoescaping, otherwise `arg` itself. `None` leaves other separators to
+/// Django.
+fn join_separator(separator: &Content<'_, '_>, autoescape: bool) -> PyResult<Option<String>> {
+    let (text, safe) = match separator {
+        Content::String(ContentString::HtmlSafe(text)) => (text.as_ref(), true),
+        Content::String(ContentString::String(text) | ContentString::HtmlUnsafe(text)) => {
+            (text.as_ref(), false)
+        }
+        Content::Py(object) if object.is_exact_instance_of::<PyString>() => {
+            (object.cast::<PyString>()?.to_str()?, false)
+        }
+        Content::Py(object) if is_exact_safe_string(object)? => {
+            (object.cast::<PyString>()?.to_str()?, true)
+        }
+        Content::Py(_) | Content::Int(_) | Content::Float(_) | Content::Bool(_) => {
+            return Ok(None);
+        }
+    };
+    let mut output = String::with_capacity(text.len());
+    if autoescape && !safe {
+        append_escaped(text, &mut output);
+    } else {
+        output.push_str(text);
+    }
+    Ok(Some(output))
+}
+
+/// Django's `join` over the items of a list or tuple.
+fn join_items<'py>(
+    value: &Bound<'py, PyAny>,
+    separator: &str,
+    autoescape: bool,
+    py: Python<'py>,
+) -> PyResult<Joined> {
+    let mut output = String::new();
+    for (index, item) in value.try_iter()?.enumerate() {
+        let item = item?;
+        if index > 0 {
+            output.push_str(separator);
+        }
+        if !autoescape {
+            // `str.join` accepts only strings.
+            if !item.is_instance_of::<PyString>() {
+                return Ok(Joined::Unchanged);
+            }
+            append_python_string(&item, false, &mut output)?;
+        } else if item.is_exact_instance_of::<PyString>() {
+            append_python_string(&item, true, &mut output)?;
+        } else if is_exact_safe_string(&item)? {
+            append_python_string(&item, false, &mut output)?;
+        } else if item.is_exact_instance_of::<PyInt>() {
+            // Digits need no escaping.
+            append_python_string(&item.str()?.into_any(), false, &mut output)?;
+        } else {
+            let escaped = match CONDITIONAL_ESCAPE
+                .import(py, "django.utils.html", "conditional_escape")?
+                .call1((item,))
+            {
+                Err(error) if error.is_instance_of::<PyTypeError>(py) => {
+                    return Ok(Joined::Unchanged);
+                }
+                result => result?,
+            };
+            // `str.join` raises `TypeError` for an `__html__` that returns a non-string.
+            if !escaped.is_instance_of::<PyString>() {
+                return Ok(Joined::Unchanged);
+            }
+            append_python_string(&escaped, false, &mut output)?;
+        }
+    }
+    Ok(Joined::Text(output))
+}
+
+impl ResolveFilter for JoinFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        if let Some(Content::Py(value)) = &variable
+            && let Some(separator) = argument.value()
+            && (value.is_exact_instance_of::<PyList>() || value.is_exact_instance_of::<PyTuple>())
+            && let Some(separator) = join_separator(separator, context.autoescape)?
+        {
+            let joined = join_items(value, &separator, context.autoescape, py)?;
+            return Ok(Some(match joined {
+                Joined::Text(text) => Content::String(ContentString::HtmlSafe(Cow::Owned(text))),
+                Joined::Unchanged => Content::Py(value.clone()),
+            }));
         }
         self.django.call(variable, argument, py, context)
     }
