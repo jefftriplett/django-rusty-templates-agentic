@@ -31,6 +31,7 @@ pub enum FilterType {
     Slugify(SlugifyFilter),
     Title(TitleFilter),
     TruncateChars(TruncateCharsFilter),
+    TruncateWords(TruncateWordsFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -243,6 +244,13 @@ pub struct TitleFilter;
 /// integer length. Other inputs call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TruncateCharsFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `truncatewords`, computed natively for strings and an integer
+/// length. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TruncateWordsFilter {
     pub django: DjangoFilter,
 }
 

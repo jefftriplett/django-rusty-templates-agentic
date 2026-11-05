@@ -13,7 +13,8 @@ use crate::filters::{
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
     EscapejsFilter, ExternalFilter, FilterType, FloatFormatFilter, ForceEscapeFilter, JoinFilter,
     LastFilter, LengthFilter, LowerFilter, SafeFilter, SliceArgument, SliceFilter, SlugifyFilter,
-    TitleFilter, TruncateCharsFilter, UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
+    TitleFilter, TruncateCharsFilter, TruncateWordsFilter, UpperFilter, WordcountFilter,
+    WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -114,6 +115,7 @@ impl ResolveFilter for FilterType {
             Self::Title(filter) => filter.resolve(variable, py, template, context),
             Self::TruncateChars(filter) => filter.resolve(variable, py, template, context),
             Self::Slice(filter) => filter.resolve(variable, py, template, context),
+            Self::TruncateWords(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -1333,7 +1335,7 @@ impl TruncationText {
     }
 }
 
-/// A string `truncatechars` can shorten natively.
+/// A string the truncation filters can shorten natively.
 #[derive(Clone, Copy)]
 enum Text<'a> {
     Plain(&'a str),
@@ -1342,10 +1344,52 @@ enum Text<'a> {
 }
 
 impl<'a> Text<'a> {
+    /// Plain and safe strings, which `str()` in Django's filters leaves as
+    /// they are. Other values return `None` and are left to Django.
+    fn from_variable(
+        variable: Option<&'a Content<'_, '_>>,
+        py: Python<'_>,
+    ) -> PyResult<Option<Self>> {
+        Ok(match variable {
+            None => Some(Self::Plain("")),
+            Some(Content::String(ContentString::HtmlSafe(content))) => Some(Self::Safe(content)),
+            Some(Content::String(
+                ContentString::String(content) | ContentString::HtmlUnsafe(content),
+            )) => Some(Self::Plain(content)),
+            Some(Content::Py(object)) => match object.cast::<PyString>() {
+                Ok(string) if string.is_exact_instance_of::<PyString>() => {
+                    string.to_str().ok().map(Self::Plain)
+                }
+                Ok(string)
+                    if string.get_type().is(SAFESTRING.import(
+                        py,
+                        "django.utils.safestring",
+                        "SafeString",
+                    )?) =>
+                {
+                    string.to_str().ok().map(Self::Safe)
+                }
+                _ => None,
+            },
+            Some(Content::Float(_) | Content::Int(_) | Content::Bool(_)) => None,
+        })
+    }
+
     const fn as_str(self) -> &'a str {
         match self {
             Self::Plain(text) | Self::Safe(text) => text,
         }
+    }
+
+    /// The filter result for this text, safe only when the input was:
+    /// Django's truncation filters are `is_safe`.
+    fn into_content<'t, 'py>(self, result: String, context: &Context) -> Content<'t, 'py> {
+        let result = Cow::Owned(result);
+        Content::String(match self {
+            Self::Safe(_) => ContentString::HtmlSafe(result),
+            Self::Plain(_) if context.autoescape => ContentString::HtmlUnsafe(result),
+            Self::Plain(_) => ContentString::String(result),
+        })
     }
 }
 
@@ -1567,40 +1611,61 @@ impl ResolveFilter for TruncateCharsFilter {
     ) -> ResolveResult<'t, 'py> {
         let argument = self.django.resolve_argument(py, template, context)?;
         let length = argument.value().and_then(integer_argument);
-        // Plain and safe strings, which `str()` in Django's filter leaves as they are.
-        let text = match &variable {
-            None => Some(Text::Plain("")),
-            Some(Content::String(ContentString::HtmlSafe(content))) => Some(Text::Safe(content)),
-            Some(Content::String(
-                ContentString::String(content) | ContentString::HtmlUnsafe(content),
-            )) => Some(Text::Plain(content)),
-            Some(Content::Py(object)) => match object.cast::<PyString>() {
-                Ok(string) if string.is_exact_instance_of::<PyString>() => {
-                    string.to_str().ok().map(Text::Plain)
-                }
-                Ok(string)
-                    if string.get_type().is(SAFESTRING.import(
-                        py,
-                        "django.utils.safestring",
-                        "SafeString",
-                    )?) =>
-                {
-                    string.to_str().ok().map(Text::Safe)
-                }
-                _ => None,
-            },
-            Some(Content::Float(_) | Content::Int(_) | Content::Bool(_)) => None,
-        };
         if let Some(length) = length
-            && let Some(text) = text
+            && let Some(text) = Text::from_variable(variable.as_ref(), py)?
             && let Some(truncated) = truncate_ascii_chars(text.as_str(), length, py, context)?
         {
-            let truncated = Cow::Owned(truncated);
-            return Ok(Some(Content::String(match text {
-                Text::Safe(_) => ContentString::HtmlSafe(truncated),
-                Text::Plain(_) if context.autoescape => ContentString::HtmlUnsafe(truncated),
-                Text::Plain(_) => ContentString::String(truncated),
-            })));
+            return Ok(Some(text.into_content(truncated, context)));
+        }
+        self.django.call(variable, argument, py, context)
+    }
+}
+
+/// Whitespace as Python's `str.split()` sees it: Unicode `White_Space` plus
+/// the information separators U+001C to U+001F.
+fn is_python_whitespace(character: char) -> bool {
+    character.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&character)
+}
+
+/// `Truncator(text).words(length, truncate=" …")`: the first `length` words
+/// joined by single spaces, then " …" when words were dropped. `truncatewords`
+/// passes this fixed text, so no translation is involved.
+fn truncate_words(text: &str, length: i64) -> String {
+    const TRUNCATE: &str = " …";
+    let Ok(length @ 1..) = usize::try_from(length) else {
+        return String::new();
+    };
+    let mut words = text
+        .split(is_python_whitespace)
+        .filter(|word| !word.is_empty());
+    let mut truncated = String::with_capacity(text.len());
+    for word in words.by_ref().take(length) {
+        if !truncated.is_empty() {
+            truncated.push(' ');
+        }
+        truncated.push_str(word);
+    }
+    // Django doesn't append the truncation text when the words already end with it.
+    if words.next().is_some() && !truncated.ends_with(TRUNCATE) {
+        truncated.push_str(TRUNCATE);
+    }
+    truncated
+}
+
+impl ResolveFilter for TruncateWordsFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        if let Some(length) = argument.value().and_then(integer_argument)
+            && let Some(text) = Text::from_variable(variable.as_ref(), py)?
+        {
+            let truncated = truncate_words(text.as_str(), length);
+            return Ok(Some(text.into_content(truncated, context)));
         }
         self.django.call(variable, argument, py, context)
     }
