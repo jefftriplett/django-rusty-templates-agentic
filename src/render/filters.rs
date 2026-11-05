@@ -27,7 +27,7 @@ use unicode_normalization::UnicodeNormalization;
 static MARK_FILTER_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
-static DATE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+pub static DATE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TIME_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static PGETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static COMBINING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -377,6 +377,18 @@ fn format_date<'t, 'py>(
         return Ok("".as_content());
     }
     let value = template_localtime(value, context.use_tz, &mut context.date_cache)?;
+    format_localtime(value, format, formatter, django_filter, context)
+}
+
+/// [`format_date`] for a value already in the time zone to format it in.
+pub fn format_localtime<'t, 'py>(
+    value: Bound<'py, PyAny>,
+    format: Option<Content<'t, 'py>>,
+    formatter: Formatter,
+    django_filter: &Bound<'py, PyAny>,
+    context: &mut Context,
+) -> PyResult<Content<'t, 'py>> {
+    let py = django_filter.py();
     if let Some(format_name) = format_name(format.as_ref(), formatter)?
         && let Some(formatted) = context.date_cache.format(&value, &format_name, formatter)?
     {
