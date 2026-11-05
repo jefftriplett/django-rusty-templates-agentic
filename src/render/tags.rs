@@ -14,7 +14,8 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBool, PyDict, PyList, PyNone, PyString, PyTuple};
 
 use crate::parse::Now;
-use crate::render::filters::ResolveFilter;
+use crate::render::dateformat::Formatter;
+use crate::render::filters::{DATE_FILTER, ResolveFilter, format_localtime};
 use crate::render::lorem::{COMMON_WORDS, paragraphs, words};
 use dtl_lexer::tag::lorem::LoremMethod;
 use dtl_lexer::types::{At, TemplateString};
@@ -1946,8 +1947,8 @@ impl Render for Now {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> RenderResult<'t> {
-        // `format_now` mirrors Django's NowNode: the current time in the
-        // current time zone (when USE_TZ is on), formatted by the date filter.
+        // Mirrors Django's NowNode: the current time in the current time zone
+        // (when USE_TZ is on), formatted by the date filter.
         let (format, escape) = match &self.expression {
             Some(expression) => (
                 expression
@@ -1957,22 +1958,41 @@ impl Render for Now {
                         context,
                         ResolveFailures::IgnoreVariableDoesNotExist,
                     )?
-                    .unwrap_or_else(|| "".as_content())
-                    .to_py(py),
+                    .unwrap_or_else(|| "".as_content()),
                 self.escape && context.autoescape,
             ),
-            None => (PyString::new(py, &self.format).into_any(), false),
+            None => (self.format.as_content(), false),
         };
-        let result = py
-            .import("django_rusty_templates.diagnostics")?
-            .getattr("format_now")?
-            .call1((format, escape))?;
+        let now = context.date_cache.now(py)?;
+        let date = DATE_FILTER.import(py, "django.template.defaultfilters", "date")?;
+        let formatted = format_localtime(now, Some(format), Formatter::Date, date, context)?;
+        let formatted = match formatted {
+            Content::String(formatted) if escape && self.asvar.is_none() => {
+                return Ok(Cow::Owned(
+                    html_escape::encode_quoted_attribute(formatted.as_raw()).into_owned(),
+                ));
+            }
+            Content::String(formatted) if !escape => {
+                let formatted = formatted.into_raw();
+                if self.asvar.is_none() {
+                    return Ok(Cow::Owned(formatted.into_owned()));
+                }
+                PyString::new(py, &formatted).into_any()
+            }
+            formatted => formatted.to_py(py),
+        };
+        let formatted = match escape {
+            true => CONDITIONAL_ESCAPE
+                .import(py, "django.utils.html", "conditional_escape")?
+                .call1((formatted,))?,
+            false => formatted,
+        };
         if let Some(at) = self.asvar {
-            context.insert(template.content(at).to_string(), result)?;
+            context.insert(template.content(at).to_string(), formatted)?;
             return Ok(Cow::Borrowed(""));
         }
         Ok(Cow::Owned(
-            result
+            formatted
                 .cast_into::<PyString>()
                 .map_err(PyErr::from)?
                 .to_str()?

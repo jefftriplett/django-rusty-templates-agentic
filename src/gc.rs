@@ -315,7 +315,10 @@ impl Trace for FilterType {
             Self::Django(filter) => filter.filter.trace(visit),
             Self::External(filter) => filter.filter.trace(visit),
             Self::TruncateChars(filter) => filter.django.filter.trace(visit),
+            Self::TruncateWords(filter) => filter.django.filter.trace(visit),
             Self::FloatFormat(filter) => filter.django.filter.trace(visit),
+            Self::Slice(filter) => filter.django.filter.trace(visit),
+            Self::Join(filter) => filter.django.filter.trace(visit),
             Self::Timesince(filter) => filter.django.filter.trace(visit),
             Self::Add(_)
             | Self::AddSlashes(_)
@@ -330,6 +333,7 @@ impl Trace for FilterType {
             | Self::Escapejs(_)
             | Self::ForceEscape(_)
             | Self::Last(_)
+            | Self::Linebreaksbr(_)
             | Self::Lower(_)
             | Self::Length(_)
             | Self::Safe(_)

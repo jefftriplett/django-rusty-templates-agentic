@@ -5,6 +5,7 @@ pub mod filters;
 pub mod inheritance;
 mod l10n;
 mod language_cache;
+pub(crate) use language_cache::CatalogCache;
 pub mod lorem;
 mod stock;
 pub mod tags;

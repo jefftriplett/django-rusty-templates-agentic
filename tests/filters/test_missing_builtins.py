@@ -175,21 +175,250 @@ def test_truncatechars_follows_language_changes():
     assert rusty == django == "abcd…abc\u202e…abcd…ab..."
 
 
+@pytest.mark.parametrize("name", ["truncatechars", "truncatewords"])
 @pytest.mark.parametrize(
     "length", [None, [5], "", "5.0"], ids=["none", "list", "empty", "float_text"]
 )
-def test_truncatechars_invalid_length(length):
+def test_truncate_invalid_length(name, length):
     django, rusty = render_both(
-        "{{ value|truncatechars:length }}", {"value": "abcdefghij", "length": length}
+        "{{ value|" + name + ":length }}",
+        {"value": "abc def ghi jkl mno", "length": length},
     )
     assert rusty == django
 
 
-def test_truncatechars_replaced_builtin(monkeypatch):
-    monkeypatch.setitem(
-        register.filters, "truncatechars", lambda value, length: "replacement"
+@pytest.mark.parametrize("name", ["truncatechars", "truncatewords"])
+def test_truncate_replaced_builtin(monkeypatch, name):
+    monkeypatch.setitem(register.filters, name, lambda value, length: "replacement")
+    django, rusty = render_both(
+        "{{ value|" + name + ":5 }}", {"value": "abc def ghi jkl mno"}
     )
-    django, rusty = render_both("{{ value|truncatechars:5 }}", {"value": "abcdefghij"})
+    assert rusty == django == "replacement"
+
+
+SLICE_ARGUMENTS = [
+    "",
+    ":",
+    "::",
+    "2",
+    ":2",
+    "-1",
+    "1:-1",
+    "-3:",
+    "100:",
+    "-100:100",
+    "::2",
+    "::-1",
+    "5:1:-1",
+    "-1:-6:-2",
+    "::0",
+    "1:2:3:4",
+    "+2",
+    " 2",
+    "1_0",
+    "a",
+    "1.5",
+    "99999999999999999999",
+]
+
+
+class SliceRecorder:
+    def __getitem__(self, key):
+        return f"<{key!r}>"
+
+
+class SliceIndexError:
+    def __getitem__(self, key):
+        raise IndexError("no items")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("a <b> & 'c' d", id="ascii"),
+        pytest.param("héllo wörld ✓ 😀", id="non_ascii"),
+        pytest.param(mark_safe("<b>bold</b> ü"), id="safe"),
+        pytest.param(["a", "<b>", "c", "d", "e"], id="list"),
+        pytest.param((1, 2, 3, 4, 5, 6), id="tuple"),
+        pytest.param(range(10), id="range"),
+        pytest.param({"a": 1}, id="dict"),
+        pytest.param(SliceRecorder(), id="getitem"),
+        pytest.param(12345, id="int"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_slice_matches_django(value, autoescape):
+    # Context strings reach the filter as Python objects; `lower` and `safe`
+    # hand it native plain and safe strings.
+    literals = "".join(
+        "[{{ value" + prefix + "|slice:'" + argument + "' }}]"
+        for argument in SLICE_ARGUMENTS
+        for prefix in ["", "|lower", "|safe"]
+    )
+    source = (
+        "{% autoescape "
+        + autoescape
+        + " %}"
+        + literals
+        + "{% for argument in arguments %}"
+        "[{{ value|slice:argument }}][{{ value|lower|slice:argument }}]"
+        "{% endfor %}"
+        "[{{ value|slice:2 }}][{{ value|slice:-1 }}][{{ value|slice:1.5 }}]"
+        "[{{ missing|slice:':2' }}]"
+        "[{{ value|slice:'1:-1'|upper }}][{{ value|slice:'::-1'|length }}]"
+        "{% endautoescape %}"
+    )
+    arguments = [*SLICE_ARGUMENTS, 2, -1, 0, 10**30, 1.5, True, None, ["x"]]
+    django, rusty = render_both(source, {"value": value, "arguments": arguments})
+    assert rusty == django
+
+
+def test_slice_propagates_other_errors():
+    django, rusty = render_both("{{ value|slice:':2' }}", {"value": SliceIndexError()})
+    assert rusty == django == (IndexError, "no items")
+
+
+def test_slice_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "slice", lambda value, arg: "replacement")
+    django, rusty = render_both("{{ value|slice:':2' }}", {"value": "abcdefghij"})
+    assert rusty == django == "replacement"
+
+
+TRUNCATEWORDS_LENGTHS = [
+    -1,
+    0,
+    1,
+    2,
+    3,
+    4,
+    10,
+    "2",
+    "-1",
+    "x",
+    " 2",
+    "1_0",
+    2.5,
+    10**30,
+]
+
+
+@pytest.mark.parametrize("language", ["en", "he"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("one", id="one_word"),
+        pytest.param(" \t\n ", id="only_whitespace"),
+        pytest.param("one two three four", id="ascii"),
+        pytest.param("  one \t two\n\nthree  ", id="collapsed_whitespace"),
+        pytest.param("one\r\ntwo\x0bthree\x0cfour", id="control_whitespace"),
+        pytest.param("one\xa0two\u3000three\x1cfour\x85five", id="unicode_whitespace"),
+        pytest.param("one\u200btwo three", id="zero_width_space"),
+        pytest.param("a <b> & 'c' \"d\"", id="html"),
+        pytest.param(mark_safe("<b>bold</b> and <i>italic</i> text"), id="safe"),
+        pytest.param("héllo wörld 日本語 e\u0301", id="non_ascii"),
+        pytest.param("a … b … c", id="ellipsis_words"),
+        pytest.param("a…  …", id="ellipsis_suffix"),
+        pytest.param(translation.gettext_lazy("Good morning"), id="lazy"),
+        pytest.param(12345678901, id="int"),
+        pytest.param(Decimal("1234567.891"), id="decimal"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_truncatewords_matches_django(language, value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "{% for n in lengths %}[{{ value|truncatewords:n }}]{% endfor %}"
+        '[{{ missing|truncatewords:3 }}][{{ value|truncatewords:"2" }}]'
+        "{% endautoescape %}"
+    )
+    context = {"value": value, "lengths": TRUNCATEWORDS_LENGTHS}
+    with translation.override(language):
+        django, rusty = render_both(source, context)
+    assert rusty == django
+
+
+def test_truncatewords_splits_like_python():
+    every_character = "".join(
+        f"x{chr(code)}" for code in range(0x110000) if not 0xD800 <= code <= 0xDFFF
+    )
+    source = "{{ value|truncatewords:n }}"
+    for n in [10**6, 3]:
+        django, rusty = render_both(source, {"value": every_character, "n": n})
+        assert rusty == django
+
+
+class HtmlOnly:
+    """Has `__html__` but is not `SafeData`, so `str()` loses its safety."""
+
+    def __str__(self):
+        return "<i>a</i>\nb"
+
+    def __html__(self):
+        return "<i>a</i>"
+
+
+class SafeStr:
+    """`str()` returns a `SafeString`, which `@stringfilter` keeps safe."""
+
+    def __str__(self):
+        return mark_safe("<i>a</i>\r\nb")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("plain", id="plain"),
+        pytest.param("one\ntwo", id="lf"),
+        pytest.param("a\r\nb\rc\n\rd\r", id="mixed_newlines"),
+        pytest.param("\r\r\n\n\n", id="only_newlines"),
+        pytest.param("<b>&\"'</b>\nx", id="html"),
+        pytest.param("&amp;\r\n&lt;", id="entities"),
+        pytest.param("café\nü<ñ>\r日本", id="non_ascii"),
+        pytest.param(mark_safe("<b>x</b>\r\ny"), id="safe"),
+        pytest.param(translation.gettext_lazy("Goodbye"), id="lazy"),
+        pytest.param(123, id="int"),
+        pytest.param(1.0, id="float"),
+        pytest.param(1e16, id="float_exponent"),
+        pytest.param(True, id="bool"),
+        pytest.param(None, id="none"),
+        pytest.param(Decimal("1.50"), id="decimal"),
+        pytest.param(["<a>", "b\nc"], id="list"),
+        pytest.param(HtmlOnly(), id="html_only"),
+        pytest.param(SafeStr(), id="safe_str"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_linebreaksbr_matches_django(value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "[{{ value|linebreaksbr }}][{{ value|linebreaksbr|escape }}]"
+        "[{{ value|lower|linebreaksbr }}][{{ value|force_escape|linebreaksbr }}]"
+        "[{{ value|linebreaksbr|truncatechars:6 }}][{{ missing|linebreaksbr }}]"
+        "{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {"value": value})
+    assert rusty == django
+
+
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_linebreaksbr_literals(autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "[{{ '<a>\n&'|linebreaksbr }}][{{ 1.0|linebreaksbr }}]"
+        "[{{ 2|linebreaksbr }}][{{ 1e20|linebreaksbr }}]"
+        "{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {})
+    assert rusty == django
+
+
+def test_linebreaksbr_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "linebreaksbr", lambda value: "replacement")
+    django, rusty = render_both("{{ value|linebreaksbr }}", {"value": "a\nb"})
     assert rusty == django == "replacement"
 
 
@@ -378,4 +607,107 @@ def test_floatformat_replaced_builtin(monkeypatch):
         register.filters, "floatformat", lambda value, precision=-1: "replacement"
     )
     django, rusty = render_both("{{ value|floatformat:2 }}", {"value": 1.5})
+    assert rusty == django == "replacement"
+
+
+class JoinHtml:
+    def __html__(self):
+        return "<i>html</i>"
+
+    def __repr__(self):
+        return "JoinHtml"
+
+
+class JoinStr:
+    def __str__(self):
+        return "<str & obj>"
+
+    def __repr__(self):
+        return "JoinStr"
+
+
+class JoinHtmlNotString:
+    def __html__(self):
+        return 1
+
+    def __repr__(self):
+        return "JoinHtmlNotString"
+
+
+class JoinStrTypeError:
+    def __str__(self):
+        raise TypeError("no str")
+
+    def __repr__(self):
+        return "JoinStrTypeError"
+
+
+class JoinStrSubclass(str):
+    pass
+
+
+JOIN_VALUES = {
+    "strings": lambda: ["a", "<b>", "c & 'd'", '"e"'],
+    "empty": lambda: [],
+    "single": lambda: ["<only>"],
+    "tuple": lambda: ("<a>", "b"),
+    "safe_items": lambda: [mark_safe("<b>bold</b>"), "<i>"],
+    "ints": lambda: [1, -2, 10**30],
+    "mixed": lambda: [1.5, True, None, Decimal("2.50"), "<x>"],
+    "nested": lambda: [["<a>", 1], ("b",)],
+    "lazy": lambda: [translation.gettext_lazy("Goodbye"), "<x>"],
+    "html_object": lambda: [JoinHtml(), "<x>"],
+    "str_object": lambda: [JoinStr()],
+    "html_not_string": lambda: ["a", JoinHtmlNotString()],
+    "str_type_error": lambda: ["a", JoinStrTypeError()],
+    "str_subclass": lambda: [JoinStrSubclass("<sub>"), "b"],
+    "generator": lambda: (item for item in ["<a>", "b"]),
+    "range": lambda: range(3),
+    "dict": lambda: {"<k>": 1, "v": 2},
+    "string": lambda: "a<b",
+    "safe_string": lambda: mark_safe("<b>"),
+    "int": lambda: 5,
+    "none": lambda: None,
+}
+
+JOIN_SEPARATORS = {
+    "literal": '","',
+    "literal_html": '"<br>"',
+    "translated": '_("<sep>")',
+    "variable": "separator",
+    "safe_variable": "safe_separator",
+    "int_variable": "int_separator",
+    "none_variable": "none_separator",
+}
+
+
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+@pytest.mark.parametrize("separator", JOIN_SEPARATORS.values(), ids=JOIN_SEPARATORS)
+@pytest.mark.parametrize("value", JOIN_VALUES.values(), ids=JOIN_VALUES)
+def test_join_matches_django(value, separator, autoescape):
+    source = (
+        "{% load i18n %}{% autoescape " + autoescape + " %}"
+        "[{{ value|join:" + separator + " }}][{{ missing|join:" + separator + " }}]"
+        "{% endautoescape %}"
+    )
+    results = []
+    for name in ("django", "rusty"):
+        context = {
+            "value": value(),
+            "separator": "<&>",
+            "safe_separator": mark_safe("<hr>"),
+            "int_separator": 1,
+            "none_separator": None,
+        }
+        try:
+            results.append(engines[name].from_string(source).render(context))
+        except Exception as error:
+            results.append((type(error), str(error)))
+    django, rusty = results
+    assert rusty == django
+
+
+def test_join_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "join", lambda value, arg: "replacement")
+    django, rusty = render_both('{{ value|join:"," }}', {"value": ["a", "b"]})
     assert rusty == django == "replacement"
