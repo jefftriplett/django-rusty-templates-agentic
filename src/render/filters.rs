@@ -2,18 +2,18 @@ use std::borrow::Cow;
 
 use html_escape::encode_quoted_attribute_to_string;
 use num_traits::{ToPrimitive, Zero};
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDateTime, PyFloat, PyInt, PyList, PyString, PyTuple, PyType};
+use pyo3::types::{PyDateTime, PyFloat, PyInt, PyList, PySlice, PyString, PyTuple, PyType};
 
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
     EscapejsFilter, ExternalFilter, FilterType, FloatFormatFilter, ForceEscapeFilter, JoinFilter,
-    LastFilter, LengthFilter, LowerFilter, SafeFilter, SlugifyFilter, TitleFilter,
-    TruncateCharsFilter, UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
+    LastFilter, LengthFilter, LowerFilter, SafeFilter, SliceArgument, SliceFilter, SlugifyFilter,
+    TitleFilter, TruncateCharsFilter, UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -31,7 +31,7 @@ static MARK_FILTER_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-static DATE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+pub static DATE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TIME_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static PGETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static COMBINING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -113,6 +113,7 @@ impl ResolveFilter for FilterType {
             Self::Slugify(filter) => filter.resolve(variable, py, template, context),
             Self::Title(filter) => filter.resolve(variable, py, template, context),
             Self::TruncateChars(filter) => filter.resolve(variable, py, template, context),
+            Self::Slice(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -381,6 +382,18 @@ fn format_date<'t, 'py>(
         return Ok("".as_content());
     }
     let value = template_localtime(value, context.use_tz, &mut context.date_cache)?;
+    format_localtime(value, format, formatter, django_filter, context)
+}
+
+/// [`format_date`] for a value already in the time zone to format it in.
+pub fn format_localtime<'t, 'py>(
+    value: Bound<'py, PyAny>,
+    format: Option<Content<'t, 'py>>,
+    formatter: Formatter,
+    django_filter: &Bound<'py, PyAny>,
+    context: &mut Context,
+) -> PyResult<Content<'t, 'py>> {
+    let py = django_filter.py();
     if let Some(format_name) = format_name(format.as_ref(), formatter)?
         && let Some(formatted) = context.date_cache.format(&value, &format_name, formatter)?
     {
@@ -1366,6 +1379,182 @@ fn truncate_ascii_chars(
         &text[..end],
         truncation.after
     )))
+}
+
+/// The slice Django builds from a resolved argument. `None` leaves unusual
+/// arguments to Django's filter.
+fn slice_argument(argument: Option<&Content<'_, '_>>) -> Option<SliceArgument> {
+    match argument {
+        // Django's filter receives `None`, and `int("None")` fails.
+        None | Some(Content::Float(_) | Content::Bool(_)) => Some(SliceArgument::Invalid),
+        Some(Content::Int(n)) => n.to_isize().map(SliceArgument::stop),
+        Some(Content::String(text)) => SliceArgument::parse(text.as_raw()),
+        Some(Content::Py(object)) if object.is_exact_instance_of::<PyInt>() => {
+            object.extract().ok().map(SliceArgument::stop)
+        }
+        Some(Content::Py(object)) if object.is_exact_instance_of::<PyString>() => {
+            SliceArgument::parse(object.cast::<PyString>().ok()?.to_str().ok()?)
+        }
+        Some(Content::Py(_)) => None,
+    }
+}
+
+/// Python's `slice(start, stop, step).indices(length)`, as the first index,
+/// the step and the number of items selected.
+fn slice_indices(
+    length: usize,
+    start: Option<isize>,
+    stop: Option<isize>,
+    step: isize,
+) -> (isize, isize, usize) {
+    let length = isize::try_from(length).unwrap_or(isize::MAX);
+    // Keep the step negatable, as CPython does.
+    let step = step.max(-isize::MAX);
+    let adjust = |index: Option<isize>, default: isize| {
+        let index = index.unwrap_or(default);
+        if index < 0 {
+            let index = index + length;
+            if index < 0 {
+                if step < 0 { -1 } else { 0 }
+            } else {
+                index
+            }
+        } else if index >= length {
+            if step < 0 { length - 1 } else { length }
+        } else {
+            index
+        }
+    };
+    let (start, stop) = if step < 0 {
+        (adjust(start, isize::MAX), adjust(stop, isize::MIN))
+    } else {
+        (adjust(start, 0), adjust(stop, isize::MAX))
+    };
+    let count = if step < 0 && stop < start {
+        (start - stop - 1) / -step + 1
+    } else if step > 0 && start < stop {
+        (stop - start - 1) / step + 1
+    } else {
+        0
+    };
+    (start, step, count.unsigned_abs())
+}
+
+/// Slices `text` by characters, as Python slices a `str`, for a non-zero
+/// step. A step of one borrows from `text`.
+fn slice_text(
+    text: Cow<'_, str>,
+    start: Option<isize>,
+    stop: Option<isize>,
+    step: Option<isize>,
+) -> Cow<'_, str> {
+    let step = step.unwrap_or(1);
+    let ascii = text.is_ascii();
+    let length = if ascii {
+        text.len()
+    } else {
+        text.chars().count()
+    };
+    let (first, step, count) = slice_indices(length, start, stop, step);
+    if count == 0 {
+        return Cow::Borrowed("");
+    }
+    let first = first.unsigned_abs();
+    if step == 1 {
+        let byte = |index: usize| match ascii {
+            true => index,
+            false => text
+                .char_indices()
+                .nth(index)
+                .map_or(text.len(), |(at, _)| at),
+        };
+        let range = byte(first)..byte(first + count);
+        return match text {
+            Cow::Borrowed(text) => Cow::Borrowed(&text[range]),
+            Cow::Owned(text) => Cow::Owned(text[range].to_string()),
+        };
+    }
+    let stride = step.unsigned_abs();
+    Cow::Owned(if step > 0 {
+        text.chars()
+            .skip(first)
+            .step_by(stride)
+            .take(count)
+            .collect()
+    } else {
+        text.chars()
+            .rev()
+            .skip(length - 1 - first)
+            .step_by(stride)
+            .take(count)
+            .collect()
+    })
+}
+
+impl ResolveFilter for SliceFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let slice = match self.literal {
+            Some(slice) => slice,
+            None => {
+                let argument = self.django.resolve_argument(py, template, context)?;
+                match slice_argument(argument.value()) {
+                    Some(slice) => slice,
+                    None => return self.django.call(variable, argument, py, context),
+                }
+            }
+        };
+        let Some(value) = variable else {
+            return Ok(Some("".as_content()));
+        };
+        let SliceArgument::Bounds { start, stop, step } = slice else {
+            return Ok(Some(value));
+        };
+        Ok(Some(match value {
+            // Python rejects a zero step with ValueError, so Django returns the value.
+            Content::String(string) if step == Some(0) => Content::String(string),
+            Content::String(string) => {
+                let kind: fn(Cow<'t, str>) -> ContentString<'t> = match string {
+                    ContentString::HtmlSafe(_) => ContentString::HtmlSafe,
+                    ContentString::String(_) if !context.autoescape => ContentString::String,
+                    ContentString::String(_) | ContentString::HtmlUnsafe(_) => {
+                        ContentString::HtmlUnsafe
+                    }
+                };
+                Content::String(kind(slice_text(string.into_raw(), start, stop, step)))
+            }
+            // Numbers are not subscriptable: Django catches the TypeError.
+            Content::Int(_) | Content::Float(_) | Content::Bool(_) => value,
+            Content::Py(object) => {
+                let slice = py.get_type::<PySlice>().call1((start, stop, step))?;
+                match object.get_item(slice) {
+                    Ok(sliced) => {
+                        let safe = SAFEDATA.import(py, "django.utils.safestring", "SafeData")?;
+                        Content::Py(if object.is_instance(safe)? {
+                            MARK_FILTER_SAFE
+                                .import(py, "django.utils.safestring", "mark_safe")?
+                                .call1((sliced,))?
+                        } else {
+                            sliced
+                        })
+                    }
+                    Err(error)
+                        if error.is_instance_of::<PyValueError>(py)
+                            || error.is_instance_of::<PyTypeError>(py)
+                            || error.is_instance_of::<PyKeyError>(py) =>
+                    {
+                        Content::Py(object)
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }))
+    }
 }
 
 impl ResolveFilter for TruncateCharsFilter {

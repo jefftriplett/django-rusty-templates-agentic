@@ -316,6 +316,7 @@ impl Trace for FilterType {
             Self::External(filter) => filter.filter.trace(visit),
             Self::TruncateChars(filter) => filter.django.filter.trace(visit),
             Self::FloatFormat(filter) => filter.django.filter.trace(visit),
+            Self::Slice(filter) => filter.django.filter.trace(visit),
             Self::Join(filter) => filter.django.filter.trace(visit),
             Self::Add(_)
             | Self::AddSlashes(_)

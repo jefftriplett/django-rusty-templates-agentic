@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use super::filters::ResolveFilter;
 use dtl_lexer::types::TemplateString;
+use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyList, PyModule, PyString};
@@ -126,84 +127,25 @@ impl Render for StockNode {
             Self::Translate {
                 root,
                 filters,
-                noop,
                 message_context,
                 target,
+                cache,
+                ..
             } => {
-                let message_context = message_context
-                    .as_ref()
-                    .map(|expression| value(expression, py, template, context))
-                    .transpose()?;
-                // Django compiles _("literal") into a translation promise.
-                // TranslateNode's noop/context options do not retranslate it.
-                let literal = match root {
-                    TagElement::TranslatedText(text) => Some(TagElement::Text(*text)),
-                    _ => None,
-                };
-                let resolved = literal.as_ref().unwrap_or(root).resolve(
-                    py,
-                    template,
-                    context,
-                    ResolveFailures::IgnoreVariableDoesNotExist,
-                )?;
-                let missing = resolved.is_none();
-                let safe = if matches!(root, TagElement::Text(_) | TagElement::TranslatedText(_)) {
-                    Some(true)
-                } else {
-                    None
-                };
-                let input = match resolved {
-                    Some(Content::String(text)) if safe.is_some() => {
-                        PyString::new(py, text.as_raw()).into_any()
-                    }
-                    Some(content) => content.to_py(py),
-                    None => {
-                        let name = match root {
-                            TagElement::Variable(variable) => Some(template.content(variable.at)),
-                            _ => None,
-                        };
-                        context.invalid_value(py, name)?
-                    }
-                };
-                let noop = missing || (literal.is_none() && *noop);
-                let message_context = if literal.is_some() {
-                    None
-                } else {
-                    message_context
-                };
-                let output = if filters.is_empty() {
-                    service.getattr("render_translation")?.call1((
-                        input,
-                        noop,
-                        message_context,
-                        context.autoescape,
-                        context.use_l10n,
-                        context.use_tz,
-                        context
-                            .formatting_context
+                // A literal message without filters is always marked safe, so
+                // its output depends only on the active catalog.
+                let fixed = filters.is_empty()
+                    && match root {
+                        TagElement::TranslatedText(_) => true,
+                        TagElement::Text(_) => message_context
                             .as_ref()
-                            .map(|live| live.bind(py)),
-                        safe,
-                    ))?
+                            .is_none_or(|context| matches!(context, TagElement::Text(_))),
+                        _ => false,
+                    };
+                let output = if fixed {
+                    cache.get_or_try_init(py, || self.render_translation(py, template, context))?
                 } else {
-                    let initial = service.getattr("translate")?.call1((
-                        input,
-                        noop,
-                        message_context,
-                        false,
-                        safe,
-                    ))?;
-                    let mut result = Some(Content::Py(initial));
-                    if !missing || context.string_if_invalid.is_empty() {
-                        for filter in filters {
-                            result = filter.resolve(result, py, template, context)?;
-                        }
-                    }
-                    let result = result
-                        .map_or_else(|| py.None().into_bound(py), |content| content.to_py(py));
-                    service
-                        .getattr("finish_translation")?
-                        .call1((result, context.value_formatting_context(py)?))?
+                    self.render_translation(py, template, context)?
                 };
                 if let Some(target) = target {
                     context.insert(target.clone(), output)?;
@@ -258,6 +200,97 @@ impl Render for StockNode {
 }
 
 impl StockNode {
+    fn render_translation<'py>(
+        &self,
+        py: Python<'py>,
+        template: TemplateString<'_>,
+        context: &mut Context,
+    ) -> Result<Bound<'py, PyAny>, crate::error::PyRenderError> {
+        let Self::Translate {
+            root,
+            filters,
+            noop,
+            message_context,
+            ..
+        } = self
+        else {
+            unreachable!("translation renderer");
+        };
+        let service = services(py)?;
+        let message_context = message_context
+            .as_ref()
+            .map(|expression| value(expression, py, template, context))
+            .transpose()?;
+        // Django compiles _("literal") into a translation promise.
+        // TranslateNode's noop/context options do not retranslate it.
+        let literal = match root {
+            TagElement::TranslatedText(text) => Some(TagElement::Text(*text)),
+            _ => None,
+        };
+        let resolved = literal.as_ref().unwrap_or(root).resolve(
+            py,
+            template,
+            context,
+            ResolveFailures::IgnoreVariableDoesNotExist,
+        )?;
+        let missing = resolved.is_none();
+        let safe = if matches!(root, TagElement::Text(_) | TagElement::TranslatedText(_)) {
+            Some(true)
+        } else {
+            None
+        };
+        let input = match resolved {
+            Some(Content::String(text)) if safe.is_some() => {
+                PyString::new(py, text.as_raw()).into_any()
+            }
+            Some(content) => content.to_py(py),
+            None => {
+                let name = match root {
+                    TagElement::Variable(variable) => Some(template.content(variable.at)),
+                    _ => None,
+                };
+                context.invalid_value(py, name)?
+            }
+        };
+        let noop = missing || (literal.is_none() && *noop);
+        let message_context = if literal.is_some() {
+            None
+        } else {
+            message_context
+        };
+        Ok(if filters.is_empty() {
+            service.getattr("render_translation")?.call1((
+                input,
+                noop,
+                message_context,
+                context.autoescape,
+                context.use_l10n,
+                context.use_tz,
+                context
+                    .formatting_context
+                    .as_ref()
+                    .map(|live| live.bind(py)),
+                safe,
+            ))?
+        } else {
+            let initial =
+                service
+                    .getattr("translate")?
+                    .call1((input, noop, message_context, false, safe))?;
+            let mut result = Some(Content::Py(initial));
+            if !missing || context.string_if_invalid.is_empty() {
+                for filter in filters {
+                    result = filter.resolve(result, py, template, context)?;
+                }
+            }
+            let result =
+                result.map_or_else(|| py.None().into_bound(py), |content| content.to_py(py));
+            service
+                .getattr("finish_translation")?
+                .call1((result, context.value_formatting_context(py)?))?
+        })
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "follows Django's BlockTranslateNode.render step by step"
@@ -279,11 +312,15 @@ impl StockNode {
             trimmed,
             target,
             tag_name,
+            cache,
         } = self
         else {
             unreachable!("block translation renderer");
         };
         let service = services(py)?;
+        let literal_context = message_context
+            .as_ref()
+            .is_none_or(|context| matches!(context, TagElement::Text(_)));
         let message_context = message_context
             .as_ref()
             .map(|expression| value(expression, py, template, context))
@@ -322,29 +359,49 @@ impl StockNode {
             } else {
                 None
             };
-            let message = service.getattr("block_translation_message")?.call1((
-                singular,
-                plural,
-                count,
-                counter.as_ref().map(|(name, _)| name),
-                message_context,
-                trimmed,
-                tag_name,
-            ))?;
+            let translate = || {
+                service.getattr("block_translation_message")?.call1((
+                    singular,
+                    plural,
+                    count.as_ref(),
+                    counter.as_ref().map(|(name, _)| name),
+                    message_context.as_ref(),
+                    trimmed,
+                    tag_name,
+                ))
+            };
+            // Without a count, the message depends only on the active catalog.
+            // The nested retry runs with translations deactivated; it would
+            // only crowd real catalogs out of the cache.
+            let message = if count.is_none() && literal_context && !nested {
+                cache.get_or_try_init(py, translate)?
+            } else {
+                translate()?
+            };
             let data = PyDict::new(py);
             for name in variables {
-                let input = context
-                    .resolve_root(py, name)?
-                    .unwrap_or(context.invalid_value(py, Some(name))?);
-                let output = py
-                    .import("django.template.base")?
-                    .getattr("render_value_in_context")?
-                    .call1((input, context.value_formatting_context(py)?))?;
-                data.set_item(name, output)?;
+                let input = match context.resolve_root(py, name)? {
+                    Some(input) => input,
+                    None => context.invalid_value(py, Some(name))?,
+                };
+                // Django renders each value as `{{ name }}` would.
+                let output = Content::Py(input).render(context)?;
+                data.set_item(name, output.as_ref())?;
             }
-            let result = service
-                .getattr("finish_block_translation")?
-                .call1((message, data, tag_name, nested))?;
+            let result = match message.rem(&data) {
+                Ok(result) => result,
+                Err(error)
+                    if error.is_instance_of::<PyKeyError>(py)
+                        || error.is_instance_of::<PyValueError>(py) =>
+                {
+                    // Django's helper reports a malformed translation, or
+                    // returns None to retry with translations deactivated.
+                    service
+                        .getattr("finish_block_translation")?
+                        .call1((message, data, tag_name, nested))?
+                }
+                Err(error) => return Err(error.into()),
+            };
             Ok::<_, crate::error::PyRenderError>(result)
         })();
         for name in names.iter().rev() {

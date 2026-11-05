@@ -27,6 +27,7 @@ pub enum FilterType {
     Lower(LowerFilter),
     Length(LengthFilter),
     Safe(SafeFilter),
+    Slice(SliceFilter),
     Slugify(SlugifyFilter),
     Title(TitleFilter),
     TruncateChars(TruncateCharsFilter),
@@ -163,6 +164,74 @@ pub struct LengthFilter;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SafeFilter;
+
+/// Django's `slice`, computed natively for strings and Python objects. A
+/// literal argument is parsed once when the template is compiled.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SliceFilter {
+    pub django: DjangoFilter,
+    /// The parsed literal argument, or `None` to resolve it at render.
+    pub literal: Option<SliceArgument>,
+}
+
+/// The `slice(*bits)` Django builds from the filter argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SliceArgument {
+    Bounds {
+        start: Option<isize>,
+        stop: Option<isize>,
+        step: Option<isize>,
+    },
+    /// An argument Django rejects, so the value is returned unchanged.
+    Invalid,
+}
+
+impl SliceArgument {
+    /// `slice(n)` for an integer argument, which `str()` turns into one bit.
+    pub fn stop(stop: isize) -> Self {
+        Self::Bounds {
+            start: None,
+            stop: Some(stop),
+            step: None,
+        }
+    }
+
+    /// Parses `str(arg)` the way Django does. Returns `None` for bits that
+    /// are not plain optionally signed ASCII integers, leaving Python's
+    /// `int()` rules (whitespace, underscores, Unicode digits) to Django.
+    pub fn parse(text: &str) -> Option<Self> {
+        let bits: Vec<&str> = text.split(':').collect();
+        // `slice()` takes at most three arguments, so Django's TypeError
+        // returns the value whatever the bits are.
+        if bits.len() > 3 {
+            return Some(Self::Invalid);
+        }
+        let mut values = [None; 3];
+        for (value, bit) in values.iter_mut().zip(&bits) {
+            if bit.is_empty() {
+                continue;
+            }
+            let digits = bit.strip_prefix(['-', '+']).unwrap_or(bit);
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            *value = Some(bit.parse().ok()?);
+        }
+        let [first, second, step] = values;
+        Some(match bits.len() {
+            1 => Self::Bounds {
+                start: None,
+                stop: first,
+                step: None,
+            },
+            _ => Self::Bounds {
+                start: first,
+                stop: second,
+                step,
+            },
+        })
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlugifyFilter;
