@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2026.11.1
+
 Move shared Python imports to module level while retaining deferred imports for Django-version-specific features. ([#188](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/188))
 
 Refresh outdated README details, including the tested Django versions and benchmark regression gates, and skip pull request builds and tests for docs-only changes. ([#190](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/190))
