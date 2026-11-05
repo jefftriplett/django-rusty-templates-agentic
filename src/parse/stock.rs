@@ -7,6 +7,7 @@ use dtl_lexer::types::At;
 use pyo3::prelude::*;
 
 use super::{EndTagType, Parser, PyParseError, Tag, TagElement, TokenTree};
+use crate::render::CatalogCache;
 use crate::template::django_rusty_templates::TemplateSyntaxError;
 
 #[derive(Clone, Copy)]
@@ -53,6 +54,7 @@ pub enum StockNode {
         noop: bool,
         message_context: Option<TagElement>,
         target: Option<String>,
+        cache: CatalogCache,
     },
     BlockTranslate {
         singular: String,
@@ -64,6 +66,7 @@ pub enum StockNode {
         trimmed: bool,
         target: Option<String>,
         tag_name: String,
+        cache: CatalogCache,
     },
     Cache {
         timeout: TagElement,
@@ -310,6 +313,7 @@ impl Parser<'_, '_> {
             trimmed,
             target,
             tag_name: tag.to_string(),
+            cache: CatalogCache::default(),
         })
     }
 
@@ -463,6 +467,7 @@ impl Parser<'_, '_> {
                     noop,
                     message_context,
                     target,
+                    cache: CatalogCache::default(),
                 }
             }
             StockCompiler::BlockTranslate => self.parse_block_translate(tag, args)?,

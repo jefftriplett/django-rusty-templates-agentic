@@ -2,23 +2,29 @@ use std::borrow::Cow;
 
 use html_escape::encode_quoted_attribute_to_string;
 use num_traits::{ToPrimitive, Zero};
+use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDateTime, PyFloat, PyInt, PyList, PyString, PyTuple, PyType};
+use pyo3::types::{PyDateTime, PyFloat, PyInt, PyList, PySlice, PyString, PyTuple, PyType};
 
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
-    EscapejsFilter, ExternalFilter, FilterType, FloatFormatFilter, ForceEscapeFilter, LastFilter,
-    LengthFilter, LowerFilter, SafeFilter, SlugifyFilter, TitleFilter, TruncateCharsFilter,
+    EscapejsFilter, ExternalFilter, FilterType, FloatFormatFilter, ForceEscapeFilter, JoinFilter,
+    LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter, LowerFilter, SafeFilter,
+    SliceArgument, SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter,
     TruncateWordsFilter, UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
 use crate::render::dateformat::{Formatted, Formatter, template_localtime};
 use crate::render::l10n::Grouping;
-use crate::render::types::{AsBorrowedContent, Content, ContentString, Context, IntoOwnedContent};
+use crate::render::timesince::{TimeSince, TimeStrings, timesince};
+use crate::render::types::{
+    AsBorrowedContent, Content, ContentString, Context, IntoOwnedContent, append_escaped,
+    append_python_string,
+};
 use crate::render::{Resolve, ResolveFailures, ResolveResult};
 use dtl_lexer::types::TemplateString;
 use unicode_normalization::UnicodeNormalization;
@@ -26,7 +32,8 @@ use unicode_normalization::UnicodeNormalization;
 static MARK_FILTER_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
-static DATE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+pub static DATE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TIME_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static PGETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static COMBINING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -101,13 +108,18 @@ impl ResolveFilter for FilterType {
             Self::External(filter) => filter.resolve(variable, py, template, context),
             Self::FloatFormat(filter) => filter.resolve(variable, py, template, context),
             Self::ForceEscape(filter) => filter.resolve(variable, py, template, context),
+            Self::Join(filter) => filter.resolve(variable, py, template, context),
             Self::Last(filter) => filter.resolve(variable, py, template, context),
+            Self::Linebreaks(filter) => filter.resolve(variable, py, template, context),
+            Self::Linebreaksbr(filter) => filter.resolve(variable, py, template, context),
             Self::Lower(filter) => filter.resolve(variable, py, template, context),
             Self::Length(filter) => filter.resolve(variable, py, template, context),
             Self::Safe(filter) => filter.resolve(variable, py, template, context),
             Self::Slugify(filter) => filter.resolve(variable, py, template, context),
+            Self::Timesince(filter) => filter.resolve(variable, py, template, context),
             Self::Title(filter) => filter.resolve(variable, py, template, context),
             Self::TruncateChars(filter) => filter.resolve(variable, py, template, context),
+            Self::Slice(filter) => filter.resolve(variable, py, template, context),
             Self::TruncateWords(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
@@ -377,6 +389,18 @@ fn format_date<'t, 'py>(
         return Ok("".as_content());
     }
     let value = template_localtime(value, context.use_tz, &mut context.date_cache)?;
+    format_localtime(value, format, formatter, django_filter, context)
+}
+
+/// [`format_date`] for a value already in the time zone to format it in.
+pub fn format_localtime<'t, 'py>(
+    value: Bound<'py, PyAny>,
+    format: Option<Content<'t, 'py>>,
+    formatter: Formatter,
+    django_filter: &Bound<'py, PyAny>,
+    context: &mut Context,
+) -> PyResult<Content<'t, 'py>> {
+    let py = django_filter.py();
     if let Some(format_name) = format_name(format.as_ref(), formatter)?
         && let Some(formatted) = context.date_cache.format(&value, &format_name, formatter)?
     {
@@ -987,6 +1011,195 @@ impl ResolveFilter for FloatFormatFilter {
     }
 }
 
+/// What Django's `join` returns for a list or tuple.
+enum Joined {
+    /// `mark_safe` of the joined text.
+    Text(String),
+    /// The value itself: joining raised `TypeError`, which Django's filter
+    /// swallows.
+    Unchanged,
+}
+
+/// Whether `object` is exactly a `SafeString`, so `conditional_escape`
+/// returns it as it is.
+fn is_exact_safe_string(object: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = object.py();
+    Ok(object
+        .get_type()
+        .is(SAFESTRING.import(py, "django.utils.safestring", "SafeString")?))
+}
+
+/// The separator Django's `join` writes: `conditional_escape(arg)` when
+/// autoescaping, otherwise `arg` itself. `None` leaves other separators to
+/// Django.
+fn join_separator(separator: &Content<'_, '_>, autoescape: bool) -> PyResult<Option<String>> {
+    let (text, safe) = match separator {
+        Content::String(ContentString::HtmlSafe(text)) => (text.as_ref(), true),
+        Content::String(ContentString::String(text) | ContentString::HtmlUnsafe(text)) => {
+            (text.as_ref(), false)
+        }
+        Content::Py(object) if object.is_exact_instance_of::<PyString>() => {
+            (object.cast::<PyString>()?.to_str()?, false)
+        }
+        Content::Py(object) if is_exact_safe_string(object)? => {
+            (object.cast::<PyString>()?.to_str()?, true)
+        }
+        Content::Py(_) | Content::Int(_) | Content::Float(_) | Content::Bool(_) => {
+            return Ok(None);
+        }
+    };
+    let mut output = String::with_capacity(text.len());
+    if autoescape && !safe {
+        append_escaped(text, &mut output);
+    } else {
+        output.push_str(text);
+    }
+    Ok(Some(output))
+}
+
+/// Django's `join` over the items of a list or tuple.
+fn join_items<'py>(
+    value: &Bound<'py, PyAny>,
+    separator: &str,
+    autoescape: bool,
+    py: Python<'py>,
+) -> PyResult<Joined> {
+    let mut output = String::new();
+    for (index, item) in value.try_iter()?.enumerate() {
+        let item = item?;
+        if index > 0 {
+            output.push_str(separator);
+        }
+        if !autoescape {
+            // `str.join` accepts only strings.
+            if !item.is_instance_of::<PyString>() {
+                return Ok(Joined::Unchanged);
+            }
+            append_python_string(&item, false, &mut output)?;
+        } else if item.is_exact_instance_of::<PyString>() {
+            append_python_string(&item, true, &mut output)?;
+        } else if is_exact_safe_string(&item)? {
+            append_python_string(&item, false, &mut output)?;
+        } else if item.is_exact_instance_of::<PyInt>() {
+            // Digits need no escaping.
+            append_python_string(&item.str()?.into_any(), false, &mut output)?;
+        } else {
+            let escaped = match CONDITIONAL_ESCAPE
+                .import(py, "django.utils.html", "conditional_escape")?
+                .call1((item,))
+            {
+                Err(error) if error.is_instance_of::<PyTypeError>(py) => {
+                    return Ok(Joined::Unchanged);
+                }
+                result => result?,
+            };
+            // `str.join` raises `TypeError` for an `__html__` that returns a non-string.
+            if !escaped.is_instance_of::<PyString>() {
+                return Ok(Joined::Unchanged);
+            }
+            append_python_string(&escaped, false, &mut output)?;
+        }
+    }
+    Ok(Joined::Text(output))
+}
+
+impl ResolveFilter for JoinFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        if let Some(Content::Py(value)) = &variable
+            && let Some(separator) = argument.value()
+            && (value.is_exact_instance_of::<PyList>() || value.is_exact_instance_of::<PyTuple>())
+            && let Some(separator) = join_separator(separator, context.autoescape)?
+        {
+            let joined = join_items(value, &separator, context.autoescape, py)?;
+            return Ok(Some(match joined {
+                Joined::Text(text) => Content::String(ContentString::HtmlSafe(Cow::Owned(text))),
+                Joined::Unchanged => Content::Py(value.clone()),
+            }));
+        }
+        self.django.call(variable, argument, py, context)
+    }
+}
+
+impl ResolveFilter for TimesinceFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        if let Some(text) =
+            time_since_text(variable.as_ref(), argument.value(), self.until, context)?
+        {
+            return Ok(Some(Content::String(match context.autoescape {
+                false => ContentString::String(Cow::Owned(text)),
+                true => ContentString::HtmlUnsafe(Cow::Owned(text)),
+            })));
+        }
+        self.django.call(variable, argument, py, context)
+    }
+}
+
+/// What Django's `timesince_filter`, or `timeuntil_filter` when `until` is
+/// set, returns for `value` and its comparison time `now`. `None` when
+/// Django's filter must handle them.
+fn time_since_text(
+    value: Option<&Content<'_, '_>>,
+    now: Option<&Content<'_, '_>>,
+    until: bool,
+    context: &mut Context,
+) -> PyResult<Option<String>> {
+    // Both filters return "" for a falsy value and treat a falsy comparison
+    // time as the current time.
+    let value = match value {
+        None => return Ok(Some(String::new())),
+        Some(Content::Py(value)) if value.is_none() => return Ok(Some(String::new())),
+        Some(Content::Py(value)) => value,
+        Some(Content::String(
+            ContentString::String(text)
+            | ContentString::HtmlSafe(text)
+            | ContentString::HtmlUnsafe(text),
+        )) if text.is_empty() => return Ok(Some(String::new())),
+        Some(_) => return Ok(None),
+    };
+    let now = match now {
+        None => None,
+        Some(Content::Py(now)) if now.is_none() => None,
+        Some(Content::Py(now)) => Some(now),
+        Some(Content::String(
+            ContentString::String(text)
+            | ContentString::HtmlSafe(text)
+            | ContentString::HtmlUnsafe(text),
+        )) if text.is_empty() => None,
+        Some(_) => return Ok(None),
+    };
+    // Django's filter reproduces any error, or catches it and returns "".
+    let Ok(Some(since)) = timesince(value, now, until) else {
+        return Ok(None);
+    };
+    let partials = match since {
+        TimeSince::Partials(partials) => partials,
+        TimeSince::Mismatched => return Ok(Some(String::new())),
+    };
+    let py = value.py();
+    let text = match context
+        .time_strings
+        .get_or_try_init(py, |_| Ok(TimeStrings::default()))?
+    {
+        Some(strings) => strings.format(py, partials)?,
+        None => TimeStrings::default().format(py, partials)?,
+    };
+    Ok(Some(text))
+}
+
 impl ResolveFilter for ForceEscapeFilter {
     fn resolve<'t, 'py>(
         &self,
@@ -1307,6 +1520,182 @@ fn truncate_chars(
     )))
 }
 
+/// The slice Django builds from a resolved argument. `None` leaves unusual
+/// arguments to Django's filter.
+fn slice_argument(argument: Option<&Content<'_, '_>>) -> Option<SliceArgument> {
+    match argument {
+        // Django's filter receives `None`, and `int("None")` fails.
+        None | Some(Content::Float(_) | Content::Bool(_)) => Some(SliceArgument::Invalid),
+        Some(Content::Int(n)) => n.to_isize().map(SliceArgument::stop),
+        Some(Content::String(text)) => SliceArgument::parse(text.as_raw()),
+        Some(Content::Py(object)) if object.is_exact_instance_of::<PyInt>() => {
+            object.extract().ok().map(SliceArgument::stop)
+        }
+        Some(Content::Py(object)) if object.is_exact_instance_of::<PyString>() => {
+            SliceArgument::parse(object.cast::<PyString>().ok()?.to_str().ok()?)
+        }
+        Some(Content::Py(_)) => None,
+    }
+}
+
+/// Python's `slice(start, stop, step).indices(length)`, as the first index,
+/// the step and the number of items selected.
+fn slice_indices(
+    length: usize,
+    start: Option<isize>,
+    stop: Option<isize>,
+    step: isize,
+) -> (isize, isize, usize) {
+    let length = isize::try_from(length).unwrap_or(isize::MAX);
+    // Keep the step negatable, as CPython does.
+    let step = step.max(-isize::MAX);
+    let adjust = |index: Option<isize>, default: isize| {
+        let index = index.unwrap_or(default);
+        if index < 0 {
+            let index = index + length;
+            if index < 0 {
+                if step < 0 { -1 } else { 0 }
+            } else {
+                index
+            }
+        } else if index >= length {
+            if step < 0 { length - 1 } else { length }
+        } else {
+            index
+        }
+    };
+    let (start, stop) = if step < 0 {
+        (adjust(start, isize::MAX), adjust(stop, isize::MIN))
+    } else {
+        (adjust(start, 0), adjust(stop, isize::MAX))
+    };
+    let count = if step < 0 && stop < start {
+        (start - stop - 1) / -step + 1
+    } else if step > 0 && start < stop {
+        (stop - start - 1) / step + 1
+    } else {
+        0
+    };
+    (start, step, count.unsigned_abs())
+}
+
+/// Slices `text` by characters, as Python slices a `str`, for a non-zero
+/// step. A step of one borrows from `text`.
+fn slice_text(
+    text: Cow<'_, str>,
+    start: Option<isize>,
+    stop: Option<isize>,
+    step: Option<isize>,
+) -> Cow<'_, str> {
+    let step = step.unwrap_or(1);
+    let ascii = text.is_ascii();
+    let length = if ascii {
+        text.len()
+    } else {
+        text.chars().count()
+    };
+    let (first, step, count) = slice_indices(length, start, stop, step);
+    if count == 0 {
+        return Cow::Borrowed("");
+    }
+    let first = first.unsigned_abs();
+    if step == 1 {
+        let byte = |index: usize| match ascii {
+            true => index,
+            false => text
+                .char_indices()
+                .nth(index)
+                .map_or(text.len(), |(at, _)| at),
+        };
+        let range = byte(first)..byte(first + count);
+        return match text {
+            Cow::Borrowed(text) => Cow::Borrowed(&text[range]),
+            Cow::Owned(text) => Cow::Owned(text[range].to_string()),
+        };
+    }
+    let stride = step.unsigned_abs();
+    Cow::Owned(if step > 0 {
+        text.chars()
+            .skip(first)
+            .step_by(stride)
+            .take(count)
+            .collect()
+    } else {
+        text.chars()
+            .rev()
+            .skip(length - 1 - first)
+            .step_by(stride)
+            .take(count)
+            .collect()
+    })
+}
+
+impl ResolveFilter for SliceFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let slice = match self.literal {
+            Some(slice) => slice,
+            None => {
+                let argument = self.django.resolve_argument(py, template, context)?;
+                match slice_argument(argument.value()) {
+                    Some(slice) => slice,
+                    None => return self.django.call(variable, argument, py, context),
+                }
+            }
+        };
+        let Some(value) = variable else {
+            return Ok(Some("".as_content()));
+        };
+        let SliceArgument::Bounds { start, stop, step } = slice else {
+            return Ok(Some(value));
+        };
+        Ok(Some(match value {
+            // Python rejects a zero step with ValueError, so Django returns the value.
+            Content::String(string) if step == Some(0) => Content::String(string),
+            Content::String(string) => {
+                let kind: fn(Cow<'t, str>) -> ContentString<'t> = match string {
+                    ContentString::HtmlSafe(_) => ContentString::HtmlSafe,
+                    ContentString::String(_) if !context.autoescape => ContentString::String,
+                    ContentString::String(_) | ContentString::HtmlUnsafe(_) => {
+                        ContentString::HtmlUnsafe
+                    }
+                };
+                Content::String(kind(slice_text(string.into_raw(), start, stop, step)))
+            }
+            // Numbers are not subscriptable: Django catches the TypeError.
+            Content::Int(_) | Content::Float(_) | Content::Bool(_) => value,
+            Content::Py(object) => {
+                let slice = py.get_type::<PySlice>().call1((start, stop, step))?;
+                match object.get_item(slice) {
+                    Ok(sliced) => {
+                        let safe = SAFEDATA.import(py, "django.utils.safestring", "SafeData")?;
+                        Content::Py(if object.is_instance(safe)? {
+                            MARK_FILTER_SAFE
+                                .import(py, "django.utils.safestring", "mark_safe")?
+                                .call1((sliced,))?
+                        } else {
+                            sliced
+                        })
+                    }
+                    Err(error)
+                        if error.is_instance_of::<PyValueError>(py)
+                            || error.is_instance_of::<PyTypeError>(py)
+                            || error.is_instance_of::<PyKeyError>(py) =>
+                    {
+                        Content::Py(object)
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }))
+    }
+}
+
 impl ResolveFilter for TruncateCharsFilter {
     fn resolve<'t, 'py>(
         &self,
@@ -1374,6 +1763,129 @@ impl ResolveFilter for TruncateWordsFilter {
             return Ok(Some(text.into_content(truncated, context)));
         }
         self.django.call(variable, argument, py, context)
+    }
+}
+
+/// Appends `text` to `output` with Django's `normalize_newlines` and the
+/// `<br>` replacement that `linebreaks` and `linebreaksbr` share: each
+/// `\r\n`, `\r` and `\n` becomes `<br>`, and `escape` applies Django's
+/// `escape` to the rest. With `paragraphs`, a run of two or more newlines
+/// instead closes the paragraph, as `linebreaks` splits on `\n{2,}`.
+fn push_linebreaks(output: &mut String, text: &str, escape: bool, paragraphs: bool) {
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        let end = index;
+        index += 1;
+        let replacement = match byte {
+            b'\n' | b'\r' => {
+                index = end;
+                let mut newlines = 0;
+                while let Some(&newline @ (b'\n' | b'\r')) = bytes.get(index) {
+                    index += 1;
+                    if newline == b'\r' && bytes.get(index) == Some(&b'\n') {
+                        index += 1;
+                    }
+                    newlines += 1;
+                    if !paragraphs {
+                        break;
+                    }
+                }
+                if newlines > 1 { "</p>\n\n<p>" } else { "<br>" }
+            }
+            b'&' if escape => "&amp;",
+            b'<' if escape => "&lt;",
+            b'>' if escape => "&gt;",
+            b'"' if escape => "&quot;",
+            b'\'' if escape => "&#x27;",
+            _ => continue,
+        };
+        output.push_str(&text[start..end]);
+        output.push_str(replacement);
+        start = index;
+    }
+    output.push_str(&text[start..]);
+}
+
+/// The text a `@stringfilter` sees and whether it is safe: `str()` keeps a
+/// result safe only when it is `SafeData`. Digits, `True` and `False` need no
+/// escaping, so they count as safe.
+fn string_filter_text<'t>(
+    variable: Option<Content<'t, '_>>,
+    py: Python<'_>,
+) -> PyResult<(Cow<'t, str>, bool)> {
+    fn python_text<'t>(object: &Bound<'_, PyAny>) -> PyResult<(Cow<'t, str>, bool)> {
+        let string = object.str()?;
+        let safe = !string.is_exact_instance_of::<PyString>()
+            && string.is_instance(SAFEDATA.import(
+                object.py(),
+                "django.utils.safestring",
+                "SafeData",
+            )?)?;
+        Ok((Cow::Owned(string.to_str()?.to_string()), safe))
+    }
+
+    Ok(match variable {
+        None => (Cow::Borrowed(""), true),
+        Some(Content::String(ContentString::HtmlSafe(text))) => (text, true),
+        Some(Content::String(ContentString::String(text) | ContentString::HtmlUnsafe(text))) => {
+            (text, false)
+        }
+        Some(Content::Int(number)) => (Cow::Owned(number.to_string()), true),
+        Some(Content::Bool(true)) => (Cow::Borrowed("True"), true),
+        Some(Content::Bool(false)) => (Cow::Borrowed("False"), true),
+        // Python's `str()` spelling, such as `1.0` and `1e+16`.
+        Some(Content::Float(number)) => python_text(&PyFloat::new(py, number))?,
+        Some(Content::Py(object)) => python_text(&object)?,
+    })
+}
+
+impl ResolveFilter for LinebreaksFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        _template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let (text, safe) = string_filter_text(variable, py)?;
+        let mut output = String::with_capacity(text.len() + 24);
+        output.push_str("<p>");
+        push_linebreaks(&mut output, &text, context.autoescape && !safe, true);
+        output.push_str("</p>");
+        Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
+            output,
+        )))))
+    }
+}
+
+impl ResolveFilter for LinebreaksbrFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        _template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let (text, safe) = string_filter_text(variable, py)?;
+        let escape = context.autoescape && !safe;
+        let changes = |byte: &u8| match byte {
+            b'\n' | b'\r' => true,
+            b'&' | b'<' | b'>' | b'"' | b'\'' => escape,
+            _ => false,
+        };
+        // Text that needs no change is returned without copying.
+        let text = match text.as_bytes().iter().position(changes) {
+            None => text,
+            Some(first) => {
+                let mut output = String::with_capacity(text.len() + 16);
+                output.push_str(&text[..first]);
+                push_linebreaks(&mut output, &text[first..], escape, false);
+                Cow::Owned(output)
+            }
+        };
+        Ok(Some(Content::String(ContentString::HtmlSafe(text))))
     }
 }
 

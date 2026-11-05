@@ -24,6 +24,7 @@ use super::filters::TruncationText;
 use super::inheritance::{BlockEntry, BlockMarker};
 use super::l10n::{NumberFormat, localize_number};
 use super::language_cache::LanguageCache;
+use super::timesince::TimeStrings;
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::parse::CycleId;
 use crate::render::RenderResult;
@@ -191,6 +192,7 @@ pub struct Context {
     assigned: HashSet<String>,
     cycle_variables: HashSet<String>,
     pub(crate) truncation_text: LanguageCache<TruncationText>,
+    pub(crate) time_strings: LanguageCache<TimeStrings>,
 }
 
 impl Trace for Context {
@@ -277,6 +279,7 @@ impl Context {
             assigned: HashSet::new(),
             cycle_variables: HashSet::new(),
             truncation_text: LanguageCache::default(),
+            time_strings: LanguageCache::default(),
         }
     }
 
@@ -325,6 +328,7 @@ impl Context {
                 })
                 .collect(),
             truncation_text: self.truncation_text.clone(),
+            time_strings: self.time_strings.clone(),
         }
     }
 
@@ -1291,7 +1295,7 @@ fn render_value_in_context<'t>(value: ContentString<'t>, context: &Context) -> C
 
 /// Skip the escape writer for plain text: its per-byte bookkeeping is more
 /// expensive than scanning once and appending the unchanged slice in bulk.
-fn append_escaped(text: &str, output: &mut String) {
+pub(crate) fn append_escaped(text: &str, output: &mut String) {
     // The library's append writer regresses large values on some platforms.
     // Its Cow encoder still borrows unchanged text, and borrowing the Python
     // input avoids the source copy even when an escaped fragment is required.

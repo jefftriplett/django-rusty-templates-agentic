@@ -258,6 +258,15 @@ def test_now_timezone_naive(assert_render):
             None,
             id="use_tz_false",
         ),
+        pytest.param(
+            {"USE_TZ": True, "TIME_ZONE": "Europe/Berlin"},
+            '{% load i18n %}{% language "de" %}{% now "DATE_FORMAT" %}|'
+            '{% now "SHORT_DATETIME_FORMAT" %}|{% now "l, j. F Y \\u\\m G \\U\\h\\r" %}|'
+            '{% now "D M N a A" %}{% endlanguage %}',
+            "17. Oktober 2026|17.10.2026 05:30|Samstag, 17. Oktober 2026 um 5 Uhr|"
+            "Sa Okt Okt. vorm. vorm.",
+            id="localized",
+        ),
     ],
 )
 @time_machine.travel(datetime(2026, 10, 17, 3, 30, tzinfo=dt_timezone.utc), tick=False)

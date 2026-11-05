@@ -1,10 +1,8 @@
 """Django-compatible diagnostics for templates rejected by the native parser."""
 
 import warnings
-from datetime import datetime
 from types import SimpleNamespace
 
-from django.conf import settings
 from django.template import Context
 from django.template.base import (
     DebugLexer,
@@ -15,10 +13,7 @@ from django.template.base import (
     Parser,
     Template,
 )
-from django.template.defaultfilters import date
 from django.urls import reverse
-from django.utils import timezone
-from django.utils.html import conditional_escape
 
 
 def validate_syntax(source, engine, filename=None, template_name=None):
@@ -99,13 +94,6 @@ def render_url(view_name, urlconf, args, kwargs, current_app):
         context = Context(autoescape=False)
         context.template = SimpleNamespace(engine=SimpleNamespace(debug=False))
         return "".join([NodeList([ResolverFailure()]).render(context)])
-
-
-def format_now(format_string, escape):
-    """Format the current time for {% now %} as Django's NowNode does."""
-    tzinfo = timezone.get_current_timezone() if settings.USE_TZ else None
-    formatted = date(datetime.now(tz=tzinfo), format_string)
-    return conditional_escape(formatted) if escape else formatted
 
 
 def warn_double_dot(source, offset, origin):
