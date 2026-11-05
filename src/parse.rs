@@ -42,6 +42,7 @@ use crate::filters::ForceEscapeFilter;
 use crate::filters::JoinFilter;
 use crate::filters::LastFilter;
 use crate::filters::LengthFilter;
+use crate::filters::LinebreaksFilter;
 use crate::filters::LinebreaksbrFilter;
 use crate::filters::LowerFilter;
 use crate::filters::SafeFilter;
@@ -279,6 +280,13 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::Join(JoinFilter { django })
+                }
+                // `defaultfilters.linebreaks` is the `django.utils.html` helper;
+                // the registered filter is `linebreaks_filter`.
+                BuiltinFilter::Linebreaks
+                    if is_django_filter(parser.py, &django.filter, "linebreaks_filter") =>
+                {
+                    FilterType::Linebreaks(LinebreaksFilter)
                 }
                 BuiltinFilter::Linebreaksbr
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
