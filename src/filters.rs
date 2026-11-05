@@ -259,7 +259,8 @@ pub struct TimesinceFilter {
 pub struct TitleFilter;
 
 /// Django's `truncatechars`, computed natively for ASCII strings and an
-/// integer length. Other inputs call Django's filter.
+/// integer length. Other strings call Django's `Truncator` with the cached
+/// translation of the truncation text, and other inputs call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TruncateCharsFilter {
     pub django: DjangoFilter,

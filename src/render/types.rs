@@ -191,7 +191,7 @@ pub struct Context {
     changed_states: Vec<HashMap<CycleId, Py<PyAny>>>,
     assigned: HashSet<String>,
     cycle_variables: HashSet<String>,
-    pub(crate) truncation_text: LanguageCache<Option<TruncationText>>,
+    pub(crate) truncation_text: LanguageCache<TruncationText>,
     pub(crate) time_strings: LanguageCache<TimeStrings>,
 }
 
