@@ -196,6 +196,95 @@ def test_truncate_replaced_builtin(monkeypatch, name):
     assert rusty == django == "replacement"
 
 
+SLICE_ARGUMENTS = [
+    "",
+    ":",
+    "::",
+    "2",
+    ":2",
+    "-1",
+    "1:-1",
+    "-3:",
+    "100:",
+    "-100:100",
+    "::2",
+    "::-1",
+    "5:1:-1",
+    "-1:-6:-2",
+    "::0",
+    "1:2:3:4",
+    "+2",
+    " 2",
+    "1_0",
+    "a",
+    "1.5",
+    "99999999999999999999",
+]
+
+
+class SliceRecorder:
+    def __getitem__(self, key):
+        return f"<{key!r}>"
+
+
+class SliceIndexError:
+    def __getitem__(self, key):
+        raise IndexError("no items")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("a <b> & 'c' d", id="ascii"),
+        pytest.param("héllo wörld ✓ 😀", id="non_ascii"),
+        pytest.param(mark_safe("<b>bold</b> ü"), id="safe"),
+        pytest.param(["a", "<b>", "c", "d", "e"], id="list"),
+        pytest.param((1, 2, 3, 4, 5, 6), id="tuple"),
+        pytest.param(range(10), id="range"),
+        pytest.param({"a": 1}, id="dict"),
+        pytest.param(SliceRecorder(), id="getitem"),
+        pytest.param(12345, id="int"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_slice_matches_django(value, autoescape):
+    # Context strings reach the filter as Python objects; `lower` and `safe`
+    # hand it native plain and safe strings.
+    literals = "".join(
+        "[{{ value" + prefix + "|slice:'" + argument + "' }}]"
+        for argument in SLICE_ARGUMENTS
+        for prefix in ["", "|lower", "|safe"]
+    )
+    source = (
+        "{% autoescape "
+        + autoescape
+        + " %}"
+        + literals
+        + "{% for argument in arguments %}"
+        "[{{ value|slice:argument }}][{{ value|lower|slice:argument }}]"
+        "{% endfor %}"
+        "[{{ value|slice:2 }}][{{ value|slice:-1 }}][{{ value|slice:1.5 }}]"
+        "[{{ missing|slice:':2' }}]"
+        "[{{ value|slice:'1:-1'|upper }}][{{ value|slice:'::-1'|length }}]"
+        "{% endautoescape %}"
+    )
+    arguments = [*SLICE_ARGUMENTS, 2, -1, 0, 10**30, 1.5, True, None, ["x"]]
+    django, rusty = render_both(source, {"value": value, "arguments": arguments})
+    assert rusty == django
+
+
+def test_slice_propagates_other_errors():
+    django, rusty = render_both("{{ value|slice:':2' }}", {"value": SliceIndexError()})
+    assert rusty == django == (IndexError, "no items")
+
+
+def test_slice_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "slice", lambda value, arg: "replacement")
+    django, rusty = render_both("{{ value|slice:':2' }}", {"value": "abcdefghij"})
+    assert rusty == django == "replacement"
+
+
 TRUNCATEWORDS_LENGTHS = [
     -1,
     0,
@@ -446,4 +535,107 @@ def test_floatformat_replaced_builtin(monkeypatch):
         register.filters, "floatformat", lambda value, precision=-1: "replacement"
     )
     django, rusty = render_both("{{ value|floatformat:2 }}", {"value": 1.5})
+    assert rusty == django == "replacement"
+
+
+class JoinHtml:
+    def __html__(self):
+        return "<i>html</i>"
+
+    def __repr__(self):
+        return "JoinHtml"
+
+
+class JoinStr:
+    def __str__(self):
+        return "<str & obj>"
+
+    def __repr__(self):
+        return "JoinStr"
+
+
+class JoinHtmlNotString:
+    def __html__(self):
+        return 1
+
+    def __repr__(self):
+        return "JoinHtmlNotString"
+
+
+class JoinStrTypeError:
+    def __str__(self):
+        raise TypeError("no str")
+
+    def __repr__(self):
+        return "JoinStrTypeError"
+
+
+class JoinStrSubclass(str):
+    pass
+
+
+JOIN_VALUES = {
+    "strings": lambda: ["a", "<b>", "c & 'd'", '"e"'],
+    "empty": lambda: [],
+    "single": lambda: ["<only>"],
+    "tuple": lambda: ("<a>", "b"),
+    "safe_items": lambda: [mark_safe("<b>bold</b>"), "<i>"],
+    "ints": lambda: [1, -2, 10**30],
+    "mixed": lambda: [1.5, True, None, Decimal("2.50"), "<x>"],
+    "nested": lambda: [["<a>", 1], ("b",)],
+    "lazy": lambda: [translation.gettext_lazy("Goodbye"), "<x>"],
+    "html_object": lambda: [JoinHtml(), "<x>"],
+    "str_object": lambda: [JoinStr()],
+    "html_not_string": lambda: ["a", JoinHtmlNotString()],
+    "str_type_error": lambda: ["a", JoinStrTypeError()],
+    "str_subclass": lambda: [JoinStrSubclass("<sub>"), "b"],
+    "generator": lambda: (item for item in ["<a>", "b"]),
+    "range": lambda: range(3),
+    "dict": lambda: {"<k>": 1, "v": 2},
+    "string": lambda: "a<b",
+    "safe_string": lambda: mark_safe("<b>"),
+    "int": lambda: 5,
+    "none": lambda: None,
+}
+
+JOIN_SEPARATORS = {
+    "literal": '","',
+    "literal_html": '"<br>"',
+    "translated": '_("<sep>")',
+    "variable": "separator",
+    "safe_variable": "safe_separator",
+    "int_variable": "int_separator",
+    "none_variable": "none_separator",
+}
+
+
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+@pytest.mark.parametrize("separator", JOIN_SEPARATORS.values(), ids=JOIN_SEPARATORS)
+@pytest.mark.parametrize("value", JOIN_VALUES.values(), ids=JOIN_VALUES)
+def test_join_matches_django(value, separator, autoescape):
+    source = (
+        "{% load i18n %}{% autoescape " + autoescape + " %}"
+        "[{{ value|join:" + separator + " }}][{{ missing|join:" + separator + " }}]"
+        "{% endautoescape %}"
+    )
+    results = []
+    for name in ("django", "rusty"):
+        context = {
+            "value": value(),
+            "separator": "<&>",
+            "safe_separator": mark_safe("<hr>"),
+            "int_separator": 1,
+            "none_separator": None,
+        }
+        try:
+            results.append(engines[name].from_string(source).render(context))
+        except Exception as error:
+            results.append((type(error), str(error)))
+    django, rusty = results
+    assert rusty == django
+
+
+def test_join_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "join", lambda value, arg: "replacement")
+    django, rusty = render_both('{{ value|join:"," }}', {"value": ["a", "b"]})
     assert rusty == django == "replacement"

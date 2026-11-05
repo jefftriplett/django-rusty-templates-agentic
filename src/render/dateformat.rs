@@ -1,4 +1,5 @@
-//! Native port of `django.utils.dateformat` for the `date` and `time` filters.
+//! Native port of `django.utils.dateformat` for the `date` and `time` filters
+//! and the `{% now %}` tag.
 //!
 //! Django looks up the active language's format strings, month and weekday
 //! names and the current timezone for every value it formats. Within a render
@@ -33,6 +34,7 @@ static DATEFORMAT_TIME_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static GET_CURRENT_TIMEZONE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TEMPLATE_LOCALTIME: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static DATETIME_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 static FIXED_OFFSET: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static ZONE_INFO: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
@@ -152,6 +154,26 @@ impl DateCache {
             .call0()?;
         self.timezone = Some(timezone.clone().unbind());
         Ok(timezone)
+    }
+
+    /// `datetime.now(tz=...)` as Django's `NowNode` computes it: in the
+    /// current time zone when `settings.USE_TZ` is on, naive otherwise.
+    pub fn now<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let use_tz = SETTINGS
+            .import(py, "django.conf", "settings")?
+            .getattr(pyo3::intern!(py, "USE_TZ"))?
+            .is_truthy()?;
+        let tzinfo = match use_tz {
+            true => self.current_timezone(py)?,
+            false => py.None().into_bound(py),
+        };
+        // Look `datetime` up on each call, as Django's module global is, so
+        // clock-freezing libraries that replace it still apply.
+        DATETIME_MODULE
+            .get_or_try_init(py, || py.import("datetime").map(Bound::unbind))?
+            .bind(py)
+            .getattr(pyo3::intern!(py, "datetime"))?
+            .call_method1(pyo3::intern!(py, "now"), (tzinfo,))
     }
 
     /// `formats.date_format(value, format_name)`, or `formats.time_format`
