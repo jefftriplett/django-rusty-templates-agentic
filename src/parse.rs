@@ -42,6 +42,7 @@ use crate::filters::ForceEscapeFilter;
 use crate::filters::JoinFilter;
 use crate::filters::LastFilter;
 use crate::filters::LengthFilter;
+use crate::filters::LinebreaksbrFilter;
 use crate::filters::LowerFilter;
 use crate::filters::SafeFilter;
 use crate::filters::SliceArgument;
@@ -277,6 +278,11 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::Join(JoinFilter { django })
+                }
+                BuiltinFilter::Linebreaksbr
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Linebreaksbr(LinebreaksbrFilter)
                 }
                 _ => FilterType::Django(django),
             };

@@ -24,6 +24,7 @@ pub enum FilterType {
     ForceEscape(ForceEscapeFilter),
     Join(JoinFilter),
     Last(LastFilter),
+    Linebreaksbr(LinebreaksbrFilter),
     Lower(LowerFilter),
     Length(LengthFilter),
     Safe(SafeFilter),
@@ -162,6 +163,9 @@ pub struct LowerFilter;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LengthFilter;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinebreaksbrFilter;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SafeFilter;
