@@ -117,7 +117,7 @@ impl<T> LanguageCache<T> {
         &mut self,
         py: Python<'py>,
         init: impl FnOnce(&Bound<'py, PyString>) -> PyResult<T>,
-    ) -> PyResult<Option<&T>> {
+    ) -> PyResult<Option<&mut T>> {
         let language = GET_LANGUAGE
             .import(py, "django.utils.translation.trans_real", "catalog")?
             .call0()?;
@@ -128,6 +128,6 @@ impl<T> LanguageCache<T> {
         if self.entry.as_ref().is_none_or(|(cached, _)| cached != code) {
             self.entry = Some((code.to_owned(), init(&language)?));
         }
-        Ok(self.entry.as_ref().map(|(_, value)| value))
+        Ok(self.entry.as_mut().map(|(_, value)| value))
     }
 }

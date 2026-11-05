@@ -13,13 +13,14 @@ use crate::filters::{
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
     EscapejsFilter, ExternalFilter, FilterType, FloatFormatFilter, ForceEscapeFilter, JoinFilter,
     LastFilter, LengthFilter, LinebreaksbrFilter, LowerFilter, SafeFilter, SliceArgument,
-    SliceFilter, SlugifyFilter, TitleFilter, TruncateCharsFilter, TruncateWordsFilter, UpperFilter,
-    WordcountFilter, WordwrapFilter, YesnoFilter,
+    SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter,
+    TruncateWordsFilter, UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
 use crate::render::dateformat::{Formatted, Formatter, template_localtime};
 use crate::render::l10n::Grouping;
+use crate::render::timesince::{TimeSince, TimeStrings, timesince};
 use crate::render::types::{
     AsBorrowedContent, Content, ContentString, Context, IntoOwnedContent, append_escaped,
     append_python_string,
@@ -113,6 +114,7 @@ impl ResolveFilter for FilterType {
             Self::Length(filter) => filter.resolve(variable, py, template, context),
             Self::Safe(filter) => filter.resolve(variable, py, template, context),
             Self::Slugify(filter) => filter.resolve(variable, py, template, context),
+            Self::Timesince(filter) => filter.resolve(variable, py, template, context),
             Self::Title(filter) => filter.resolve(variable, py, template, context),
             Self::TruncateChars(filter) => filter.resolve(variable, py, template, context),
             Self::Slice(filter) => filter.resolve(variable, py, template, context),
@@ -1121,6 +1123,79 @@ impl ResolveFilter for JoinFilter {
         }
         self.django.call(variable, argument, py, context)
     }
+}
+
+impl ResolveFilter for TimesinceFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        if let Some(text) =
+            time_since_text(variable.as_ref(), argument.value(), self.until, context)?
+        {
+            return Ok(Some(Content::String(match context.autoescape {
+                false => ContentString::String(Cow::Owned(text)),
+                true => ContentString::HtmlUnsafe(Cow::Owned(text)),
+            })));
+        }
+        self.django.call(variable, argument, py, context)
+    }
+}
+
+/// What Django's `timesince_filter`, or `timeuntil_filter` when `until` is
+/// set, returns for `value` and its comparison time `now`. `None` when
+/// Django's filter must handle them.
+fn time_since_text(
+    value: Option<&Content<'_, '_>>,
+    now: Option<&Content<'_, '_>>,
+    until: bool,
+    context: &mut Context,
+) -> PyResult<Option<String>> {
+    // Both filters return "" for a falsy value and treat a falsy comparison
+    // time as the current time.
+    let value = match value {
+        None => return Ok(Some(String::new())),
+        Some(Content::Py(value)) if value.is_none() => return Ok(Some(String::new())),
+        Some(Content::Py(value)) => value,
+        Some(Content::String(
+            ContentString::String(text)
+            | ContentString::HtmlSafe(text)
+            | ContentString::HtmlUnsafe(text),
+        )) if text.is_empty() => return Ok(Some(String::new())),
+        Some(_) => return Ok(None),
+    };
+    let now = match now {
+        None => None,
+        Some(Content::Py(now)) if now.is_none() => None,
+        Some(Content::Py(now)) => Some(now),
+        Some(Content::String(
+            ContentString::String(text)
+            | ContentString::HtmlSafe(text)
+            | ContentString::HtmlUnsafe(text),
+        )) if text.is_empty() => None,
+        Some(_) => return Ok(None),
+    };
+    // Django's filter reproduces any error, or catches it and returns "".
+    let Ok(Some(since)) = timesince(value, now, until) else {
+        return Ok(None);
+    };
+    let partials = match since {
+        TimeSince::Partials(partials) => partials,
+        TimeSince::Mismatched => return Ok(Some(String::new())),
+    };
+    let py = value.py();
+    let text = match context
+        .time_strings
+        .get_or_try_init(py, |_| Ok(TimeStrings::default()))?
+    {
+        Some(strings) => strings.format(py, partials)?,
+        None => TimeStrings::default().format(py, partials)?,
+    };
+    Ok(Some(text))
 }
 
 impl ResolveFilter for ForceEscapeFilter {

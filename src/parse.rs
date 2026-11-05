@@ -48,6 +48,7 @@ use crate::filters::SafeFilter;
 use crate::filters::SliceArgument;
 use crate::filters::SliceFilter;
 use crate::filters::SlugifyFilter;
+use crate::filters::TimesinceFilter;
 use crate::filters::TitleFilter;
 use crate::filters::TruncateCharsFilter;
 use crate::filters::TruncateWordsFilter;
@@ -283,6 +284,22 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::Linebreaksbr(LinebreaksbrFilter)
+                }
+                BuiltinFilter::Timesince
+                    if is_django_filter(parser.py, &django.filter, "timesince_filter") =>
+                {
+                    FilterType::Timesince(TimesinceFilter {
+                        django,
+                        until: false,
+                    })
+                }
+                BuiltinFilter::Timeuntil
+                    if is_django_filter(parser.py, &django.filter, "timeuntil_filter") =>
+                {
+                    FilterType::Timesince(TimesinceFilter {
+                        django,
+                        until: true,
+                    })
                 }
                 _ => FilterType::Django(django),
             };
