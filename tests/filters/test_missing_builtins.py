@@ -849,6 +849,55 @@ def test_truncation_text_is_cached_for_the_render(monkeypatch):
     assert len(calls) == 1
 
 
+JUSTIFY_WIDTHS = [-5, 0, 1, 3, 8, "6", "-1", " 4", "1_0", "x", 2.5, True, None, 10**30]
+
+
+@pytest.mark.parametrize("name", ["ljust", "rjust"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("ab", id="ascii"),
+        pytest.param("a<b>&", id="html"),
+        pytest.param(mark_safe("<b>"), id="safe"),
+        pytest.param("é日😀", id="non_ascii"),
+        pytest.param("é", id="combining"),
+        pytest.param(translation.gettext_lazy("Good morning"), id="lazy"),
+        pytest.param(12, id="int"),
+        pytest.param(1.5, id="float"),
+        pytest.param(["a"], id="list"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_justify_matches_django(name, value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "{% for width in widths %}[{{ value|NAME:width }}]{% endfor %}"
+        "[{{ value|NAME:5 }}][{{ value|NAME:'5' }}][{{ value|NAME:-1 }}]"
+        "[{{ missing|NAME:3 }}][{{ value|lower|NAME:4 }}][{{ value|NAME:4|length }}]"
+        "{% endautoescape %}"
+    ).replace("NAME", name)
+    context = {"value": value, "widths": JUSTIFY_WIDTHS}
+    django, rusty = render_both(source, context)
+    assert rusty == django
+
+
+@pytest.mark.parametrize("name", ["ljust", "rjust"])
+def test_justify_huge_width_matches_django(name):
+    django, rusty = render_both(
+        "{{ value|" + name + ":width }}", {"value": "a", "width": 10**19}
+    )
+    assert rusty == django
+
+
+@pytest.mark.parametrize("name", ["ljust", "rjust"])
+def test_justify_replaced_builtin(name, monkeypatch):
+    monkeypatch.setitem(register.filters, name, lambda value, arg: "replacement")
+    django, rusty = render_both("{{ value|" + name + ":4 }}", {"value": "a"})
+    assert rusty == django == "replacement"
+
+
 @pytest.mark.parametrize("language", ["en", "ckb", "he"])
 @pytest.mark.parametrize(
     "value",

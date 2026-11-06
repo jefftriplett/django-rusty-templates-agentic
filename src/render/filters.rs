@@ -12,10 +12,10 @@ use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
     EscapejsFilter, ExternalFilter, FilterType, FirstFilter, FloatFormatFilter, ForceEscapeFilter,
-    JoinFilter, LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter, LinenumbersFilter,
-    LowerFilter, SafeFilter, SliceArgument, SliceFilter, SlugifyFilter, TimesinceFilter,
-    TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter,
-    WordcountFilter, WordwrapFilter, YesnoFilter,
+    JoinFilter, Justify, JustifyFilter, LastFilter, LengthFilter, LinebreaksFilter,
+    LinebreaksbrFilter, LinenumbersFilter, LowerFilter, SafeFilter, SliceArgument, SliceFilter,
+    SlugifyFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter,
+    TruncateWordsFilter, UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -111,6 +111,7 @@ impl ResolveFilter for FilterType {
             Self::First(filter) => filter.resolve(variable, py, template, context),
             Self::ForceEscape(filter) => filter.resolve(variable, py, template, context),
             Self::Join(filter) => filter.resolve(variable, py, template, context),
+            Self::Justify(filter) => filter.resolve(variable, py, template, context),
             Self::Last(filter) => filter.resolve(variable, py, template, context),
             Self::Linebreaks(filter) => filter.resolve(variable, py, template, context),
             Self::Linebreaksbr(filter) => filter.resolve(variable, py, template, context),
@@ -1836,6 +1837,42 @@ fn truncate_words(text: &str, length: i64) -> String {
         truncated.push_str(TRUNCATE);
     }
     truncated
+}
+
+/// Widths beyond this go to Django, which raises its own `MemoryError` or
+/// `OverflowError` instead of allocating here.
+const MAX_JUSTIFY_WIDTH: usize = 1 << 20;
+
+impl ResolveFilter for JustifyFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        if let Some(width) = argument.value().and_then(integer_argument)
+            && usize::try_from(width).map_or(true, |width| width <= MAX_JUSTIFY_WIDTH)
+            && let Some(text) = Text::from_variable(variable.as_ref(), py)?
+        {
+            // `str.ljust` and `str.rjust` count code points and leave text
+            // at least `width` long unchanged.
+            let content = text.as_str();
+            let length = content.chars().count();
+            let padding = usize::try_from(width).unwrap_or(0).saturating_sub(length);
+            let mut justified = String::with_capacity(content.len() + padding);
+            if self.side == Justify::Right {
+                justified.extend(std::iter::repeat_n(' ', padding));
+            }
+            justified.push_str(content);
+            if self.side == Justify::Left {
+                justified.extend(std::iter::repeat_n(' ', padding));
+            }
+            return Ok(Some(text.into_content(justified, context)));
+        }
+        self.django.call(variable, argument, py, context)
+    }
 }
 
 impl ResolveFilter for TruncateWordsFilter {
