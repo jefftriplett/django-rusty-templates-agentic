@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2026.11.2
+
 Report the tried origins when a loader can't find a template and keep the original error as the cause for invalid context processor results and loader configurations, and deny more Clippy restriction lints. ([#207](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/207))
 
 Render `first`, `linenumbers`, `ljust`, and `rjust` natively, and pass `truncatechars_html` the cached truncation text. ([#214](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/214), [#215](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/215), [#216](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/216), [#219](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/219))
@@ -36,7 +38,7 @@ Read context dicts lazily, so a small template with 500 context keys goes from 1
 
 Let block tags span lines on Django 6.2 and accept its transitional `allow_multiline_tags` option, read 6.2 `comment` blocks as raw text, and close a comment only on an exact `endcomment`, as Django does. ([#311](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/311))
 
-Refresh the benchmark numbers and summarize them in the README. ([#312](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/312))
+Refresh the benchmark numbers and summarize them in the README, and clarify which printed values still fall back to Python. ([#309](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/309), [#312](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/312))
 
 ## 2026.11.1
 
