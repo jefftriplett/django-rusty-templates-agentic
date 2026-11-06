@@ -1963,7 +1963,7 @@ impl Render for Now {
             ),
             None => (self.format.as_content(), false),
         };
-        let now = context.date_cache.now(py)?;
+        let now = context.date_cache.borrow_mut().now(py)?;
         let date = DATE_FILTER.import(py, "django.template.defaultfilters", "date")?;
         let formatted = format_localtime(now, Some(format), Formatter::Date, date, context)?;
         let formatted = match formatted {

@@ -455,7 +455,7 @@ fn format_date<'t, 'py>(
     if value.is_none() {
         return Ok("".as_content());
     }
-    let value = template_localtime(value, context.use_tz, &mut context.date_cache)?;
+    let value = template_localtime(value, context.use_tz, &mut context.date_cache.borrow_mut())?;
     format_localtime(value, format, formatter, django_filter, context)
 }
 
@@ -469,7 +469,11 @@ pub fn format_localtime<'t, 'py>(
 ) -> PyResult<Content<'t, 'py>> {
     let py = django_filter.py();
     if let Some(format_name) = format_name(format.as_ref(), formatter)?
-        && let Some(formatted) = context.date_cache.format(&value, &format_name, formatter)?
+        && let Some(formatted) =
+            context
+                .date_cache
+                .borrow_mut()
+                .format(&value, &format_name, formatter)?
     {
         return Ok(match formatted {
             Formatted::Native(formatted) => Content::String(match context.autoescape {
@@ -761,7 +765,7 @@ fn call_django_filter<'t, 'py>(
     let mut value = value.to_py(py);
     if value.is_instance_of::<PyDateTime>() && filter_flag(filter, intern!(py, "expects_localtime"))
     {
-        value = template_localtime(value, context.use_tz, &mut context.date_cache)?;
+        value = template_localtime(value, context.use_tz, &mut context.date_cache.borrow_mut())?;
     }
     let safe_type = SAFEDATA.import(py, "django.utils.safestring", "SafeData")?;
     let preserve_safe =

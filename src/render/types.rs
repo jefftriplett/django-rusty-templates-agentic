@@ -19,6 +19,7 @@ use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
 use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyType};
 
+use super::dateformat::localize_datetime;
 use super::filters::FileSizeStrings;
 use super::filters::FloatNumberFormats;
 use super::filters::TruncationText;
@@ -166,7 +167,8 @@ pub struct Context {
     pub use_l10n: Option<bool>,
     pub(crate) float_number_format: LanguageCache<FloatNumberFormats>,
     pub use_tz: Option<bool>,
-    pub(crate) date_cache: DateCache,
+    // Borrowed mutably while formatting; read through `render_into`'s `&self`.
+    pub(crate) date_cache: RefCell<DateCache>,
     pub format_values: bool,
     pub instrument_render: bool,
     pub formatting_context: Option<Py<PyAny>>,
@@ -206,7 +208,10 @@ impl Trace for Context {
         self.loops.trace(visit)?;
         self.request.trace(visit)?;
         self.formatting_context.trace(visit)?;
-        self.date_cache.trace(visit)?;
+        // A collection can run while a format call holds the cache.
+        if let Ok(date_cache) = self.date_cache.try_borrow() {
+            date_cache.trace(visit)?;
+        }
         self.callback_input.trace(visit)?;
         self.inheritance_blocks.trace(visit)?;
         self.python_blocks.trace(visit)?;
@@ -259,7 +264,7 @@ impl Context {
             use_l10n: None,
             float_number_format: LanguageCache::default(),
             use_tz: None,
-            date_cache: DateCache::default(),
+            date_cache: RefCell::default(),
             format_values: false,
             instrument_render: true,
             formatting_context: None,
@@ -300,7 +305,7 @@ impl Context {
             use_l10n: self.use_l10n,
             float_number_format: self.float_number_format.clone(),
             use_tz: self.use_tz,
-            date_cache: DateCache::default(),
+            date_cache: RefCell::default(),
             format_values: self.format_values,
             instrument_render: self.instrument_render,
             formatting_context: self.formatting_context.as_ref().map(|v| v.clone_ref(py)),
@@ -1363,6 +1368,23 @@ impl<'t, 'py> Content<'t, 'py> {
                     }
                     return Ok(());
                 }
+                // Inside `{% localize %}` the `use_l10n` override goes to Django.
+                if context.format_values
+                    && context.formatting_context.is_none()
+                    && context.use_l10n.is_none()
+                    && let Some(formatted) = localize_datetime(
+                        &content,
+                        context.use_tz,
+                        &mut context.date_cache.borrow_mut(),
+                    )?
+                {
+                    if context.autoescape {
+                        append_escaped(&formatted, output);
+                    } else {
+                        output.push_str(&formatted);
+                    }
+                    return Ok(());
+                }
                 if context.format_values
                     && (context.formatting_context.is_some()
                         || !content.is_instance_of::<PyString>())
@@ -1471,6 +1493,20 @@ impl<'t, 'py> Content<'t, 'py> {
                         encode_quoted_attribute(&number).into_owned()
                     } else {
                         number
+                    }));
+                }
+                if context.formatting_context.is_none()
+                    && context.use_l10n.is_none()
+                    && let Some(formatted) = localize_datetime(
+                        &content,
+                        context.use_tz,
+                        &mut context.date_cache.borrow_mut(),
+                    )?
+                {
+                    return Ok(Cow::Owned(if context.autoescape {
+                        encode_quoted_attribute(&formatted).into_owned()
+                    } else {
+                        formatted
                     }));
                 }
                 let py = content.py();
