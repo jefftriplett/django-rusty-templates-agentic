@@ -47,6 +47,8 @@ pub enum FilterType {
     MakeList(MakeListFilter),
     Escapeseq(EscapeseqFilter),
     Safeseq(SafeseqFilter),
+    Random(RandomFilter),
+    Pprint(PprintFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -361,6 +363,20 @@ pub struct EscapeseqFilter {
 /// Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SafeseqFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `random`, calling `random.choice` directly for lists and tuples.
+/// Other values call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RandomFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `pprint`, calling `pprint.pformat` directly for values that
+/// aren't safe strings. Safe strings call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PprintFilter {
     pub django: DjangoFilter,
 }
 
