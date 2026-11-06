@@ -20,7 +20,7 @@ use pyo3::sync::{MutexExt, PyOnceLock};
 use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyType};
 
 use super::filters::FileSizeStrings;
-use super::filters::FloatNumberFormat;
+use super::filters::FloatNumberFormats;
 use super::filters::TruncationText;
 use super::inheritance::{BlockEntry, BlockMarker};
 use super::l10n::{NumberFormat, localize_number};
@@ -164,7 +164,7 @@ pub struct Context {
     pub request: Option<Py<PyAny>>,
     pub autoescape: bool,
     pub use_l10n: Option<bool>,
-    pub(crate) float_number_format: LanguageCache<Option<FloatNumberFormat>>,
+    pub(crate) float_number_format: LanguageCache<FloatNumberFormats>,
     pub use_tz: Option<bool>,
     pub(crate) date_cache: DateCache,
     pub format_values: bool,

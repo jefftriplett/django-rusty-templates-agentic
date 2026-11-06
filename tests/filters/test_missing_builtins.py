@@ -1696,3 +1696,89 @@ def test_filesizeformat_replaced_builtin(monkeypatch):
     monkeypatch.setitem(register.filters, "filesizeformat", lambda value: "replacement")
     django, rusty = render_both("{{ value|filesizeformat }}", {"value": 2048})
     assert rusty == django == "replacement"
+
+
+FLOATFORMAT_STRINGS = [
+    "34.23234",
+    "34.00000",
+    "-34.26",
+    "+12.5",
+    "66666.6666",
+    ".5",
+    "5.",
+    "1e3",
+    "1.5E-3",
+    "-0",
+    "1234567.891",
+    " 1.5",
+    "1_000.5",
+    "NaN",
+    "Infinity",
+    "-inf",
+    "1e",
+    ".",
+    "",
+    "abc",
+    "１２",
+]
+FLOATFORMAT_SUFFIXES = [
+    "",
+    "2",
+    "-2",
+    "0",
+    "g",
+    "u",
+    "gu",
+    "ug",
+    "2g",
+    "-3g",
+    "2u",
+    "-1u",
+    "2gu",
+    "3ug",
+    " 2g",
+    "xg",
+    "2x",
+]
+
+
+@pytest.mark.parametrize("language", ["en", "de", "pl"])
+@pytest.mark.parametrize("thousand_separator", [False, True])
+def test_floatformat_strings_and_suffixes_match_django(
+    settings, language, thousand_separator
+):
+    settings.USE_THOUSAND_SEPARATOR = thousand_separator
+    source = (
+        "{% for value in values %}{% for argument in arguments %}"
+        "[{{ value|floatformat:argument }}]{% endfor %}"
+        "[{{ value|floatformat }}][{{ value|floatformat:'2g' }}]{% endfor %}"
+    )
+    values = [*FLOATFORMAT_STRINGS, mark_safe("1234.5"), 6666.6666, 10000, True, False]
+    context = {"values": values, "arguments": FLOATFORMAT_SUFFIXES}
+    with translation.override(language):
+        django, rusty = render_both(source, context)
+    assert rusty == django
+
+
+def test_floatformat_unlocalized_settings(settings):
+    settings.DECIMAL_SEPARATOR = ","
+    settings.THOUSAND_SEPARATOR = "'"
+    settings.NUMBER_GROUPING = 3
+    source = (
+        "[{{ value|floatformat:'2u' }}][{{ value|floatformat:'2gu' }}]"
+        "[{{ value|floatformat:'g' }}][{{ value|floatformat:'ug' }}]"
+    )
+    with translation.override("de"):
+        django, rusty = render_both(source, {"value": 1234567.891})
+    assert rusty == django
+    settings.NUMBER_GROUPING = 0
+    with translation.override("de"):
+        django, rusty = render_both(source, {"value": 1234567.891})
+    assert rusty == django
+
+
+def test_floatformat_empty_argument_matches_django():
+    django, rusty = render_both(
+        "{{ value|floatformat:argument }}", {"value": 1.5, "argument": ""}
+    )
+    assert rusty[0] == django[0]
