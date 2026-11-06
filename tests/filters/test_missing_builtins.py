@@ -1520,3 +1520,95 @@ def test_center_widths_match_django(value, width):
         "[{{ value|center:width }}]", {"value": value, "width": width}
     )
     assert rusty == django
+
+
+ACTIVE_LANGUAGE_SOURCE = (
+    "{% load i18n %}[{{ f|floatformat:2 }}][{{ s|truncatechars:5 }}]"
+    "{% translate 'Good morning' %}"
+)
+ACTIVE_LANGUAGE_CONTEXT = {"f": 1234.5678, "s": "abcdefghij"}
+
+
+def render_active_language():
+    return [
+        engines[name]
+        .from_string(ACTIVE_LANGUAGE_SOURCE)
+        .render(ACTIVE_LANGUAGE_CONTEXT)
+        for name in ("django", "rusty")
+    ]
+
+
+def test_active_language_states_match_django(settings):
+    settings.USE_THOUSAND_SEPARATOR = True
+    seen = []
+    for setup in [
+        lambda: translation.deactivate(),
+        lambda: translation.activate("de"),
+        lambda: translation.activate("ckb"),
+        lambda: translation.deactivate_all(),
+        lambda: translation.activate("he"),
+        lambda: translation.deactivate(),
+    ]:
+        setup()
+        django, rusty = render_active_language()
+        assert rusty == django
+        seen.append(django)
+    translation.deactivate()
+    # The states render differently, so a stale cache would show.
+    assert len(set(seen)) >= 4
+
+
+def test_active_language_follows_language_code_setting(settings):
+    translation.deactivate()
+    first = render_active_language()
+    settings.LANGUAGE_CODE = "de"
+    second = render_active_language()
+    assert first[0] == first[1]
+    assert second[0] == second[1]
+    assert first[0] != second[0]
+
+
+def test_active_language_in_other_threads():
+    import threading
+
+    results = {}
+
+    def render(language):
+        with translation.override(language):
+            results[language] = render_active_language()
+
+    threads = [threading.Thread(target=render, args=(code,)) for code in ["de", "he"]]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    for django, rusty in results.values():
+        assert rusty == django
+    assert results["de"][0] != results["he"][0]
+
+
+def test_active_language_in_async_tasks():
+    import asyncio
+
+    async def render(language):
+        translation.activate(language)
+        await asyncio.sleep(0)
+        return render_active_language()
+
+    async def main():
+        return await asyncio.gather(render("de"), render("he"))
+
+    for django, rusty in asyncio.run(main()):
+        assert rusty == django
+
+
+def test_active_language_with_thread_critical_local(monkeypatch):
+    from asgiref.local import Local
+    from django.utils.translation import trans_real
+
+    # Not the context-variable storage, so Rusty asks Django.
+    monkeypatch.setattr(trans_real, "_active", Local(thread_critical=True))
+    with translation.override("de"):
+        django, rusty = render_active_language()
+    assert rusty == django
+    assert "1234,57" in rusty
