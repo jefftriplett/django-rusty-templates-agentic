@@ -186,9 +186,13 @@ class NativeParser(Parser):
                 source = region[0].load_prefix + self.source[start:end]
                 callbacks = []
                 prefix_bytes = len(region[0].load_prefix.encode())
-                offsets = [prefix_bytes]
-                for character in self.source[start:end]:
-                    offsets.append(offsets[-1] + len(character.encode()))
+                # Callbacks use UTF-8 byte offsets into the region source.
+                ascii_region = self.source[start:end].isascii()
+
+                def byte_offset(position):
+                    if ascii_region:
+                        return prefix_bytes + position - start
+                    return prefix_bytes + len(self.source[start:position].encode())
 
                 def collect(node):
                     if (
@@ -218,7 +222,7 @@ class NativeParser(Parser):
                         if children is not None:
                             children[:] = self.group_nodes(children)
                     callbacks.append(
-                        (offsets[node_start - start], offsets[node_end - start], node)
+                        (byte_offset(node_start), byte_offset(node_end), node)
                     )
 
                 for node in region:
@@ -233,19 +237,23 @@ class NativeParser(Parser):
             region.clear()
 
         for node in nodes:
-            span = self.source[node.token._native_position[0] : node._native_end]
-            eligible = (
-                getattr(node.token, "_native_position", None) is not None
-                and self.native_node(node)
-                # A parent loop may be owned by Django outside this region.
-                and "forloop.parentloop" not in span
-                # These expressions require the version-specific Django parser.
-                and not (VERSION >= (6, 1) and ".." in span)
-                and not (
-                    VERSION >= (6, 0)
-                    and any(exponent in span for exponent in ("e+", "E+", "e-", "E-"))
+            eligible = getattr(
+                node.token, "_native_position", None
+            ) is not None and self.native_node(node)
+            if eligible and type(node) is not TextNode:
+                span = self.source[node.token._native_position[0] : node._native_end]
+                eligible = (
+                    # A parent loop may be owned by Django outside this region.
+                    "forloop.parentloop" not in span
+                    # These expressions require the version-specific Django parser.
+                    and not (VERSION >= (6, 1) and ".." in span)
+                    and not (
+                        VERSION >= (6, 0)
+                        and any(
+                            exponent in span for exponent in ("e+", "E+", "e-", "E-")
+                        )
+                    )
                 )
-            )
             if not eligible:
                 flush()
                 for name in node.child_nodelists:
