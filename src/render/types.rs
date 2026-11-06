@@ -1359,7 +1359,7 @@ impl<'t, 'py> Content<'t, 'py> {
                 }
                 if context.format_values
                     && context.formatting_context.is_none()
-                    && let Some(number) = localize_number(&content, context)?
+                    && let Some(number) = localize_number(&content, context.use_l10n, context)?
                 {
                     if context.autoescape {
                         append_escaped(&number, output);
@@ -1487,7 +1487,7 @@ impl<'t, 'py> Content<'t, 'py> {
                         || !content.is_instance_of::<PyString>()) =>
             {
                 if context.formatting_context.is_none()
-                    && let Some(number) = localize_number(&content, context)?
+                    && let Some(number) = localize_number(&content, context.use_l10n, context)?
                 {
                     return Ok(Cow::Owned(if context.autoescape {
                         encode_quoted_attribute(&number).into_owned()

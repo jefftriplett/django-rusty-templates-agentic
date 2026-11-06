@@ -428,18 +428,46 @@ pub fn localize_datetime(
     use_tz: Option<bool>,
     cache: &mut DateCache,
 ) -> PyResult<Option<String>> {
-    // `localize` checks `datetime` before `date`, its base class.
-    let (format_name, formatter) = if plain_datetime(value)?.is_some() {
-        ("DATETIME_FORMAT", Formatter::Date)
-    } else if value.is_exact_instance_of::<PyDate>() {
-        ("DATE_FORMAT", Formatter::Date)
-    } else if value.is_exact_instance_of::<PyTime>() {
-        ("TIME_FORMAT", Formatter::Time)
-    } else {
+    let Some((format_name, formatter)) = date_kind(value)? else {
         return Ok(None);
     };
     let value = template_localtime(value.clone(), use_tz, cache)?;
-    Ok(match cache.format(&value, format_name, formatter)? {
+    format_localized(&value, format_name, formatter, cache)
+}
+
+/// `formats.localize(value, use_l10n=True)` for a date, time or datetime,
+/// without converting to local time first, as the `localize` filter does.
+pub fn localize_date_value(
+    value: &Bound<'_, PyAny>,
+    cache: &mut DateCache,
+) -> PyResult<Option<String>> {
+    let Some((format_name, formatter)) = date_kind(value)? else {
+        return Ok(None);
+    };
+    format_localized(value, format_name, formatter, cache)
+}
+
+/// The format setting and formatter `localize` uses for a value.
+fn date_kind(value: &Bound<'_, PyAny>) -> PyResult<Option<(&'static str, Formatter)>> {
+    // `localize` checks `datetime` before `date`, its base class.
+    Ok(if plain_datetime(value)?.is_some() {
+        Some(("DATETIME_FORMAT", Formatter::Date))
+    } else if value.is_exact_instance_of::<PyDate>() {
+        Some(("DATE_FORMAT", Formatter::Date))
+    } else if value.is_exact_instance_of::<PyTime>() {
+        Some(("TIME_FORMAT", Formatter::Time))
+    } else {
+        None
+    })
+}
+
+fn format_localized(
+    value: &Bound<'_, PyAny>,
+    format_name: &'static str,
+    formatter: Formatter,
+    cache: &mut DateCache,
+) -> PyResult<Option<String>> {
+    Ok(match cache.format(value, format_name, formatter)? {
         Some(Formatted::Native(formatted)) => Some(formatted),
         Some(Formatted::Django(formatted)) => Some(formatted.str()?.to_cow()?.into_owned()),
         None => None,

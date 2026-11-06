@@ -19,18 +19,20 @@ use crate::filters::{
     DjangoFilter, EscapeFilter, EscapejsFilter, EscapeseqFilter, ExternalFilter,
     FilesizeformatFilter, FilterType, FirstFilter, FloatFormatFilter, ForceEscapeFilter,
     GetDigitFilter, IriencodeFilter, JoinFilter, JsonScriptFilter, Justify, JustifyFilter,
-    LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter, LinenumbersFilter, LowerFilter,
-    MakeListFilter, Phone2numericFilter, PluralizeFilter, PprintFilter, RandomFilter, SafeFilter,
-    SafeseqFilter, SliceArgument, SliceFilter, SlugifyFilter, StringformatFilter, StriptagsFilter,
-    TimesinceFilter, TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter,
+    L10nFilter, LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter, LinenumbersFilter,
+    LowerFilter, MakeListFilter, Phone2numericFilter, PluralizeFilter, PprintFilter, RandomFilter,
+    SafeFilter, SafeseqFilter, SliceArgument, SliceFilter, SlugifyFilter, StringformatFilter,
+    StriptagsFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter,
     TruncateWordsFilter, TruncateWordsHtmlFilter, TzFilter, UnorderedListFilter, UpperFilter,
     UrlencodeFilter, UrlizeFilter, UrlizetruncFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
     python_int,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
-use crate::render::dateformat::{Formatted, Formatter, convert_timezone, template_localtime};
-use crate::render::l10n::Grouping;
+use crate::render::dateformat::{
+    Formatted, Formatter, convert_timezone, localize_date_value, template_localtime,
+};
+use crate::render::l10n::{Grouping, localize_number};
 use crate::render::timesince::{TimeSince, TimeStrings, timesince};
 use crate::render::types::{
     AsBorrowedContent, Content, ContentString, Context, IntoOwnedContent, append_escaped,
@@ -130,6 +132,7 @@ impl ResolveFilter for FilterType {
             Self::External(filter) => filter.resolve(variable, py, template, context),
             Self::FloatFormat(filter) => filter.resolve(variable, py, template, context),
             Self::Tz(filter) => filter.resolve(variable, py, template, context),
+            Self::L10n(filter) => filter.resolve(variable, py, template, context),
             Self::First(filter) => filter.resolve(variable, py, template, context),
             Self::ForceEscape(filter) => filter.resolve(variable, py, template, context),
             Self::Join(filter) => filter.resolve(variable, py, template, context),
@@ -794,6 +797,49 @@ fn call_django_filter<'t, 'py>(
         result
     };
     Ok(Some(Content::Py(result)))
+}
+
+impl ResolveFilter for L10nFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let use_l10n = if self.localize { None } else { Some(false) };
+        let value = match variable {
+            // Missing variables reach Django's filter as "".
+            None => return Ok(Some("".as_content())),
+            // `localize` returns strings unchanged, and `str()` keeps them.
+            Some(Content::String(string)) => return Ok(Some(Content::String(string))),
+            Some(Content::Bool(value)) => {
+                let text = if value { "True" } else { "False" };
+                return Ok(Some(text.as_content()));
+            }
+            Some(content) => content,
+        };
+        let object = value.to_py(py);
+        if object.is_exact_instance_of::<PyString>() {
+            return Ok(Some(Content::Py(object)));
+        }
+        if let Some(number) = localize_number(&object, use_l10n, context)? {
+            return Ok(Some(Content::String(ContentString::HtmlUnsafe(
+                Cow::Owned(number),
+            ))));
+        }
+        // `unlocalize` reads the format settings, not the locale's, for dates.
+        if self.localize
+            && let Some(formatted) =
+                localize_date_value(&object, &mut context.date_cache.borrow_mut())?
+        {
+            return Ok(Some(Content::String(ContentString::HtmlUnsafe(
+                Cow::Owned(formatted),
+            ))));
+        }
+        let argument = self.django.resolve_argument(py, template, context)?;
+        self.django.call(Some(value), argument, py, context)
+    }
 }
 
 impl ResolveFilter for TzFilter {
