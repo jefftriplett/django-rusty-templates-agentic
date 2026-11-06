@@ -95,19 +95,42 @@ TEMPLATES = [
 ]
 ```
 
-### What still runs in Python
+### What is ported
 
-All of Django's built-in tags and filters are parsed and rendered in Rust. Some still call Python code:
+**Ported to Rust:**
 
-* **Your own filters and tags.** Filters registered with `Library.filter` run in Python and are called as Django calls them: `is_safe`, `needs_autoescape` and `expects_localtime` are honoured, and quoted string arguments arrive as `SafeString`.
-* **Library filters.** The filters from `{% load l10n %}` (`localize`, `unlocalize`), `{% load tz %}` (`localtime`, `utc`, `timezone`) and `{% load i18n %}` (`language_name`, `language_name_local`, `language_name_translated`, `language_bidi`) call Django's functions ([#281](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/281)). The tags in those libraries are native.
-* **Tags that use Django services.** `url`, `static`, `cache`, `csrf_token`, `translate` and `blocktranslate` are parsed in Rust, then call Django's URL resolver, storage, cache, CSRF and translation APIs.
-* **Unusual input.** Some built-in filters fall back to Django only for input where Python or Django behave differently between versions:
-  * `urlize` and `urlizetrunc`: words that might be links.
-  * `striptags`, `truncatechars_html` and `truncatewords_html`: HTML with entities, comments or loosely formed tags.
-  * `json_script`: dates, decimals and lazy strings.
-  * `stringformat`, `dictsort`, `unordered_list` and `floatformat`: unusual format specifiers, subclasses and generators.
-  * The date formatter: time zones other than `datetime.timezone` and `ZoneInfo`.
+* **Built-in tags.** All of Django's built-in tags (`defaulttags` and `loader_tags`), including `querystring`, `partialdef` and `partial` on the Django versions that have them.
+* **Built-in filters.** All 57 of Django's built-in filters.
+* **Stock library tags.** The tags from `{% load i18n %}`, `{% load l10n %}`, `{% load tz %}`, `{% load static %}` and `{% load cache %}`.
+
+Checked against Django 5.2 and the development version with `engine.explain_template()`; see [Inspecting templates](#inspecting-templates).
+
+**Not ported.** These run Django's Python code for every call:
+
+| Library | Filters and tags | Notes |
+|---|---|---|
+| `{% load l10n %}` | `localize`, `unlocalize` filters | [#281](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/281) |
+| `{% load tz %}` | `localtime`, `utc`, `timezone` filters | [#281](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/281) |
+| `{% load i18n %}` | `language_name`, `language_name_local`, `language_name_translated`, `language_bidi` filters | [#281](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/281) |
+| `django.contrib` | `humanize` filters (`intcomma`, `naturaltime`, …), admin tags, and other contrib libraries | Run as custom libraries. |
+| Your project | Custom filters and tags | See below. |
+
+Custom filters run in Python and are called as Django calls them: `is_safe`, `needs_autoescape` and `expects_localtime` are honoured, and quoted string arguments arrive as `SafeString`. `simple_tag` and `inclusion_tag` tags are called from Rust. Tags with their own compile function use Django's parser for that tag, and the rest of the template stays native.
+
+**Ported, but calls Django.** These are parsed and rendered in Rust, then call Django APIs for their results:
+
+* `url` uses the URL resolver, `static` storage, `cache` the cache, `csrf_token` CSRF, and `translate`/`blocktranslate` translations.
+* `csp_nonce_attr` (Django 6.1+) calls Django's tag function.
+
+**Ported, with fallbacks for unusual input.** Some built-in filters hand only that input to Django, where Python or Django behave differently between versions:
+
+* `urlize` and `urlizetrunc`: words that might be links.
+* `striptags`, `truncatechars_html` and `truncatewords_html`: HTML with entities, comments or loosely formed tags.
+* `json_script`: dates, decimals and lazy strings.
+* `stringformat`, `dictsort`, `unordered_list` and `floatformat`: unusual format specifiers, subclasses and generators.
+* The date formatter: time zones other than `datetime.timezone` and `ZoneInfo`.
+
+The WebAssembly engine supports a smaller subset; see [its documentation](dtl-browser/README.md).
 
 ## WebAssembly for JavaScript clients
 
