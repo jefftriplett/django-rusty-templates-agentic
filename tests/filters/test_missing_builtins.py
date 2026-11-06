@@ -787,6 +787,68 @@ def test_first_replaced_builtin(monkeypatch):
     assert rusty == django == "replacement"
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("one", id="one_line"),
+        pytest.param("a\nb\n", id="trailing_newline"),
+        pytest.param("\n".join("x" * n for n in range(12)), id="two_digit_width"),
+        pytest.param("\n" * 99, id="hundred_lines"),
+        pytest.param("a\r\nb\rc", id="carriage_returns"),
+        pytest.param("<a> & 'b' \"c\"\n<d>", id="html"),
+        pytest.param(mark_safe("<b>\n<i>"), id="safe"),
+        pytest.param("héllo\n日本語 😀", id="non_ascii"),
+        pytest.param(12345, id="int"),
+        pytest.param(1.5, id="float"),
+        pytest.param(True, id="bool"),
+        pytest.param(["<a>", "b"], id="list"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_linenumbers_matches_django(value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "[{{ value|linenumbers }}][{{ value|safe|linenumbers }}]"
+        "[{{ value|lower|linenumbers }}][{{ missing|linenumbers }}]"
+        "[{{ value|linenumbers|length }}]"
+        "{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {"value": value})
+    assert rusty == django
+
+
+def test_linenumbers_literals():
+    source = "[{{ 'a<\\nb'|linenumbers }}][{{ 12|linenumbers }}]"
+    django, rusty = render_both(source, {})
+    assert rusty == django
+
+
+def test_linenumbers_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "linenumbers", lambda value: "replacement")
+    django, rusty = render_both("{{ value|linenumbers }}", {"value": "a\nb"})
+    assert rusty == django == "replacement"
+
+
+def test_truncation_text_is_cached_for_the_render(monkeypatch):
+    # Output is the same with or without the cache, so count the lookups.
+    pgettext = translation._trans.pgettext
+    calls = []
+
+    def counting(context, message):
+        if context == "String to return when truncating text":
+            calls.append(message)
+        return pgettext(context, message)
+
+    monkeypatch.setattr(translation._trans, "pgettext", counting)
+    source = "{% for value in values %}{{ value|truncatechars:3 }}{% endfor %}"
+    context = {"values": ["abcdefghij", "héllo wörld"] * 10}
+    with translation.override("en"):
+        engines["rusty"].from_string(source).render(context)
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("language", ["en", "ckb", "he"])
 @pytest.mark.parametrize(
     "value",

@@ -45,6 +45,7 @@ use crate::filters::LastFilter;
 use crate::filters::LengthFilter;
 use crate::filters::LinebreaksFilter;
 use crate::filters::LinebreaksbrFilter;
+use crate::filters::LinenumbersFilter;
 use crate::filters::LowerFilter;
 use crate::filters::SafeFilter;
 use crate::filters::SliceArgument;
@@ -304,6 +305,11 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::Linebreaksbr(LinebreaksbrFilter)
+                }
+                BuiltinFilter::Linenumbers
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Linenumbers(LinenumbersFilter)
                 }
                 BuiltinFilter::Timesince
                     if is_django_filter(parser.py, &django.filter, "timesince_filter") =>

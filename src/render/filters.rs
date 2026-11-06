@@ -12,9 +12,9 @@ use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
     EscapejsFilter, ExternalFilter, FilterType, FirstFilter, FloatFormatFilter, ForceEscapeFilter,
-    JoinFilter, LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter, LowerFilter,
-    SafeFilter, SliceArgument, SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter,
-    TruncateCharsFilter, TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter,
+    JoinFilter, LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter, LinenumbersFilter,
+    LowerFilter, SafeFilter, SliceArgument, SliceFilter, SlugifyFilter, TimesinceFilter,
+    TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter,
     WordcountFilter, WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
@@ -114,6 +114,7 @@ impl ResolveFilter for FilterType {
             Self::Last(filter) => filter.resolve(variable, py, template, context),
             Self::Linebreaks(filter) => filter.resolve(variable, py, template, context),
             Self::Linebreaksbr(filter) => filter.resolve(variable, py, template, context),
+            Self::Linenumbers(filter) => filter.resolve(variable, py, template, context),
             Self::Lower(filter) => filter.resolve(variable, py, template, context),
             Self::Length(filter) => filter.resolve(variable, py, template, context),
             Self::Safe(filter) => filter.resolve(variable, py, template, context),
@@ -1976,6 +1977,41 @@ impl ResolveFilter for LinebreaksbrFilter {
             }
         };
         Ok(Some(Content::String(ContentString::HtmlSafe(text))))
+    }
+}
+
+impl ResolveFilter for LinenumbersFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        _template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let (text, safe) = string_filter_text(variable, py)?;
+        let escape = context.autoescape && !safe;
+        // Django splits on "\n" only and zero-pads every number to the width
+        // of the line count.
+        let count = text.split('\n').count();
+        let width = count.to_string().len();
+        let mut output = String::with_capacity(text.len() + count * (width + 2));
+        for (index, line) in text.split('\n').enumerate() {
+            if index > 0 {
+                output.push('\n');
+            }
+            let number = (index + 1).to_string();
+            output.extend(std::iter::repeat_n('0', width - number.len()));
+            output.push_str(&number);
+            output.push_str(". ");
+            if escape {
+                encode_quoted_attribute_to_string(line, &mut output);
+            } else {
+                output.push_str(line);
+            }
+        }
+        Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
+            output,
+        )))))
     }
 }
 
