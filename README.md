@@ -109,9 +109,9 @@ Checked against Django 5.2 and the development version with `engine.explain_temp
 
 | Library | Filters and tags | Notes |
 |---|---|---|
-| `{% load l10n %}` | `localize`, `unlocalize` filters | [#281](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/281) |
-| `{% load tz %}` | `localtime`, `utc`, `timezone` filters | [#281](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/281) |
-| `{% load i18n %}` | `language_name`, `language_name_local`, `language_name_translated`, `language_bidi` filters | [#281](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/281) |
+| `{% load l10n %}` | `localize`, `unlocalize` filters | [#292](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/292) |
+| `{% load tz %}` | `localtime`, `utc`, `timezone` filters | [#293](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/293) |
+| `{% load i18n %}` | `language_name`, `language_name_local`, `language_name_translated`, `language_bidi` filters | [#294](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/294) |
 | `django.contrib` | `humanize` filters (`intcomma`, `naturaltime`, …), admin tags, and other contrib libraries | Run as custom libraries. |
 | Your project | Custom filters and tags | See below. |
 
@@ -153,6 +153,8 @@ Django Rusty Templates (Agentic) is open to contributions. These can come in man
 For detailed instructions on setting up your development environment and contributing to the project, please see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Benchmarks
+
+For an overview of where Rusty is faster, where it isn't, and what that means for request times, see [What to expect](docs/benchmarks/what-to-expect.md). `uv run python scripts/benchmark_summary.py --json-output summary.json` runs its scenarios through both Django backends. The scripts below measure individual mechanisms.
 
 `uv run python scripts/benchmark_loop_values.py --json-output results.json`
 measures integer loops, text-only loops, repeated variables, and mixed component
