@@ -21,8 +21,8 @@ use crate::filters::{
     LinenumbersFilter, LowerFilter, MakeListFilter, Phone2numericFilter, PluralizeFilter,
     PprintFilter, RandomFilter, SafeFilter, SafeseqFilter, SliceArgument, SliceFilter,
     SlugifyFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter,
-    TruncateWordsFilter, UpperFilter, UrlencodeFilter, WordcountFilter, WordwrapFilter,
-    YesnoFilter, python_int,
+    TruncateWordsFilter, UnorderedListFilter, UpperFilter, UrlencodeFilter, WordcountFilter,
+    WordwrapFilter, YesnoFilter, python_int,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -144,6 +144,7 @@ impl ResolveFilter for FilterType {
             Self::Random(filter) => filter.resolve(variable, py, template, context),
             Self::Pprint(filter) => filter.resolve(variable, py, template, context),
             Self::Filesizeformat(filter) => filter.resolve(variable, py, template, context),
+            Self::UnorderedList(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -2635,6 +2636,119 @@ impl ResolveFilter for FilesizeformatFilter {
         } else {
             ContentString::HtmlUnsafe(Cow::Owned(text))
         })))
+    }
+}
+
+/// Nesting beyond this goes to Django, which raises `RecursionError` for
+/// lists that contain themselves.
+const MAX_LIST_DEPTH: usize = 100;
+
+/// The items of an exact list or tuple. Subclasses and other iterables
+/// return `None`, leaving them to Django.
+fn exact_sequence<'py>(value: &Bound<'py, PyAny>) -> Option<Vec<Bound<'py, PyAny>>> {
+    if value.is_exact_instance_of::<PyList>() {
+        value
+            .cast::<PyList>()
+            .ok()
+            .map(|list| list.iter().collect())
+    } else if value.is_exact_instance_of::<PyTuple>() {
+        value
+            .cast::<PyTuple>()
+            .ok()
+            .map(|tuple| tuple.iter().collect())
+    } else {
+        None
+    }
+}
+
+/// Django's `list_formatter`: each item becomes an indented `<li>`, and a
+/// list or tuple right after an item becomes its nested `<ul>`. Returns
+/// `false` for structures left to Django.
+fn push_list_items(
+    items: &[Bound<'_, PyAny>],
+    tabs: usize,
+    autoescape: bool,
+    output: &mut String,
+) -> PyResult<bool> {
+    if tabs > MAX_LIST_DEPTH {
+        return Ok(false);
+    }
+    let py = match items.first() {
+        Some(item) => item.py(),
+        None => return Ok(true),
+    };
+    let generator = py.import("types")?.getattr("GeneratorType")?;
+    let mut index = 0;
+    let mut first = true;
+    while let Some(item) = items.get(index) {
+        index += 1;
+        // Django pairs an item with a following list, tuple or generator.
+        let children = match items.get(index) {
+            Some(next) if next.is_instance_of::<PyList>() || next.is_instance_of::<PyTuple>() => {
+                let Some(children) = exact_sequence(next) else {
+                    return Ok(false);
+                };
+                index += 1;
+                Some(children)
+            }
+            Some(next) if next.is_instance(&generator)? => return Ok(false),
+            _ => None,
+        };
+        if !first {
+            output.push('\n');
+        }
+        first = false;
+        output.extend(std::iter::repeat_n('\t', tabs));
+        output.push_str("<li>");
+        if item.is_exact_instance_of::<PyString>() {
+            append_python_string(item, autoescape, output)?;
+        } else if is_exact_safe_string(item)? || item.is_exact_instance_of::<PyInt>() {
+            append_python_string(&item.str()?.into_any(), false, output)?;
+        } else if autoescape {
+            let escaped = CONDITIONAL_ESCAPE
+                .import(py, "django.utils.html", "conditional_escape")?
+                .call1((item,))?;
+            append_python_string(&escaped.str()?.into_any(), false, output)?;
+        } else {
+            append_python_string(&item.str()?.into_any(), false, output)?;
+        }
+        // An empty list is consumed but adds no `<ul>`.
+        if let Some(children) = children.filter(|children| !children.is_empty()) {
+            output.push('\n');
+            output.extend(std::iter::repeat_n('\t', tabs));
+            output.push_str("<ul>\n");
+            if !push_list_items(&children, tabs + 1, autoescape, output)? {
+                return Ok(false);
+            }
+            output.push('\n');
+            output.extend(std::iter::repeat_n('\t', tabs));
+            output.push_str("</ul>\n");
+            output.extend(std::iter::repeat_n('\t', tabs));
+        }
+        output.push_str("</li>");
+    }
+    Ok(true)
+}
+
+impl ResolveFilter for UnorderedListFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        if let Some(Content::Py(value)) = &variable
+            && let Some(items) = exact_sequence(value)
+        {
+            let mut output = String::new();
+            if push_list_items(&items, 1, context.autoescape, &mut output)? {
+                return Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
+                    output,
+                )))));
+            }
+        }
+        self.django.resolve(variable, py, template, context)
     }
 }
 

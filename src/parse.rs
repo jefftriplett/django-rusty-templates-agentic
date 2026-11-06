@@ -68,6 +68,7 @@ use crate::filters::TitleFilter;
 use crate::filters::TruncateCharsFilter;
 use crate::filters::TruncateCharsHtmlFilter;
 use crate::filters::TruncateWordsFilter;
+use crate::filters::UnorderedListFilter;
 use crate::filters::UpperFilter;
 use crate::filters::UrlencodeFilter;
 use crate::filters::WordcountFilter;
@@ -410,6 +411,11 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::Filesizeformat(FilesizeformatFilter { django })
+                }
+                BuiltinFilter::UnorderedList
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::UnorderedList(UnorderedListFilter { django })
                 }
                 _ => FilterType::Django(django),
             };
