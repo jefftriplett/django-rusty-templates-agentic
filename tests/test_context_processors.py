@@ -108,3 +108,5 @@ def test_context_processor_invalid_return_type(engine_class, expected):
         template.render({}, request)
 
     assert str(exc_info.value) == expected
+    # Django raises this `from` the original error.
+    assert isinstance(exc_info.value.__cause__, TypeError)

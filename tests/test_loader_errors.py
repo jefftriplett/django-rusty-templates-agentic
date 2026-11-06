@@ -27,3 +27,14 @@ def test_app_loader_reflects_installed_apps(engine_cls):
     with override_settings(INSTALLED_APPS=[]):
         with pytest.raises(TemplateDoesNotExist):
             engine.get_template("basic.txt")
+
+
+@pytest.mark.parametrize("engine_cls", [Engine, DjangoEngine])
+def test_loader_get_template_reports_tried(engine_cls, tmp_path):
+    engine = engine_cls(
+        dirs=[tmp_path], loaders=["django.template.loaders.filesystem.Loader"]
+    )
+    with pytest.raises(TemplateDoesNotExist) as exc_info:
+        engine.template_loaders[0].get_template("missing.html")
+    tried = [(origin.name, reason) for origin, reason in exc_info.value.tried]
+    assert tried == [(str(tmp_path / "missing.html"), "Source does not exist")]

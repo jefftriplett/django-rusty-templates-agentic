@@ -30,6 +30,19 @@ pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 
+# Restriction lints, adapted from django-language-server's setup.
+clone_on_ref_ptr = "deny"
+dbg_macro = "deny"
+get_unwrap = "deny"
+map_err_ignore = "deny"
+mem_forget = "deny"
+mod_module_files = "deny"
+multiple_unsafe_ops_per_block = "deny"
+panic_in_result_fn = "deny"
+undocumented_unsafe_blocks = "deny"
+unimplemented = "deny"
+unused_result_ok = "deny"
+
 # TODO: But require a lot of changes
 needless_pass_by_value = "allow"
 # TODO: Rename `content` variables clashing with `context` to something mre accurate in their context
