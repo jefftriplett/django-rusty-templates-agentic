@@ -41,6 +41,8 @@ use crate::filters::FirstFilter;
 use crate::filters::FloatFormatFilter;
 use crate::filters::ForceEscapeFilter;
 use crate::filters::JoinFilter;
+use crate::filters::Justify;
+use crate::filters::JustifyFilter;
 use crate::filters::LastFilter;
 use crate::filters::LengthFilter;
 use crate::filters::LinebreaksFilter;
@@ -277,6 +279,22 @@ impl Filter {
                         }
                     });
                     FilterType::Slice(SliceFilter { django, literal })
+                }
+                BuiltinFilter::Ljust
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Justify(JustifyFilter {
+                        django,
+                        side: Justify::Left,
+                    })
+                }
+                BuiltinFilter::Rjust
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Justify(JustifyFilter {
+                        django,
+                        side: Justify::Right,
+                    })
                 }
                 BuiltinFilter::First
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>

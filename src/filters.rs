@@ -24,6 +24,7 @@ pub enum FilterType {
     FloatFormat(FloatFormatFilter),
     ForceEscape(ForceEscapeFilter),
     Join(JoinFilter),
+    Justify(JustifyFilter),
     Last(LastFilter),
     Linebreaks(LinebreaksFilter),
     Linebreaksbr(LinebreaksbrFilter),
@@ -272,6 +273,21 @@ pub struct TitleFilter;
 #[derive(Clone, Debug, PartialEq)]
 pub struct TruncateCharsFilter {
     pub django: DjangoFilter,
+}
+
+/// Django's `ljust` and `rjust`, computed natively for strings and an
+/// integer width. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JustifyFilter {
+    pub django: DjangoFilter,
+    pub side: Justify,
+}
+
+/// Which side `ljust` and `rjust` keep the text on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Justify {
+    Left,
+    Right,
 }
 
 /// Django's `truncatewords`, computed natively for strings and an integer
