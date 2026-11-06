@@ -2765,3 +2765,100 @@ def test_truncatewords_html_replaced_builtin(monkeypatch):
     )
     django, rusty = render_both("{{ value|truncatewords_html:1 }}", {"value": "a b"})
     assert rusty == django == "replacement"
+
+
+URLIZE_VALUES = [
+    "",
+    "Hello world.",
+    "Visit https://www.djangoproject.com/ today.",
+    "See www.example.com, or example.org.",
+    "Mail me at test@example.com!",
+    "(http://example.com/path?a=1&b=2)",
+    "[www.example.net]",
+    "Use HTTP://EXAMPLE.COM or WWW.EXAMPLE.EDU.",
+    "foo.bar.baz end. Mr. Smith, e.g. this; that: those!",
+    "a.b@c.d x@y not-an-email@ @",
+    "https://example.com/&amp;x;; and &lt;tag&gt;",
+    "http://example.com/" + "a" * 100,
+    "<b>http://example.com</b> 'quoted' \"double\"",
+    "repeated http://a.com http://a.com http://a.com",
+    "https://bücher.de/straße and münchen.com",
+    "İNT test.İnt foo.ınt",
+    "time: 10:30, ratio 1:2, file.txt, v1.2.3",
+    "javascript:alert(1) mailto:x@y.com ftp://example.com",
+    "tab\tseparated\nlines\x1cwith spaces",
+    "trailing.com/.,:;!",
+    "<script>alert('x')</script>",
+]
+
+
+@pytest.mark.parametrize("assume_https", [False, True])
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_urlize_matches_django(settings, assume_https, autoescape):
+    import warnings
+
+    settings.URLIZE_ASSUME_HTTPS = assume_https
+    source = (
+        "{% autoescape " + autoescape + " %}{% for value in values %}"
+        "[{{ value|urlize }}][{{ value|urlizetrunc:15 }}][{{ value|urlizetrunc:limit }}]"
+        "{% endfor %}{% endautoescape %}"
+    )
+    values = URLIZE_VALUES + [mark_safe(value) for value in URLIZE_VALUES]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        django, rusty = render_both(source, {"values": values, "limit": 0})
+    assert isinstance(django, str)
+    assert rusty == django
+
+
+@pytest.mark.parametrize("limit", [-3, 1, 2, "4", 4.9, True, "x", None], ids=repr)
+def test_urlizetrunc_limits_match_django(limit):
+    import warnings
+
+    source = "{{ value|urlizetrunc:limit }}"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        django, rusty = render_both(
+            source, {"value": "Go to http://example.com/long/path now.", "limit": limit}
+        )
+    if isinstance(django, tuple):
+        assert rusty[0] is django[0]
+    else:
+        assert rusty == django
+
+
+def test_urlize_warns_like_django(settings):
+    import warnings
+
+    settings.URLIZE_ASSUME_HTTPS = False
+    for name in ("django", "rusty"):
+        template = engines[name].from_string("{{ value|urlize }}")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            template.render({"value": "www.example.com and plain words."})
+        if name == "django":
+            expected = [(w.category, str(w.message)) for w in caught]
+        else:
+            assert [(w.category, str(w.message)) for w in caught] == expected
+
+
+@pytest.mark.parametrize(
+    "value", [123, None, translation.gettext_lazy("www.example.com")]
+)
+def test_urlize_non_strings_match_django(value):
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        django, rusty = render_both(
+            "{{ value|urlize }}|{{ value|urlizetrunc:5 }}", {"value": value}
+        )
+    assert rusty == django
+
+
+@pytest.mark.parametrize("name", ["urlize", "urlizetrunc"])
+def test_urlize_replaced_builtin(monkeypatch, name):
+    monkeypatch.setitem(register.filters, name, lambda value, arg=None: "replacement")
+    source = "{{ value|" + name + (":5" if name == "urlizetrunc" else "") + " }}"
+    django, rusty = render_both(source, {"value": "http://a.com"})
+    assert rusty == django == "replacement"

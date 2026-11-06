@@ -23,7 +23,8 @@ use crate::filters::{
     SafeseqFilter, SliceArgument, SliceFilter, SlugifyFilter, StringformatFilter, StriptagsFilter,
     TimesinceFilter, TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter,
     TruncateWordsFilter, TruncateWordsHtmlFilter, UnorderedListFilter, UpperFilter,
-    UrlencodeFilter, WordcountFilter, WordwrapFilter, YesnoFilter, python_int,
+    UrlencodeFilter, UrlizeFilter, UrlizetruncFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
+    python_int,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -157,6 +158,8 @@ impl ResolveFilter for FilterType {
             Self::Dictsortreversed(filter) => filter.resolve(variable, py, template, context),
             Self::JsonScript(filter) => filter.resolve(variable, py, template, context),
             Self::TruncateWordsHtml(filter) => filter.resolve(variable, py, template, context),
+            Self::Urlize(filter) => filter.resolve(variable, py, template, context),
+            Self::Urlizetrunc(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -3904,6 +3907,132 @@ impl ResolveFilter for JsonScriptFilter {
             }
             argument => argument,
         };
+        self.django.call(variable, argument, py, context)
+    }
+}
+
+static HTML_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+
+/// Whether `word` might become a link in Django's `Urlizer.handle_word`.
+/// A link needs `http`, `www.`, `@` or one of the seven gTLDs after a dot,
+/// and its middle is a substring of the word. Non-ASCII words with `.`, `@`
+/// or `:` are left to Python, because `re.IGNORECASE` matches some
+/// non-ASCII letters.
+fn may_urlize(word: &str) -> bool {
+    if !word.contains(['.', '@', ':']) {
+        return false;
+    }
+    if !word.is_ascii() {
+        return true;
+    }
+    let lower = word.to_ascii_lowercase();
+    lower.contains("http")
+        || lower.contains("www.")
+        || lower.contains('@')
+        || [".com", ".edu", ".gov", ".int", ".mil", ".net", ".org"]
+            .iter()
+            .any(|tld| lower.contains(tld))
+}
+
+/// Django's `urlize(text, trim_url_limit, nofollow=True, autoescape)`.
+/// Words that can't become links are escaped as `handle_word` does; the
+/// rest go through Django's `urlizer`, once per distinct word.
+fn urlize_text(
+    text: &str,
+    safe: bool,
+    limit: Option<i64>,
+    autoescape: bool,
+    py: Python<'_>,
+) -> PyResult<String> {
+    // `word_split_re`: runs of whitespace, `<`, `>`, `"` and `'` separate words.
+    let is_separator =
+        |character: char| is_python_whitespace(character) || "<>\"'".contains(character);
+    let mut output = String::with_capacity(text.len());
+    let mut links: HashMap<&str, String> = HashMap::new();
+    let mut urlizer = None;
+    let mut rest = text;
+    while !rest.is_empty() {
+        let separator = rest.starts_with(is_separator);
+        let end = rest
+            .find(|character: char| is_separator(character) != separator)
+            .unwrap_or(rest.len());
+        let (piece, remaining) = rest.split_at(end);
+        rest = remaining;
+        if separator || !may_urlize(piece) {
+            if autoescape && !safe {
+                append_escaped(piece, &mut output);
+            } else {
+                output.push_str(piece);
+            }
+            continue;
+        }
+        if let Some(link) = links.get(piece) {
+            output.push_str(link);
+            continue;
+        }
+        let urlizer = match &urlizer {
+            Some(urlizer) => urlizer,
+            None => urlizer.insert(
+                HTML_MODULE
+                    .import(py, "django.utils", "html")?
+                    .getattr("urlizer")?,
+            ),
+        };
+        let word = if safe {
+            SAFESTRING
+                .import(py, "django.utils.safestring", "SafeString")?
+                .call1((piece,))?
+        } else {
+            PyString::new(py, piece).into_any()
+        };
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("trim_url_limit", limit)?;
+        kwargs.set_item("nofollow", true)?;
+        kwargs.set_item("autoescape", autoescape)?;
+        let link: String = urlizer.call((word,), Some(&kwargs))?.str()?.extract()?;
+        output.push_str(&link);
+        links.insert(piece, link);
+    }
+    Ok(output)
+}
+
+impl ResolveFilter for UrlizeFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        if let Some(text) = Text::from_variable(variable.as_ref(), py)? {
+            let safe = matches!(text, Text::Safe(_));
+            let output = urlize_text(text.as_str(), safe, None, context.autoescape, py)?;
+            return Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
+                output,
+            )))));
+        }
+        self.django.resolve(variable, py, template, context)
+    }
+}
+
+impl ResolveFilter for UrlizetruncFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        if let Some(limit) = argument.value().and_then(integer_argument)
+            && let Some(text) = Text::from_variable(variable.as_ref(), py)?
+        {
+            let safe = matches!(text, Text::Safe(_));
+            let output = urlize_text(text.as_str(), safe, Some(limit), context.autoescape, py)?;
+            return Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
+                output,
+            )))));
+        }
         self.django.call(variable, argument, py, context)
     }
 }

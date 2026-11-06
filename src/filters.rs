@@ -57,6 +57,8 @@ pub enum FilterType {
     Dictsortreversed(DictsortreversedFilter),
     JsonScript(JsonScriptFilter),
     TruncateWordsHtml(TruncateWordsHtmlFilter),
+    Urlize(UrlizeFilter),
+    Urlizetrunc(UrlizetruncFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -467,6 +469,20 @@ pub struct JsonScriptFilter {
 /// Other text calls Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TruncateWordsHtmlFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `urlize`, with words that can't become links handled natively.
+/// Possible links call Django's `Urlizer`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UrlizeFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `urlizetrunc`, with words that can't become links handled
+/// natively. Possible links call Django's `Urlizer`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UrlizetruncFilter {
     pub django: DjangoFilter,
 }
 

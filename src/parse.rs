@@ -77,6 +77,8 @@ use crate::filters::TruncateWordsHtmlFilter;
 use crate::filters::UnorderedListFilter;
 use crate::filters::UpperFilter;
 use crate::filters::UrlencodeFilter;
+use crate::filters::UrlizeFilter;
+use crate::filters::UrlizetruncFilter;
 use crate::filters::WordcountFilter;
 use crate::filters::WordwrapFilter;
 use crate::filters::YesnoFilter;
@@ -452,6 +454,16 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::TruncateWordsHtml(TruncateWordsHtmlFilter { django })
+                }
+                BuiltinFilter::Urlize
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Urlize(UrlizeFilter { django })
+                }
+                BuiltinFilter::Urlizetrunc
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Urlizetrunc(UrlizetruncFilter { django })
                 }
                 _ => FilterType::Django(django),
             };
