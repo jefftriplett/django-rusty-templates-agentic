@@ -1,13 +1,127 @@
 use std::sync::Mutex;
 
+use pyo3::exceptions::PyAttributeError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
-use pyo3::types::PyString;
+use pyo3::types::{PyDict, PyModule, PyString, PyType};
 
 static GET_LANGUAGE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static CATALOG: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static TRANS_REAL: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+static CVAR: PyOnceLock<Option<Py<PyType>>> = PyOnceLock::new();
+
+/// What `getattr(trans_real._active, "value", None)` returns, read directly
+/// from asgiref's context variable. `trans_real._active` is an asgiref
+/// `Local`, whose attribute access takes a lock and enters a context manager
+/// on every read; that is most of the cost of `get_language()`. Its storage
+/// is a `_CVar` holding a `ContextVar` of a dict that is copied on every
+/// write, so reading the dict is exact. Returns `None` when the storage
+/// isn't that shape, such as a thread-critical `Local` or another asgiref
+/// version, leaving the caller to ask Django.
+/// The active translation, as `getattr(trans_real._active, "value", None)`.
+enum Active<'py> {
+    /// A translation is active.
+    Translation(Bound<'py, PyAny>),
+    /// None is active, so Django falls back to its default.
+    Default,
+    /// The storage isn't asgiref's usual shape; ask Django.
+    Unknown,
+}
+
+fn active_translation(py: Python<'_>) -> PyResult<Active<'_>> {
+    let trans_real = TRANS_REAL
+        .get_or_try_init(py, || {
+            py.import("django.utils.translation.trans_real")
+                .map(Bound::unbind)
+        })?
+        .bind(py);
+    let cvar = CVAR.get_or_init(py, || {
+        py.import("asgiref.local")
+            .and_then(|module| module.getattr("_CVar"))
+            .and_then(|cvar| Ok(cvar.cast_into::<PyType>()?.unbind()))
+            .ok()
+    });
+    let Some(cvar) = cvar else {
+        return Ok(Active::Unknown);
+    };
+    let active = trans_real.getattr(intern!(py, "_active"))?;
+    let Ok(storage) = active.getattr(intern!(py, "_storage")) else {
+        return Ok(Active::Unknown);
+    };
+    if !storage.get_type().is(cvar.bind(py)) {
+        return Ok(Active::Unknown);
+    }
+    let storage = storage
+        .getattr(intern!(py, "_data"))?
+        .call_method1(intern!(py, "get"), (py.None(),))?;
+    if storage.is_none() {
+        return Ok(Active::Default);
+    }
+    let Ok(storage) = storage.cast::<PyDict>() else {
+        return Ok(Active::Unknown);
+    };
+    Ok(
+        match storage
+            .get_item(intern!(py, "value"))?
+            .filter(|value| !value.is_none())
+        {
+            Some(translation) => Active::Translation(translation),
+            None => Active::Default,
+        },
+    )
+}
+
+/// Django's `get_language()`, reading the active translation directly.
+pub fn get_language(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    let django = || {
+        GET_LANGUAGE
+            .import(py, "django.utils.translation", "get_language")?
+            .call0()
+    };
+    match active_translation(py)? {
+        Active::Unknown => django(),
+        Active::Translation(translation) => {
+            match translation.call_method0(intern!(py, "to_language")) {
+                Err(error) if error.is_instance_of::<PyAttributeError>(py) => language_code(py),
+                language => language,
+            }
+        }
+        Active::Default => language_code(py),
+    }
+}
+
+/// `settings.LANGUAGE_CODE`, Django's language when none is active.
+fn language_code(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    SETTINGS
+        .import(py, "django.conf", "settings")?
+        .getattr(intern!(py, "LANGUAGE_CODE"))
+}
+
+/// Django's `trans_real.catalog()`, reading the active translation directly.
+fn catalog(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    let django = || {
+        CATALOG
+            .import(py, "django.utils.translation.trans_real", "catalog")?
+            .call0()
+    };
+    match active_translation(py)? {
+        Active::Translation(translation) => Ok(translation),
+        Active::Default => {
+            // `catalog()` builds the default translation once.
+            let default = TRANS_REAL
+                .get(py)
+                .map(|module| module.bind(py).getattr(intern!(py, "_default")))
+                .transpose()?;
+            match default {
+                Some(default) if !default.is_none() => Ok(default),
+                _ => django(),
+            }
+        }
+        Active::Unknown => django(),
+    }
+}
 
 /// Catalogs a node keeps at once, enough for a site's interleaved languages.
 const CATALOG_CAPACITY: usize = 8;
@@ -40,9 +154,7 @@ impl CatalogCache {
         if !settings.getattr(intern!(py, "USE_I18N"))?.is_truthy()? {
             return init();
         }
-        let catalog = CATALOG
-            .import(py, "django.utils.translation.trans_real", "catalog")?
-            .call0()?;
+        let catalog = catalog(py)?;
         let find = |entries: &[(Py<PyAny>, Py<PyAny>)]| {
             entries
                 .iter()
@@ -118,9 +230,7 @@ impl<T> LanguageCache<T> {
         py: Python<'py>,
         init: impl FnOnce(&Bound<'py, PyString>) -> PyResult<T>,
     ) -> PyResult<Option<&mut T>> {
-        let language = GET_LANGUAGE
-            .import(py, "django.utils.translation", "get_language")?
-            .call0()?;
+        let language = get_language(py)?;
         let Ok(language) = language.cast_into::<PyString>() else {
             return Ok(None);
         };
