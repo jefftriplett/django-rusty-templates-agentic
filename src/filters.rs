@@ -35,6 +35,7 @@ pub enum FilterType {
     Timesince(TimesinceFilter),
     Title(TitleFilter),
     TruncateChars(TruncateCharsFilter),
+    TruncateCharsHtml(TruncateCharsHtmlFilter),
     TruncateWords(TruncateWordsFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
@@ -267,6 +268,14 @@ pub struct TitleFilter;
 /// translation of the truncation text, and other inputs call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TruncateCharsFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `truncatechars_html`. Strings with an integer length call
+/// Django's HTML `Truncator` with the cached translation of the truncation
+/// text; other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TruncateCharsHtmlFilter {
     pub django: DjangoFilter,
 }
 

@@ -53,6 +53,7 @@ use crate::filters::SlugifyFilter;
 use crate::filters::TimesinceFilter;
 use crate::filters::TitleFilter;
 use crate::filters::TruncateCharsFilter;
+use crate::filters::TruncateCharsHtmlFilter;
 use crate::filters::TruncateWordsFilter;
 use crate::filters::UpperFilter;
 use crate::filters::WordcountFilter;
@@ -248,6 +249,11 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::TruncateChars(TruncateCharsFilter { django })
+                }
+                BuiltinFilter::TruncatecharsHtml
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::TruncateCharsHtml(TruncateCharsHtmlFilter { django })
                 }
                 BuiltinFilter::Truncatewords
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>

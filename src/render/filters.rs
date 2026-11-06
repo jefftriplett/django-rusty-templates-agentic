@@ -14,8 +14,8 @@ use crate::filters::{
     EscapejsFilter, ExternalFilter, FilterType, FirstFilter, FloatFormatFilter, ForceEscapeFilter,
     JoinFilter, LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter, LowerFilter,
     SafeFilter, SliceArgument, SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter,
-    TruncateCharsFilter, TruncateWordsFilter, UpperFilter, WordcountFilter, WordwrapFilter,
-    YesnoFilter,
+    TruncateCharsFilter, TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter,
+    WordcountFilter, WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -121,6 +121,7 @@ impl ResolveFilter for FilterType {
             Self::Timesince(filter) => filter.resolve(variable, py, template, context),
             Self::Title(filter) => filter.resolve(variable, py, template, context),
             Self::TruncateChars(filter) => filter.resolve(variable, py, template, context),
+            Self::TruncateCharsHtml(filter) => filter.resolve(variable, py, template, context),
             Self::Slice(filter) => filter.resolve(variable, py, template, context),
             Self::TruncateWords(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
@@ -1724,6 +1725,64 @@ impl ResolveFilter for SliceFilter {
                 }
             }
         }))
+    }
+}
+
+/// `Truncator(text).chars(length, html=True)`. `None` defers to Django's
+/// filter.
+fn truncate_chars_html(
+    text: &str,
+    length: i64,
+    py: Python<'_>,
+    context: &mut Context,
+) -> PyResult<Option<String>> {
+    let Ok(length @ 1..) = usize::try_from(length) else {
+        return Ok(Some(String::new()));
+    };
+    let Some(truncation) = context
+        .truncation_text
+        .get_or_try_init(py, |_| TruncationText::new(py))?
+    else {
+        return Ok(None);
+    };
+    // Django's parser escapes the text it keeps, so ASCII text with nothing
+    // to escape comes back unchanged when it fits. It fits at exactly
+    // `length` characters, or within `length` less the truncation text.
+    if let Some(split) = &truncation.split
+        && (text.len() == length || text.len() <= length.saturating_sub(split.width))
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii() && !matches!(byte, b'<' | b'>' | b'&' | b'"' | b'\''))
+    {
+        return Ok(Some(text.to_string()));
+    }
+    // Passing the cached translation saves Django's `pgettext` calls: one
+    // to size the text and one for each truncation.
+    // `chars(num, truncate, html)` has this order in every supported version.
+    let truncated = TRUNCATOR
+        .import(py, "django.utils.text", "Truncator")?
+        .call1((text,))?
+        .call_method1("chars", (length, &truncation.text, true))?
+        .extract()?;
+    Ok(Some(truncated))
+}
+
+impl ResolveFilter for TruncateCharsHtmlFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        if let Some(length) = argument.value().and_then(integer_argument)
+            && let Some(text) = Text::from_variable(variable.as_ref(), py)?
+            && let Some(truncated) = truncate_chars_html(text.as_str(), length, py, context)?
+        {
+            return Ok(Some(text.into_content(truncated, context)));
+        }
+        self.django.call(variable, argument, py, context)
     }
 }
 
