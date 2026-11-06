@@ -2328,3 +2328,102 @@ def test_json_script_replaced_builtin(monkeypatch):
     )
     django, rusty = render_both("{{ value|json_script }}", {"value": [1]})
     assert rusty == django == "replacement"
+
+
+def zone_values():
+    from zoneinfo import ZoneInfo
+
+    new_york = ZoneInfo("America/New_York")
+    utc = datetime.timezone.utc
+    return [
+        datetime.datetime(2026, 7, 4, 15, 30, 5, 123, tzinfo=utc),
+        datetime.datetime(
+            2026,
+            1,
+            2,
+            3,
+            4,
+            5,
+            tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30)),
+        ),
+        datetime.datetime(
+            2026,
+            1,
+            2,
+            3,
+            4,
+            5,
+            tzinfo=datetime.timezone(
+                -datetime.timedelta(hours=3, minutes=15), "Custom"
+            ),
+        ),
+        datetime.datetime(
+            2026,
+            1,
+            2,
+            3,
+            4,
+            5,
+            tzinfo=datetime.timezone(datetime.timedelta(hours=1, seconds=15)),
+        ),
+        datetime.datetime(
+            2026,
+            1,
+            2,
+            3,
+            4,
+            5,
+            tzinfo=datetime.timezone(datetime.timedelta(microseconds=-1)),
+        ),
+        datetime.datetime(2026, 7, 4, 15, 30, tzinfo=new_york),
+        datetime.datetime(2026, 12, 25, 8, 0, tzinfo=new_york),
+        # Ambiguous, then imaginary, in New York.
+        datetime.datetime(2026, 11, 1, 1, 30, tzinfo=new_york),
+        datetime.datetime(2026, 11, 1, 1, 30, fold=1, tzinfo=new_york),
+        datetime.datetime(2026, 3, 8, 2, 30, tzinfo=new_york),
+        datetime.datetime(2026, 6, 1, 12, 0, tzinfo=ZoneInfo("Europe/London")),
+        datetime.datetime(2026, 6, 1, 12, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+        datetime.datetime(1900, 6, 1, 12, 0, tzinfo=ZoneInfo("Europe/Amsterdam")),
+        datetime.datetime(2026, 7, 4, 15, 30, 5),
+        datetime.datetime(2026, 11, 1, 1, 30),
+        datetime.datetime(2026, 11, 1, 1, 30, fold=1),
+        datetime.datetime(2026, 3, 8, 2, 30),
+        datetime.datetime(1969, 12, 31, 23, 59, 59, 500000),
+        datetime.date(2026, 7, 4),
+        datetime.date(2026, 3, 8),
+        datetime.time(15, 30),
+        datetime.time(15, 30, tzinfo=datetime.timezone.utc),
+    ]
+
+
+ZONE_FORMATS = ["e", "I", "O", "r", "T", "U", "Z", "c O", r"\O O", "D, d M Y H:i:s O T"]
+
+
+@pytest.mark.parametrize("use_tz", [False, True])
+@pytest.mark.parametrize(
+    "time_zone", ["America/New_York", "UTC", "Asia/Kolkata", "Australia/Lord_Howe"]
+)
+def test_date_timezone_specifiers_match_django(settings, use_tz, time_zone):
+    settings.USE_TZ = use_tz
+    settings.TIME_ZONE = time_zone
+    mismatches = []
+    for value in zone_values():
+        for format in ZONE_FORMATS:
+            for name in ("date", "time"):
+                source = "{{ value|" + name + ":format }}"
+                context = {"value": value, "format": format}
+                django, rusty = render_both(source, context)
+                # Error messages differ intentionally; compare their types.
+                if isinstance(django, tuple) and isinstance(rusty, tuple):
+                    django, rusty = django[0], rusty[0]
+                if rusty != django:
+                    mismatches.append((value, name, format, django, rusty))
+    assert mismatches == []
+
+
+@pytest.mark.parametrize("use_tz", [False, True])
+def test_now_timezone_specifiers_match_django(settings, use_tz):
+    settings.USE_TZ = use_tz
+    settings.TIME_ZONE = "America/New_York"
+    django, rusty = render_both('{% now "e|I|O|T|Z" %}', {})
+    assert rusty == django
