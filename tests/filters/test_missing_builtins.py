@@ -1782,3 +1782,95 @@ def test_floatformat_empty_argument_matches_django():
         "{{ value|floatformat:argument }}", {"value": 1.5, "argument": ""}
     )
     assert rusty[0] == django[0]
+
+
+class ListItem:
+    def __str__(self):
+        return "<item>"
+
+
+class SafeListItem:
+    def __html__(self):
+        return "<b>safe</b>"
+
+    def __str__(self):
+        return "<b>unsafe</b>"
+
+
+class ListSubclass(list):
+    pass
+
+
+def list_generator():
+    yield "child"
+
+
+def recursive_list():
+    items = ["a"]
+    items.append(items)
+    return items
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        [],
+        ["a"],
+        ["<a>", "b&c"],
+        ["a", ["b", ["c", "d"]], "e"],
+        ["a", [], "b"],
+        ["a", (), "b", ["c"]],
+        [["a", "b"], "c"],
+        ("a", ("b", "c")),
+        ["a", ["b"], ["c"]],
+        [mark_safe("<b>"), ["<i>", mark_safe("<u>")]],
+        [1, 2.5, None, True, Decimal("1.5")],
+        [ListItem(), SafeListItem()],
+        [translation.gettext_lazy("Yes"), ["<x>"]],
+        ["a", ListSubclass(["b"])],
+        ListSubclass(["a", ["b"]]),
+        "abc",
+        {"a": 1},
+        ["é日", ["\t"]],
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_unordered_list_matches_django(value, autoescape):
+    source = (
+        "{% autoescape "
+        + autoescape
+        + " %}{{ value|unordered_list }}{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {"value": value})
+    assert rusty == django
+
+
+def test_unordered_list_generator_children_match_django():
+    source = "{{ value|unordered_list }}"
+    outputs = [
+        engines[name].from_string(source).render({"value": ["a", list_generator()]})
+        for name in ("django", "rusty")
+    ]
+    assert outputs[0] == outputs[1]
+    assert "child" in outputs[0]
+
+
+def test_unordered_list_deep_nesting_matches_django():
+    value = ["leaf"]
+    for _ in range(150):
+        value = ["item", value]
+    django, rusty = render_both("{{ value|unordered_list }}", {"value": value})
+    assert rusty == django
+
+
+def test_unordered_list_recursive_matches_django():
+    django, rusty = render_both(
+        "{{ value|unordered_list }}", {"value": recursive_list()}
+    )
+    assert rusty[0] == django[0]
+
+
+def test_unordered_list_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "unordered_list", lambda value: "replacement")
+    django, rusty = render_both("{{ value|unordered_list }}", {"value": ["a"]})
+    assert rusty == django == "replacement"

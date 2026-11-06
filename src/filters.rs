@@ -50,6 +50,7 @@ pub enum FilterType {
     Random(RandomFilter),
     Pprint(PprintFilter),
     Filesizeformat(FilesizeformatFilter),
+    UnorderedList(UnorderedListFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -411,6 +412,13 @@ pub struct PprintFilter {
 /// below 2⁵³. Other inputs call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FilesizeformatFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `unordered_list`, built natively for nested lists and tuples.
+/// Other values call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnorderedListFilter {
     pub django: DjangoFilter,
 }
 
