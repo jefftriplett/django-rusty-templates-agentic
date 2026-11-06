@@ -2427,3 +2427,128 @@ def test_now_timezone_specifiers_match_django(settings, use_tz):
     settings.TIME_ZONE = "America/New_York"
     django, rusty = render_both('{% now "e|I|O|T|Z" %}', {})
     assert rusty == django
+
+
+class FixedTzinfo(datetime.tzinfo):
+    """A plain tzinfo subclass, as dateutil's are."""
+
+    def __init__(self, hours):
+        self.offset = datetime.timedelta(hours=hours)
+
+    def utcoffset(self, dt):
+        return self.offset
+
+    def dst(self, dt):
+        return datetime.timedelta(0)
+
+    def tzname(self, dt):
+        return "Fixed"
+
+
+class NoOffsetTzinfo(datetime.tzinfo):
+    """A tzinfo whose values count as naive."""
+
+    def utcoffset(self, dt):
+        return None
+
+    def dst(self, dt):
+        return None
+
+    def tzname(self, dt):
+        return None
+
+
+class SwitchingTzinfo(FixedTzinfo):
+    """Converts into another instance, as pytz does across DST changes."""
+
+    def fromutc(self, dt):
+        other = SwitchingTzinfo(self.offset.total_seconds() / 3600)
+        return (dt + self.offset).replace(tzinfo=other)
+
+
+class RaisingTzinfo(FixedTzinfo):
+    def __init__(self, error):
+        super().__init__(0)
+        self.error = error
+
+    def utcoffset(self, dt):
+        raise self.error("bad offset")
+
+
+def tzinfo_cases():
+    plus_two = FixedTzinfo(2)
+    no_offset = NoOffsetTzinfo()
+    switching = SwitchingTzinfo(-5)
+    utc = datetime.timezone.utc
+    when = datetime.datetime(2026, 1, 15, 10, 30)
+    later = datetime.datetime(2027, 3, 1, 12, 45)
+    return [
+        (when.replace(tzinfo=plus_two), later.replace(tzinfo=plus_two)),
+        (when.replace(tzinfo=plus_two), later.replace(tzinfo=FixedTzinfo(-7))),
+        (when.replace(tzinfo=plus_two), later.replace(tzinfo=utc)),
+        (when.replace(tzinfo=utc), later.replace(tzinfo=plus_two)),
+        (when.replace(tzinfo=plus_two), later),
+        (when, later.replace(tzinfo=plus_two)),
+        (when.replace(tzinfo=no_offset), later),
+        (when.replace(tzinfo=no_offset), later.replace(tzinfo=NoOffsetTzinfo())),
+        (when.replace(tzinfo=no_offset), later.replace(tzinfo=plus_two)),
+        (when.replace(tzinfo=switching), later.replace(tzinfo=switching)),
+        (when.replace(tzinfo=switching), later.replace(tzinfo=utc)),
+        (when.replace(tzinfo=RaisingTzinfo(ValueError)), later),
+        (when.replace(tzinfo=RaisingTzinfo(TypeError)), later),
+        (later.replace(tzinfo=plus_two), when.replace(tzinfo=plus_two)),
+        (datetime.date(2026, 1, 15), later.replace(tzinfo=plus_two)),
+    ]
+
+
+@pytest.mark.parametrize("name", ["timesince", "timeuntil"])
+def test_timesince_other_tzinfo_match_django(name):
+    source = "{{ value|" + name + ":other }}|{{ other|" + name + ":value }}"
+    for value, other in tzinfo_cases():
+        django, rusty = render_both(source, {"value": value, "other": other})
+        assert rusty == django, (value, other)
+
+
+@pytest.mark.parametrize("name", ["timesince", "timeuntil"])
+def test_timesince_other_tzinfo_errors_match_django(name):
+    when = datetime.datetime(2026, 1, 15, tzinfo=RaisingTzinfo(RuntimeError))
+    django, rusty = render_both(
+        "{{ value|" + name + ":other }}", {"value": when, "other": when}
+    )
+    assert type(rusty) is type(django)
+
+
+@pytest.mark.parametrize("name", ["timesince", "timeuntil"])
+@pytest.mark.parametrize("days", [-400, -3, 3, 400])
+def test_timesince_other_tzinfo_now_match_django(name, days):
+    delta = datetime.timedelta(days=days, minutes=1)
+    for tzinfo in [FixedTzinfo(2), NoOffsetTzinfo(), SwitchingTzinfo(1)]:
+        if tzinfo.utcoffset(None) is None:
+            value = datetime.datetime.now().replace(tzinfo=tzinfo) + delta
+        else:
+            value = datetime.datetime.now(tzinfo) + delta
+        django, rusty = render_both("{{ value|" + name + " }}", {"value": value})
+        assert rusty == django
+
+
+@pytest.mark.parametrize("name", ["timesince", "timeuntil"])
+def test_timesince_pytz_and_dateutil_match_django(name):
+    pytz = pytest.importorskip("pytz")
+    dateutil_tz = pytest.importorskip("dateutil.tz")
+    new_york = pytz.timezone("America/New_York")
+    values = [
+        new_york.localize(datetime.datetime(2026, 1, 15, 10, 30)),
+        new_york.localize(datetime.datetime(2026, 7, 15, 10, 30)),
+        datetime.datetime(
+            2026, 1, 15, 10, 30, tzinfo=dateutil_tz.gettz("Europe/Paris")
+        ),
+        datetime.datetime(
+            2026, 7, 15, 10, 30, tzinfo=dateutil_tz.gettz("Europe/Paris")
+        ),
+        datetime.datetime(2026, 7, 15, 10, 30, tzinfo=datetime.timezone.utc),
+    ]
+    source = "{{ value|" + name + ":other }}"
+    for value in values:
+        for other in values:
+            django, rusty = render_both(source, {"value": value, "other": other})
+            assert rusty == django, (value, other)
