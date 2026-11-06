@@ -39,6 +39,7 @@ pub enum FilterType {
     TruncateChars(TruncateCharsFilter),
     TruncateCharsHtml(TruncateCharsHtmlFilter),
     TruncateWords(TruncateWordsFilter),
+    Pluralize(PluralizeFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -301,6 +302,13 @@ pub enum Justify {
 
 /// Django's `truncatewords`, computed natively for strings and an integer
 /// length. Other inputs call Django's filter.
+/// Django's `pluralize`, computed natively for numbers, bools, lists, tuples
+/// and dicts with a string suffix argument. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluralizeFilter {
+    pub django: DjangoFilter,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TruncateWordsFilter {
     pub django: DjangoFilter,

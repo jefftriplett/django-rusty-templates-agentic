@@ -983,3 +983,83 @@ def test_truncatechars_html_follows_language_changes():
     with translation.override("en"):
         rusty = engines["rusty"].from_string(source).render(context)
     assert rusty == django
+
+
+class PluralizeSized:
+    def __len__(self):
+        return 1
+
+
+PLURALIZE_ARGUMENTS = ["", "es", "y,ies", ",s", "y,", "a,b,c", "<i>,<b>", "x", None, 1]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(0, id="zero"),
+        pytest.param(1, id="one"),
+        pytest.param(2, id="two"),
+        pytest.param(-1, id="minus_one"),
+        pytest.param(10**30, id="big_int"),
+        pytest.param(10**400, id="huge_int"),
+        pytest.param(1.0, id="float_one"),
+        pytest.param(1.5, id="float"),
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(True, id="true"),
+        pytest.param(False, id="false"),
+        pytest.param(Decimal("1.0"), id="decimal"),
+        pytest.param("1", id="string_one"),
+        pytest.param(" 1 ", id="string_spaces"),
+        pytest.param("1_0", id="string_underscore"),
+        pytest.param("abc", id="string"),
+        pytest.param(["a"], id="list_one"),
+        pytest.param(["a", "b"], id="list"),
+        pytest.param((), id="empty_tuple"),
+        pytest.param({"a": 1}, id="dict_one"),
+        pytest.param(PluralizeSized(), id="sized"),
+        pytest.param(object(), id="object"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_pluralize_matches_django(value, autoescape):
+    literals = "".join(
+        "[{{ value|pluralize:'" + argument + "' }}]"
+        for argument in PLURALIZE_ARGUMENTS
+        if isinstance(argument, str)
+    )
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "[{{ value|pluralize }}]" + literals + "{% for argument in arguments %}"
+        "[{{ value|pluralize:argument }}]{% endfor %}"
+        "[{{ missing|pluralize }}][{{ value|pluralize:missing }}]"
+        "[{{ value|pluralize:1 }}][{{ value|pluralize|length }}]"
+        "{% endautoescape %}"
+    )
+    context = {"value": value, "arguments": PLURALIZE_ARGUMENTS}
+    django, rusty = render_both(source, context)
+    assert rusty == django
+
+
+def test_pluralize_literals():
+    source = (
+        "[{{ 1|pluralize }}][{{ 2|pluralize }}][{{ 1.0|pluralize:'y,ies' }}]"
+        "[{{ 'x'|pluralize }}][{{ 0|pluralize:'a,b,c' }}]"
+    )
+    django, rusty = render_both(source, {})
+    assert rusty == django
+
+
+def test_pluralize_safe_argument():
+    source = "{{ value|pluralize:suffix }}"
+    context = {"value": 2, "suffix": mark_safe("<i>,<b>")}
+    django, rusty = render_both(source, context)
+    assert rusty == django
+
+
+def test_pluralize_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(
+        register.filters, "pluralize", lambda value, arg="s": "replacement"
+    )
+    django, rusty = render_both("{{ value|pluralize }}", {"value": 2})
+    assert rusty == django == "replacement"
