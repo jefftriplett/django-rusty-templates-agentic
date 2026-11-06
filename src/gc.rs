@@ -335,6 +335,7 @@ impl Trace for FilterType {
             | Self::Last(_)
             | Self::Linebreaks(_)
             | Self::Linebreaksbr(_)
+            | Self::Linenumbers(_)
             | Self::Lower(_)
             | Self::Length(_)
             | Self::Safe(_)
