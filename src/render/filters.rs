@@ -805,9 +805,21 @@ pub struct FloatNumberFormat {
 impl FloatNumberFormat {
     /// Returns `None` for settings Django would reject or treat specially,
     /// leaving those to Django.
-    fn new(py: Python<'_>, language: &Bound<'_, PyString>) -> PyResult<Option<Self>> {
+    fn new(
+        py: Python<'_>,
+        language: &Bound<'_, PyString>,
+        options: NumberOptions,
+    ) -> PyResult<Option<Self>> {
         let get_format = GET_FORMAT.import(py, "django.utils.formats", "get_format")?;
-        let format = |name| get_format.call1((name, language, true));
+        // Unlocalized formats come from settings, as `get_format(name, None,
+        // use_l10n=False)` returns them.
+        let format = |name| {
+            if options.localize {
+                get_format.call1((name, language, true))
+            } else {
+                get_format.call1((name, py.None(), false))
+            }
+        };
         let (Ok(decimal_separator), Ok(thousand_separator)) = (
             format("DECIMAL_SEPARATOR")?.extract(),
             format("THOUSAND_SEPARATOR")?.extract(),
@@ -815,10 +827,14 @@ impl FloatNumberFormat {
             return Ok(None);
         };
         let grouping = format("NUMBER_GROUPING")?;
-        let use_grouping = SETTINGS
-            .import(py, "django.conf", "settings")?
-            .getattr("USE_THOUSAND_SEPARATOR")?
-            .is_truthy()?
+        // `numberformat.format()`: localized output follows
+        // `USE_THOUSAND_SEPARATOR`, and `force_grouping` always groups.
+        let use_grouping = (options.force_grouping
+            || (options.localize
+                && SETTINGS
+                    .import(py, "django.conf", "settings")?
+                    .getattr("USE_THOUSAND_SEPARATOR")?
+                    .is_truthy()?))
             && grouping.ne(0)?;
         let grouping = if !use_grouping {
             Grouping::Off
@@ -875,6 +891,70 @@ impl Sign {
             Self::Plus => "",
             Self::Minus => "-",
         }
+    }
+}
+
+/// `number_format()`'s `use_l10n` and `force_grouping`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NumberOptions {
+    localize: bool,
+    force_grouping: bool,
+}
+
+impl Default for NumberOptions {
+    fn default() -> Self {
+        Self {
+            localize: true,
+            force_grouping: false,
+        }
+    }
+}
+
+/// The number formats of one language, built for each [`NumberOptions`] on
+/// first use. `None` marks settings left to Django.
+#[derive(Clone, Debug)]
+pub struct FloatNumberFormats {
+    language: String,
+    formats: HashMap<NumberOptions, Option<FloatNumberFormat>>,
+}
+
+impl FloatNumberFormats {
+    fn new(language: &Bound<'_, PyString>) -> PyResult<Self> {
+        Ok(Self {
+            language: language.to_str()?.to_string(),
+            formats: HashMap::new(),
+        })
+    }
+
+    fn get(
+        &mut self,
+        py: Python<'_>,
+        options: NumberOptions,
+    ) -> PyResult<Option<&FloatNumberFormat>> {
+        let format = match self.formats.entry(options) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(FloatNumberFormat::new(
+                py,
+                &PyString::new(py, &self.language),
+                options,
+            )?),
+        };
+        Ok(format.as_ref())
+    }
+}
+
+/// The number formatting for the active language and `options`.
+fn number_format<'c>(
+    py: Python<'_>,
+    context: &'c mut Context,
+    options: NumberOptions,
+) -> PyResult<Option<&'c FloatNumberFormat>> {
+    match context
+        .float_number_format
+        .get_or_try_init(py, FloatNumberFormats::new)?
+    {
+        Some(formats) => formats.get(py, options),
+        None => Ok(None),
     }
 }
 
@@ -979,13 +1059,98 @@ const FLOATFORMAT_MAX_DIGITS: usize = 200;
 
 /// `floatformat` for exact `int`, `float` and `Decimal` values and an
 /// integer precision. `None` defers to Django.
+/// `text` without a leading `+` when it is a plain decimal `Decimal()`
+/// reads the same way as `DecimalNumber::parse`: an optional sign, ASCII
+/// digits with an optional point, and an optional exponent.
+fn decimal_text(text: &str) -> Option<&str> {
+    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
+        None => (unsigned, None),
+    };
+    let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if integer.len() + fraction.len() == 0 || !digits(integer) || !digits(fraction) {
+        return None;
+    }
+    if let Some(exponent) = exponent {
+        let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        if exponent.is_empty() || !digits(exponent) {
+            return None;
+        }
+    }
+    Some(text.strip_prefix('+').unwrap_or(text))
+}
+
+/// `floatformat`'s argument: the precision and the `g`/`u` suffix options.
+/// `None` leaves the argument to Django.
+fn floatformat_argument(argument: &ResolvedArgument<'_, '_>) -> Option<(i64, NumberOptions)> {
+    let value = match argument {
+        ResolvedArgument::Absent => return Some((-1, NumberOptions::default())),
+        ResolvedArgument::Present(value) => value.as_ref()?,
+    };
+    let text = match value {
+        Content::String(text) => text.as_raw().as_ref(),
+        Content::Py(object)
+            if object.is_exact_instance_of::<PyString>()
+                || is_exact_safe_string(object).unwrap_or(false) =>
+        {
+            object.cast::<PyString>().ok()?.to_str().ok()?
+        }
+        other => return Some((integer_argument(other)?, NumberOptions::default())),
+    };
+    let mut options = NumberOptions::default();
+    let precision = if let Some(rest) = text.strip_suffix("gu").or_else(|| text.strip_suffix("ug"))
+    {
+        options.force_grouping = true;
+        options.localize = false;
+        rest
+    } else if let Some(rest) = text.strip_suffix('g') {
+        options.force_grouping = true;
+        rest
+    } else if let Some(rest) = text.strip_suffix('u') {
+        options.localize = false;
+        rest
+    } else if text.is_empty() {
+        // Django's `arg[-1]` raises `IndexError`.
+        return None;
+    } else {
+        return Some((python_int(text)?, options));
+    };
+    // `arg[:-1] or -1`.
+    let precision = if precision.is_empty() {
+        -1
+    } else {
+        python_int(precision)?
+    };
+    Some((precision, options))
+}
+
 fn floatformat(
     value: &Content<'_, '_>,
     precision: i64,
+    options: NumberOptions,
     py: Python<'_>,
     context: &mut Context,
 ) -> PyResult<Option<String>> {
     let text = match value {
+        // `Decimal(str(value))` for plain decimal strings; others, such as
+        // `" 1"`, `"1_0"` and `"NaN"`, are left to Django.
+        Content::String(text) => match decimal_text(text.as_raw()) {
+            Some(text) => text.to_string(),
+            None => return Ok(None),
+        },
+        Content::Py(object)
+            if object.is_exact_instance_of::<PyString>()
+                || is_exact_safe_string(object).unwrap_or(false) =>
+        {
+            match decimal_text(object.cast::<PyString>()?.to_str()?) {
+                Some(text) => text.to_string(),
+                None => return Ok(None),
+            }
+        }
+        // `Decimal("True")` and `float("True")` fail, so Django returns "".
+        Content::Bool(_) => return Ok(Some(String::new())),
         Content::Int(n) => n.to_string(),
         Content::Float(n) => PyFloat::new(py, *n).str()?.to_string(),
         Content::Py(object)
@@ -1000,7 +1165,7 @@ fn floatformat(
                 Err(_) => return Ok(None),
             }
         }
-        Content::Py(_) | Content::String(_) | Content::Bool(_) => return Ok(None),
+        Content::Py(_) => return Ok(None),
     };
     let Some(number) = DecimalNumber::parse(&text) else {
         return Ok(None);
@@ -1026,10 +1191,7 @@ fn floatformat(
     let Some(rounded) = number.round(places) else {
         return Ok(None);
     };
-    let Some(Some(format)) = context
-        .float_number_format
-        .get_or_try_init(py, |language| FloatNumberFormat::new(py, language))?
-    else {
+    let Some(format) = number_format(py, context, options)? else {
         return Ok(None);
     };
     Ok(Some(format.format(&rounded)))
@@ -1044,13 +1206,9 @@ impl ResolveFilter for FloatFormatFilter {
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
         let argument = self.django.resolve_argument(py, template, context)?;
-        let precision = match &argument {
-            ResolvedArgument::Absent => Some(-1),
-            ResolvedArgument::Present(value) => value.as_ref().and_then(integer_argument),
-        };
-        if let Some(precision) = precision
+        if let Some((precision, options)) = floatformat_argument(&argument)
             && let Some(value) = &variable
-            && let Some(formatted) = floatformat(value, precision, py, context)?
+            && let Some(formatted) = floatformat(value, precision, options, py, context)?
         {
             return Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
                 formatted,
@@ -2453,10 +2611,7 @@ impl ResolveFilter for FilesizeformatFilter {
             let index = index.min(FILE_SIZE_UNITS.len() - 1);
             let (integer, tenth) = round_tenths(size, 1 << (10 * (index + 1)));
             // `formats.number_format(value, 1)`, localized like `floatformat`.
-            let Some(Some(format)) = context
-                .float_number_format
-                .get_or_try_init(py, |language| FloatNumberFormat::new(py, language))?
-            else {
+            let Some(format) = number_format(py, context, NumberOptions::default())? else {
                 return self.django.resolve(variable, py, template, context);
             };
             let number = format.format(&Rounded {
