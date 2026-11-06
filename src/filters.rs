@@ -51,6 +51,7 @@ pub enum FilterType {
     Pprint(PprintFilter),
     Filesizeformat(FilesizeformatFilter),
     UnorderedList(UnorderedListFilter),
+    Striptags(StriptagsFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -419,6 +420,13 @@ pub struct FilesizeformatFilter {
 /// Other values call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnorderedListFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `striptags`, done natively for well-formed tags.
+/// Other text calls Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StriptagsFilter {
     pub django: DjangoFilter,
 }
 

@@ -1874,3 +1874,91 @@ def test_unordered_list_replaced_builtin(monkeypatch):
     monkeypatch.setitem(register.filters, "unordered_list", lambda value: "replacement")
     django, rusty = render_both("{{ value|unordered_list }}", {"value": ["a"]})
     assert rusty == django == "replacement"
+
+
+STRIPTAGS_VALUES = [
+    "",
+    "plain text",
+    "a > b",
+    "a < b",
+    "<b>bold</b> text",
+    "<p class='x'>one</p><br/><br />two",
+    '<a href="/path?a=1;b=2" title="t">link</a>',
+    "<a href=/path>unquoted</a>",
+    "<a title='x>y'>quoted gt</a>",
+    '<a title="x<y">quoted lt</a>',
+    '<a "x">stray quote</a>',
+    "</a b='c'>end tag quote",
+    "<b>&amp; &lt;i&gt; &#39; &amp</b>",
+    "Fish &amp; chips",
+    "<!-- comment -->text",
+    "<!DOCTYPE html><p>x</p>",
+    "<?php echo 1 ?>x",
+    "<script>alert('<b>')</script>after",
+    "<style>p { color: red }</style>after",
+    "<textarea><b>x</b></textarea>",
+    "<title>a<b>c</b></title>",
+    "<SCRIPT>x</SCRIPT>y",
+    "<b",
+    "<b>unclosed",
+    "</>",
+    "< b>spaced</b>",
+    "<1>digit</1>",
+    "<my-tag data-x=1>custom</my-tag>",
+    "<b\nclass='a'>newline</b>",
+    "<b\tclass='a'>tab</b>",
+    "<b/class='a'>slash</b>",
+    "<<b>>double<</b>>",
+    "<sc<script>ript>alert(1)</script>",
+    "<a>é日</a>本",
+    "<img src=x onerror=alert(1)>",
+    "<b`x`>backtick</b>",
+]
+
+
+@pytest.mark.parametrize("value", STRIPTAGS_VALUES)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_striptags_matches_django(value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "{{ value|striptags }}|{{ safe|striptags }}"
+        "{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {"value": value, "safe": mark_safe(value)})
+    assert rusty == django
+
+
+@pytest.mark.parametrize(
+    "value",
+    [123, None, ["<b>x</b>"], translation.gettext_lazy("Yes"), ListItem()],
+    ids=["int", "none", "list", "lazy", "object"],
+)
+def test_striptags_non_strings_match_django(value):
+    django, rusty = render_both("{{ value|striptags }}", {"value": value})
+    assert rusty == django
+
+
+def test_striptags_random_text_matches_django():
+    import random
+
+    generator = random.Random(227)
+    pieces = ["<", ">", "/", "b", "a", " ", "=", '"', "'", "&", "x", "\n", "!", "-"]
+    values = [
+        "".join(generator.choice(pieces) for _ in range(generator.randint(1, 16)))
+        for _ in range(2000)
+    ]
+    source = "{% for value in values %}[{{ value|striptags }}]{% endfor %}"
+    django, rusty = render_both(source, {"values": values})
+    assert rusty == django
+
+
+def test_striptags_long_open_tag_matches_django():
+    value = "<a" + "<" * 60 + "b" * 1000
+    django, rusty = render_both("{{ value|striptags }}", {"value": value})
+    assert rusty == django
+
+
+def test_striptags_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "striptags", lambda value: "replacement")
+    django, rusty = render_both("{{ value|striptags }}", {"value": "<b>a</b>"})
+    assert rusty == django == "replacement"
