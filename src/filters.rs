@@ -56,6 +56,7 @@ pub enum FilterType {
     Dictsort(DictsortFilter),
     Dictsortreversed(DictsortreversedFilter),
     JsonScript(JsonScriptFilter),
+    TruncateWordsHtml(TruncateWordsHtmlFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -459,6 +460,13 @@ pub struct DictsortreversedFilter {
 /// Other values call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JsonScriptFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `truncatewords_html`, truncated natively for well-formed HTML.
+/// Other text calls Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TruncateWordsHtmlFilter {
     pub django: DjangoFilter,
 }
 

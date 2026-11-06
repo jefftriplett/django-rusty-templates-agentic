@@ -22,8 +22,8 @@ use crate::filters::{
     MakeListFilter, Phone2numericFilter, PluralizeFilter, PprintFilter, RandomFilter, SafeFilter,
     SafeseqFilter, SliceArgument, SliceFilter, SlugifyFilter, StringformatFilter, StriptagsFilter,
     TimesinceFilter, TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter,
-    TruncateWordsFilter, UnorderedListFilter, UpperFilter, UrlencodeFilter, WordcountFilter,
-    WordwrapFilter, YesnoFilter, python_int,
+    TruncateWordsFilter, TruncateWordsHtmlFilter, UnorderedListFilter, UpperFilter,
+    UrlencodeFilter, WordcountFilter, WordwrapFilter, YesnoFilter, python_int,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -156,6 +156,7 @@ impl ResolveFilter for FilterType {
             Self::Dictsort(filter) => filter.resolve(variable, py, template, context),
             Self::Dictsortreversed(filter) => filter.resolve(variable, py, template, context),
             Self::JsonScript(filter) => filter.resolve(variable, py, template, context),
+            Self::TruncateWordsHtml(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -1815,6 +1816,20 @@ fn is_combining(character: char, py: Python<'_>) -> PyResult<bool> {
     Ok(combining)
 }
 
+/// `unicodedata.normalize("NFC", text)`. Nothing below U+0300 decomposes
+/// or composes, so that text is borrowed.
+fn nfc<'a>(text: &'a str, py: Python<'_>) -> PyResult<Cow<'a, str>> {
+    if text.chars().all(|character| character < '\u{300}') {
+        return Ok(Cow::Borrowed(text));
+    }
+    Ok(Cow::Owned(
+        NORMALIZE
+            .import(py, "unicodedata", "normalize")?
+            .call1(("NFC", text))?
+            .extract()?,
+    ))
+}
+
 /// `Truncator._text_chars` for non-ASCII text, after Django's NFC
 /// normalization. Combining characters don't count towards the length.
 /// Both follow Python's Unicode database.
@@ -1824,17 +1839,7 @@ fn truncate_unicode_chars(
     split: &SplitTruncationText,
     py: Python<'_>,
 ) -> PyResult<String> {
-    // Nothing below U+0300 decomposes or composes.
-    let text: Cow<'_, str> = if text.chars().all(|character| character < '\u{300}') {
-        Cow::Borrowed(text)
-    } else {
-        Cow::Owned(
-            NORMALIZE
-                .import(py, "unicodedata", "normalize")?
-                .call1(("NFC", text))?
-                .extract()?,
-        )
-    };
+    let text = nfc(text, py)?;
     let truncate_length = length.saturating_sub(split.width);
     let mut count = 0;
     let mut end = None;
@@ -2059,6 +2064,19 @@ fn truncate_chars_html(
     {
         return Ok(Some(text.to_string()));
     }
+    if let Some(split) = &truncation.split {
+        let text = nfc(text, py)?;
+        let mode = HtmlTruncation::Chars {
+            length,
+            processed: 0,
+            remaining: length.saturating_sub(split.width),
+            total: text.chars().count(),
+            split,
+        };
+        if let Some(truncated) = truncate_html(&text, mode) {
+            return Ok(Some(truncated));
+        }
+    }
     // Passing the cached translation saves Django's `pgettext` calls: one
     // to size the text and one for each truncation.
     // `chars(num, truncate, html)` has this order in every supported version.
@@ -2068,6 +2086,318 @@ fn truncate_chars_html(
         .call_method1("chars", (length, &truncation.text, true))?
         .extract()?;
     Ok(Some(truncated))
+}
+
+/// `django.utils.html.VOID_ELEMENTS`.
+const VOID_ELEMENTS: [&str; 16] = [
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr", "frame", "spacer",
+];
+
+/// A piece of HTML as Python's `HTMLParser` reports it.
+enum HtmlToken<'a> {
+    Data(&'a str),
+    /// `raw` is `get_starttag_text()`; `name` is lowercased.
+    StartTag {
+        raw: &'a str,
+        name: String,
+        self_closing: bool,
+    },
+    EndTag(String),
+}
+
+/// The length of a strictly well-formed start tag at the start of `text`:
+/// an ASCII name, then attributes with ASCII names and quoted or plain
+/// unquoted values, then `>` or ` />`. `None` for anything else, whose
+/// handling has changed between versions of Python's `HTMLParser`.
+fn strict_start_tag(text: &str) -> Option<(usize, String, bool)> {
+    let bytes = text.as_bytes();
+    let is_space = |byte: u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c');
+    let mut index = 1;
+    let name_length = bytes[index..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'-')
+        .count();
+    let name = text.get(index..index + name_length)?;
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic())
+        || RAW_TEXT_ELEMENTS
+            .iter()
+            .any(|element| element.eq_ignore_ascii_case(name))
+    {
+        return None;
+    }
+    index += name_length;
+    loop {
+        let spaces = bytes[index..]
+            .iter()
+            .take_while(|byte| is_space(**byte))
+            .count();
+        index += spaces;
+        match bytes.get(index)? {
+            b'>' => return Some((index + 1, name.to_ascii_lowercase(), false)),
+            b'/' if bytes.get(index + 1) == Some(&b'>')
+                && (spaces > 0 || index == 1 + name_length) =>
+            {
+                return Some((index + 2, name.to_ascii_lowercase(), true));
+            }
+            byte if spaces > 0
+                && (byte.is_ascii_alphabetic() || *byte == b'_' || *byte == b':') =>
+            {
+                index += bytes[index..]
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_alphanumeric() || b"-_:.".contains(byte))
+                    .count();
+                if bytes.get(index) == Some(&b'=') {
+                    index += 1;
+                    match bytes.get(index)? {
+                        quote @ (b'"' | b'\'') => {
+                            let length =
+                                bytes[index + 1..].iter().position(|byte| byte == quote)?;
+                            let value = &bytes[index + 1..index + 1 + length];
+                            if value.iter().any(|byte| matches!(byte, b'<' | b'>' | b'&')) {
+                                return None;
+                            }
+                            index += length + 2;
+                        }
+                        _ => {
+                            let length = bytes[index..]
+                                .iter()
+                                .take_while(|byte| {
+                                    !is_space(**byte) && !b"\"'=<>`/&".contains(byte)
+                                })
+                                .count();
+                            if length == 0 {
+                                return None;
+                            }
+                            index += length;
+                        }
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The length of an end tag `</name>` at the start of `text`, with optional
+/// whitespace before `>`.
+fn strict_end_tag(text: &str) -> Option<(usize, String)> {
+    let bytes = text.as_bytes();
+    let name_length = bytes[2..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'-')
+        .count();
+    let name = text.get(2..2 + name_length)?;
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let mut index = 2 + name_length;
+    index += bytes[index..]
+        .iter()
+        .take_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'))
+        .count();
+    (bytes.get(index) == Some(&b'>')).then(|| (index + 1, name.to_ascii_lowercase()))
+}
+
+/// `text` as `HTMLParser` tokenizes it, or `None` for text with entities,
+/// comments, a bare `<` or tags that aren't strictly well formed.
+fn html_tokens(text: &str) -> Option<Vec<HtmlToken<'_>>> {
+    if text.contains('&') {
+        return None;
+    }
+    let mut tokens = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        if start > 0 {
+            tokens.push(HtmlToken::Data(&rest[..start]));
+        }
+        rest = &rest[start..];
+        if rest.starts_with("</") {
+            let (length, name) = strict_end_tag(rest)?;
+            tokens.push(HtmlToken::EndTag(name));
+            rest = &rest[length..];
+        } else {
+            let (length, name, self_closing) = strict_start_tag(rest)?;
+            tokens.push(HtmlToken::StartTag {
+                raw: &rest[..length],
+                name,
+                self_closing,
+            });
+            rest = &rest[length..];
+        }
+    }
+    if !rest.is_empty() {
+        tokens.push(HtmlToken::Data(rest));
+    }
+    Some(tokens)
+}
+
+/// What Django's `TruncateHTMLParser` subclasses count.
+enum HtmlTruncation<'a> {
+    /// `TruncateCharsHTMLParser`: `length` characters including the
+    /// truncation text, of which `remaining` are left for data; `total` is
+    /// the character count of the whole text.
+    Chars {
+        length: usize,
+        processed: usize,
+        remaining: usize,
+        total: usize,
+        split: &'a SplitTruncationText,
+    },
+    /// `TruncateWordsHTMLParser` with `truncate=" …"`.
+    Words { remaining: usize },
+}
+
+/// Django's `escape()`, counting the characters written.
+fn push_escaped_counted(text: &str, output: &mut String, written: &mut usize) {
+    let start = output.len();
+    append_escaped(text, output);
+    *written += output[start..].chars().count();
+}
+
+/// The words `TruncateWordsHTMLParser` splits data into with
+/// `re.split(r"(?<=\S)\s+(?=\S)", data)`: whitespace between two
+/// non-whitespace characters separates them, and leading or trailing
+/// whitespace stays attached.
+fn html_words(data: &str) -> Vec<&str> {
+    let mut words = Vec::new();
+    let mut start = 0;
+    let mut previous: Option<char> = None;
+    let mut run_start = None;
+    for (index, character) in data.char_indices() {
+        if is_python_whitespace(character) {
+            if run_start.is_none() && previous.is_some_and(|c| !is_python_whitespace(c)) {
+                run_start = Some(index);
+            }
+        } else if let Some(run) = run_start.take() {
+            words.push(&data[start..run]);
+            start = index;
+        }
+        previous = Some(character);
+    }
+    words.push(&data[start..]);
+    words
+}
+
+/// Django's `TruncateHTMLParser.feed` on `tokens`, or `None` when the text
+/// isn't tokenized natively.
+fn truncate_html(text: &str, mut mode: HtmlTruncation<'_>) -> Option<String> {
+    let tokens = html_tokens(text)?;
+    let mut output = String::with_capacity(text.len());
+    // `len(self.output)`, which the exact-fit check in `process` compares.
+    let mut written = 0;
+    let mut tags: Vec<String> = Vec::new();
+    let is_void = |name: &str| VOID_ELEMENTS.contains(&name);
+    let end_tag = |name: &str, output: &mut String, written: &mut usize, tags: &mut Vec<String>| {
+        if !is_void(name) {
+            output.push_str("</");
+            output.push_str(name);
+            output.push('>');
+            *written += name.chars().count() + 3;
+            if tags.last().is_some_and(|last| last == name) {
+                tags.pop();
+            }
+        }
+    };
+    for token in tokens {
+        match token {
+            HtmlToken::StartTag {
+                raw,
+                name,
+                self_closing,
+            } => {
+                output.push_str(raw);
+                written += raw.chars().count();
+                if !is_void(&name) {
+                    tags.push(name.clone());
+                }
+                if self_closing {
+                    end_tag(&name, &mut output, &mut written, &mut tags);
+                }
+            }
+            HtmlToken::EndTag(name) => end_tag(&name, &mut output, &mut written, &mut tags),
+            HtmlToken::Data(data) => {
+                let completed = match &mut mode {
+                    HtmlTruncation::Chars {
+                        length,
+                        processed,
+                        remaining,
+                        total,
+                        split,
+                    } => {
+                        let data_length = data.chars().count();
+                        *processed += data_length;
+                        if *processed == *length && written + data_length == *total {
+                            output.push_str(data);
+                            true
+                        } else if *remaining < data_length {
+                            let end = data
+                                .char_indices()
+                                .nth(*remaining)
+                                .map_or(data.len(), |(index, _)| index);
+                            output.push_str(&split.before);
+                            append_escaped(&data[..end], &mut output);
+                            output.push_str(&split.after);
+                            true
+                        } else {
+                            *remaining -= data_length;
+                            push_escaped_counted(data, &mut output, &mut written);
+                            false
+                        }
+                    }
+                    HtmlTruncation::Words { remaining } => {
+                        let words = html_words(data);
+                        let kept = words[..(*remaining).min(words.len())].join(" ");
+                        if *remaining < words.len() {
+                            let start = output.len();
+                            append_escaped(&kept, &mut output);
+                            if !output[start..].ends_with(" …") {
+                                output.push_str(" …");
+                            }
+                            true
+                        } else {
+                            *remaining -= words.len();
+                            push_escaped_counted(&kept, &mut output, &mut written);
+                            false
+                        }
+                    }
+                };
+                if completed {
+                    for tag in tags.iter().rev() {
+                        output.push_str("</");
+                        output.push_str(tag);
+                        output.push('>');
+                    }
+                    return Some(output);
+                }
+            }
+        }
+    }
+    Some(output)
+}
+
+impl ResolveFilter for TruncateWordsHtmlFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        if let Some(length) = argument.value().and_then(integer_argument)
+            && let Some(text) = Text::from_variable(variable.as_ref(), py)?
+        {
+            let truncated = match usize::try_from(length) {
+                Err(_) | Ok(0) => Some(String::new()),
+                Ok(remaining) => truncate_html(text.as_str(), HtmlTruncation::Words { remaining }),
+            };
+            if let Some(truncated) = truncated {
+                return Ok(Some(text.into_content(truncated, context)));
+            }
+        }
+        self.django.call(variable, argument, py, context)
+    }
 }
 
 impl ResolveFilter for TruncateCharsHtmlFilter {
