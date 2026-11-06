@@ -17,10 +17,10 @@ use crate::filters::{
     DefaultFilter, DefaultIfNoneFilter, DictsortFilter, DictsortreversedFilter, DivisibleByFilter,
     DjangoFilter, EscapeFilter, EscapejsFilter, EscapeseqFilter, ExternalFilter,
     FilesizeformatFilter, FilterType, FirstFilter, FloatFormatFilter, ForceEscapeFilter,
-    GetDigitFilter, IriencodeFilter, JoinFilter, Justify, JustifyFilter, LastFilter, LengthFilter,
-    LinebreaksFilter, LinebreaksbrFilter, LinenumbersFilter, LowerFilter, MakeListFilter,
-    Phone2numericFilter, PluralizeFilter, PprintFilter, RandomFilter, SafeFilter, SafeseqFilter,
-    SliceArgument, SliceFilter, SlugifyFilter, StringformatFilter, StriptagsFilter,
+    GetDigitFilter, IriencodeFilter, JoinFilter, JsonScriptFilter, Justify, JustifyFilter,
+    LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter, LinenumbersFilter, LowerFilter,
+    MakeListFilter, Phone2numericFilter, PluralizeFilter, PprintFilter, RandomFilter, SafeFilter,
+    SafeseqFilter, SliceArgument, SliceFilter, SlugifyFilter, StringformatFilter, StriptagsFilter,
     TimesinceFilter, TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter,
     TruncateWordsFilter, UnorderedListFilter, UpperFilter, UrlencodeFilter, WordcountFilter,
     WordwrapFilter, YesnoFilter, python_int,
@@ -150,6 +150,7 @@ impl ResolveFilter for FilterType {
             Self::Stringformat(filter) => filter.resolve(variable, py, template, context),
             Self::Dictsort(filter) => filter.resolve(variable, py, template, context),
             Self::Dictsortreversed(filter) => filter.resolve(variable, py, template, context),
+            Self::JsonScript(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -3291,6 +3292,228 @@ impl ResolveFilter for DictsortreversedFilter {
         if let Some(sorted) = dictsort(variable.as_ref(), argument.value(), true, py)? {
             return Ok(Some(sorted));
         }
+        self.django.call(variable, argument, py, context)
+    }
+}
+
+/// JSON nesting beyond this goes to Django, which detects circular
+/// references.
+const MAX_JSON_DEPTH: usize = 100;
+
+/// Python's `repr()` of a finite float, as `json.dumps` writes it: the
+/// shortest round-trip digits, in exponent form below 1e-4 and from 1e16.
+fn python_float_repr(value: f64) -> String {
+    // Rust's shortest digits break exact ties upward; Python rounds them to
+    // even, as Rust does when formatting to that many digits.
+    let shortest = format!("{value:e}");
+    let precision = shortest
+        .split_once('e')
+        .map_or(0, |(mantissa, _)| {
+            mantissa.bytes().filter(u8::is_ascii_digit).count()
+        })
+        .saturating_sub(1);
+    let formatted = format!("{value:.precision$e}");
+    let (mantissa, exponent) = formatted.split_once('e').unwrap_or((&formatted, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let (sign, mantissa) = mantissa
+        .strip_prefix('-')
+        .map_or(("", mantissa), |mantissa| ("-", mantissa));
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    let mut output = String::from(sign);
+    if (-4..16).contains(&exponent) {
+        if let Ok(point) = usize::try_from(exponent + 1)
+            && point > 0
+        {
+            if digits.len() > point {
+                output.push_str(&digits[..point]);
+                output.push('.');
+                output.push_str(&digits[point..]);
+            } else {
+                output.push_str(&digits);
+                output.extend(std::iter::repeat_n('0', point - digits.len()));
+                output.push_str(".0");
+            }
+        } else {
+            output.push_str("0.");
+            output.extend(std::iter::repeat_n(
+                '0',
+                exponent.unsigned_abs() as usize - 1,
+            ));
+            output.push_str(&digits);
+        }
+    } else {
+        output.push_str(&digits[..1]);
+        if digits.len() > 1 {
+            output.push('.');
+            output.push_str(&digits[1..]);
+        }
+        let sign = if exponent < 0 { '-' } else { '+' };
+        output.push_str(&format!("e{sign}{:02}", exponent.unsigned_abs()));
+    }
+    output
+}
+
+/// A JSON string as `json.dumps` writes it with `ensure_ascii`, followed by
+/// `json_script`'s escapes for `<`, `>` and `&`.
+fn push_json_string(text: &str, output: &mut String) {
+    use std::fmt::Write;
+    output.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\u{8}' => output.push_str("\\b"),
+            '\u{c}' => output.push_str("\\f"),
+            '<' => output.push_str("\\u003C"),
+            '>' => output.push_str("\\u003E"),
+            '&' => output.push_str("\\u0026"),
+            ' '..='~' => output.push(character),
+            _ => {
+                let mut units = [0; 2];
+                for unit in character.encode_utf16(&mut units) {
+                    let _ = write!(output, "\\u{unit:04x}");
+                }
+            }
+        }
+    }
+    output.push('"');
+}
+
+/// Writes `value` as `json.dumps` would with Django's encoder. Returns
+/// `false` for values left to Django: subclasses, lazy strings, dates,
+/// decimals, other keys and deep nesting.
+fn push_json(value: &Bound<'_, PyAny>, depth: usize, output: &mut String) -> PyResult<bool> {
+    if depth > MAX_JSON_DEPTH {
+        return Ok(false);
+    }
+    if value.is_none() {
+        output.push_str("null");
+    } else if value.is_exact_instance_of::<PyBool>() {
+        output.push_str(if value.is_truthy()? { "true" } else { "false" });
+    } else if value.is_exact_instance_of::<PyInt>() {
+        output.push_str(&value.str()?.to_cow()?);
+    } else if value.is_exact_instance_of::<PyFloat>() {
+        let number = value.extract::<f64>()?;
+        output.push_str(&if number.is_nan() {
+            "NaN".to_owned()
+        } else if number.is_infinite() {
+            if number > 0.0 {
+                "Infinity"
+            } else {
+                "-Infinity"
+            }
+            .to_owned()
+        } else {
+            python_float_repr(number)
+        });
+    } else if value.is_exact_instance_of::<PyString>() || is_exact_safe_string(value)? {
+        let Ok(text) = value.cast::<PyString>()?.to_str() else {
+            return Ok(false);
+        };
+        push_json_string(text, output);
+    } else if let Some(items) = exact_sequence(value) {
+        output.push('[');
+        for (index, item) in items.iter().enumerate() {
+            if index > 0 {
+                output.push_str(", ");
+            }
+            if !push_json(item, depth + 1, output)? {
+                return Ok(false);
+            }
+        }
+        output.push(']');
+    } else if value.is_exact_instance_of::<PyDict>() {
+        output.push('{');
+        for (index, (key, item)) in value.cast::<PyDict>()?.iter().enumerate() {
+            if index > 0 {
+                output.push_str(", ");
+            }
+            if key.is_exact_instance_of::<PyString>() {
+                let Ok(text) = key.cast::<PyString>()?.to_str() else {
+                    return Ok(false);
+                };
+                push_json_string(text, output);
+            } else if key.is_exact_instance_of::<PyInt>() {
+                output.push('"');
+                output.push_str(&key.str()?.to_cow()?);
+                output.push('"');
+            } else {
+                return Ok(false);
+            }
+            output.push_str(": ");
+            if !push_json(&item, depth + 1, output)? {
+                return Ok(false);
+            }
+        }
+        output.push('}');
+    } else {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+impl ResolveFilter for JsonScriptFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        // `format_html` escapes the id unless it is safe, as literals are;
+        // a falsy id is left out.
+        let element_id = match argument.value() {
+            None => Some(None),
+            Some(Content::String(ContentString::HtmlSafe(text) | ContentString::String(text))) => {
+                Some(Some((text.as_ref(), false)))
+            }
+            Some(Content::String(ContentString::HtmlUnsafe(text))) => {
+                Some(Some((text.as_ref(), true)))
+            }
+            Some(Content::Py(object)) if object.is_exact_instance_of::<PyString>() => {
+                object.extract::<&str>().ok().map(|text| Some((text, true)))
+            }
+            Some(Content::Py(object)) if is_exact_safe_string(object)? => object
+                .extract::<&str>()
+                .ok()
+                .map(|text| Some((text, false))),
+            Some(_) => None,
+        };
+        if let Some(element_id) = element_id
+            && let Some(Content::Py(value)) = &variable
+        {
+            let mut output = String::from("<script ");
+            if let Some((id, escape)) = element_id.filter(|(id, _)| !id.is_empty()) {
+                output.push_str("id=\"");
+                if escape {
+                    append_escaped(id, &mut output);
+                } else {
+                    output.push_str(id);
+                }
+                output.push_str("\" ");
+            }
+            output.push_str("type=\"application/json\">");
+            if push_json(value, 0, &mut output)? {
+                output.push_str("</script>");
+                return Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
+                    output,
+                )))));
+            }
+        }
+        // Literal ids are safe strings in Django, even with autoescape off.
+        let argument = match argument {
+            ResolvedArgument::Present(Some(Content::String(ContentString::String(text)))) => {
+                let safe = SAFESTRING
+                    .import(py, "django.utils.safestring", "SafeString")?
+                    .call1((text.as_ref(),))?;
+                ResolvedArgument::Present(Some(Content::Py(safe)))
+            }
+            argument => argument,
+        };
         self.django.call(variable, argument, py, context)
     }
 }

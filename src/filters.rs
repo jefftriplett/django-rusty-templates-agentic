@@ -55,6 +55,7 @@ pub enum FilterType {
     Stringformat(StringformatFilter),
     Dictsort(DictsortFilter),
     Dictsortreversed(DictsortreversedFilter),
+    JsonScript(JsonScriptFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -451,6 +452,13 @@ pub struct DictsortFilter {
 /// path. Other inputs call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DictsortreversedFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `json_script`, serialized natively for plain JSON values.
+/// Other values call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JsonScriptFilter {
     pub django: DjangoFilter,
 }
 
