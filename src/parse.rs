@@ -55,6 +55,8 @@ use crate::filters::LowerFilter;
 use crate::filters::MakeListFilter;
 use crate::filters::Phone2numericFilter;
 use crate::filters::PluralizeFilter;
+use crate::filters::PprintFilter;
+use crate::filters::RandomFilter;
 use crate::filters::SafeFilter;
 use crate::filters::SafeseqFilter;
 use crate::filters::SliceArgument;
@@ -392,6 +394,16 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::Safeseq(SafeseqFilter { django })
+                }
+                BuiltinFilter::Random
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Random(RandomFilter { django })
+                }
+                BuiltinFilter::Pprint
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Pprint(PprintFilter { django })
                 }
                 _ => FilterType::Django(django),
             };

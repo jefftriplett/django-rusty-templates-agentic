@@ -1261,3 +1261,100 @@ def test_sequence_filters_replaced_builtin(monkeypatch, name):
     monkeypatch.setitem(register.filters, name, lambda value: "replacement")
     django, rusty = render_both("{{ value|" + name + " }}", {"value": ["a"]})
     assert rusty == django == "replacement"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(["<a>", "b", mark_safe("<c>"), 1, None], id="list"),
+        pytest.param(("x", "y"), id="tuple"),
+        pytest.param([], id="empty"),
+        pytest.param((), id="empty_tuple"),
+        pytest.param("<abc>", id="string"),
+        pytest.param(mark_safe("<abc>"), id="safe_string"),
+        pytest.param(range(5), id="range"),
+        pytest.param({"a": 1}, id="dict"),
+        pytest.param(12, id="int"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_random_matches_django(value, autoescape):
+    import random
+
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "{% for i in 'abcdefgh' %}[{{ value|random }}]{% endfor %}"
+        "[{{ missing|random }}][{{ value|random|length }}]"
+        "{% endautoescape %}"
+    )
+    results = []
+    for name in ("django", "rusty"):
+        random.seed(1234)
+        try:
+            results.append(engines[name].from_string(source).render({"value": value}))
+        except Exception as error:
+            results.append((type(error), str(error)))
+    django, rusty = results
+    assert rusty == django
+
+
+class PprintError:
+    def __repr__(self):
+        raise ValueError("no repr <here>")
+
+
+class PprintBaseError:
+    def __repr__(self):
+        raise KeyboardInterrupt
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param({"b": [1, 2], "a": "<x>", "c": {"d": None}}, id="dict"),
+        pytest.param(list(range(40)), id="long_list"),
+        pytest.param(["x" * 50, "y" * 50], id="wrapping"),
+        pytest.param("<a & b>", id="string"),
+        pytest.param(mark_safe("<a & b>"), id="safe_string"),
+        pytest.param(translation.gettext_lazy("Good morning"), id="lazy"),
+        pytest.param(12, id="int"),
+        pytest.param(1.5, id="float"),
+        pytest.param(True, id="bool"),
+        pytest.param(Decimal("1.50"), id="decimal"),
+        pytest.param(datetime.date(2026, 1, 2), id="date"),
+        pytest.param(PprintError(), id="error"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_pprint_matches_django(value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "[{{ value|pprint }}][{{ value|safe|pprint }}][{{ missing|pprint }}]"
+        "[{{ value|pprint|length }}]"
+        "{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {"value": value})
+    assert rusty == django
+
+
+def test_pprint_literals():
+    source = "[{{ 'a<b'|pprint }}][{{ 12|pprint }}][{{ 1.5|pprint }}]"
+    django, rusty = render_both(source, {})
+    assert rusty == django
+
+
+def test_pprint_base_exception_propagates():
+    for name in ("django", "rusty"):
+        with pytest.raises(KeyboardInterrupt):
+            engines[name].from_string("{{ value|pprint }}").render(
+                {"value": PprintBaseError()}
+            )
+
+
+@pytest.mark.parametrize("name", ["random", "pprint"])
+def test_random_pprint_replaced_builtin(monkeypatch, name):
+    monkeypatch.setitem(register.filters, name, lambda value: "replacement")
+    django, rusty = render_both("{{ value|" + name + " }}", {"value": ["a"]})
+    assert rusty == django == "replacement"

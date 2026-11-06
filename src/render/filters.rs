@@ -16,10 +16,10 @@ use crate::filters::{
     EscapejsFilter, EscapeseqFilter, ExternalFilter, FilterType, FirstFilter, FloatFormatFilter,
     ForceEscapeFilter, GetDigitFilter, IriencodeFilter, JoinFilter, Justify, JustifyFilter,
     LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter, LinenumbersFilter, LowerFilter,
-    MakeListFilter, Phone2numericFilter, PluralizeFilter, SafeFilter, SafeseqFilter, SliceArgument,
-    SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter,
-    TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter, UrlencodeFilter, WordcountFilter,
-    WordwrapFilter, YesnoFilter,
+    MakeListFilter, Phone2numericFilter, PluralizeFilter, PprintFilter, RandomFilter, SafeFilter,
+    SafeseqFilter, SliceArgument, SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter,
+    TruncateCharsFilter, TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter,
+    UrlencodeFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -138,6 +138,8 @@ impl ResolveFilter for FilterType {
             Self::MakeList(filter) => filter.resolve(variable, py, template, context),
             Self::Escapeseq(filter) => filter.resolve(variable, py, template, context),
             Self::Safeseq(filter) => filter.resolve(variable, py, template, context),
+            Self::Random(filter) => filter.resolve(variable, py, template, context),
+            Self::Pprint(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -2202,6 +2204,78 @@ impl ResolveFilter for SafeseqFilter {
             }
         }
         Ok(Some(Content::Py(marked.into_any())))
+    }
+}
+
+static RANDOM_CHOICE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static PFORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+impl ResolveFilter for RandomFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        // Python's `random.choice` keeps `random.seed()` working; calling it
+        // directly skips the general filter call. Django returns "" for an
+        // empty sequence.
+        if let Some(Content::Py(value)) = &variable
+            && (value.is_exact_instance_of::<PyList>() || value.is_exact_instance_of::<PyTuple>())
+        {
+            if value.len()? == 0 {
+                return Ok(Some("".as_content()));
+            }
+            let choice = RANDOM_CHOICE
+                .import(py, "random", "choice")?
+                .call1((value,))?;
+            return Ok(Some(Content::Py(choice)));
+        }
+        self.django.resolve(variable, py, template, context)
+    }
+}
+
+impl ResolveFilter for PprintFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        // Django marks the result safe when the value was, so safe strings
+        // go through Django's filter.
+        let value = match &variable {
+            Some(Content::String(ContentString::HtmlSafe(_))) => None,
+            Some(Content::Py(value))
+                if value.is_instance(SAFEDATA.import(
+                    py,
+                    "django.utils.safestring",
+                    "SafeData",
+                )?)? =>
+            {
+                None
+            }
+            Some(value) => Some(value.to_py(py)),
+            // Django's filter gets "".
+            None => Some(PyString::new(py, "").into_any()),
+        };
+        let Some(value) = value else {
+            return self.django.resolve(variable, py, template, context);
+        };
+        let formatted = match PFORMAT.import(py, "pprint", "pformat")?.call1((value,)) {
+            Ok(formatted) => formatted.str()?.to_str()?.to_string(),
+            Err(error) if error.is_instance_of::<pyo3::exceptions::PyException>(py) => format!(
+                "Error in formatting: {}: {}",
+                error.get_type(py).name()?,
+                error.value(py).str()?
+            ),
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Some(Content::String(ContentString::HtmlUnsafe(
+            Cow::Owned(formatted),
+        ))))
     }
 }
 
