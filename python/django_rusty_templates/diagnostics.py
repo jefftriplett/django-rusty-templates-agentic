@@ -1,6 +1,8 @@
 """Django-compatible diagnostics for templates rejected by the native parser."""
 
+import inspect
 import warnings
+from pathlib import Path
 from types import SimpleNamespace
 
 from django.template import Context
@@ -15,11 +17,43 @@ from django.template.base import (
 )
 from django.urls import reverse
 
+# RemovedInDjango2029Warning: Django 6.2's lexers take the transitional
+# allow_multiline_tags option; earlier versions never lex multiline tags.
+_LEXER_TAKES_MULTILINE = (
+    "allow_multiline_tags" in inspect.signature(Lexer.__init__).parameters
+)
+
+
+def make_lexer(source, debug=True, allow_multiline_tags=True):
+    """Build the Django lexer that tokenizes the way the native parser did."""
+    lexer_class = DebugLexer if debug else Lexer
+    if _LEXER_TAKES_MULTILINE:
+        return lexer_class(source, allow_multiline_tags=allow_multiline_tags)
+    return lexer_class(source)
+
+
+def allows_multiline_tags(engine):
+    return getattr(engine, "allow_multiline_tags", True)
+
+
+def warn_allow_multiline_tags():
+    """Match Django 6.2's warning for its transitional engine option."""
+    # Only exists on Django 6.2+; Rust calls this only for that series.
+    from django.utils.deprecation import RemovedInDjango2029Warning
+    from django.utils.warnings import django_file_prefixes
+
+    warnings.warn(
+        "The 'allow_multiline_tags' transitional template engine option is deprecated.",
+        RemovedInDjango2029Warning,
+        # Point at the caller, not Django or this backend.
+        skip_file_prefixes=(*django_file_prefixes(), str(Path(__file__).parent)),
+    )
+
 
 def validate_syntax(source, engine, filename=None, template_name=None):
     # Only used after native parsing fails; successful templates keep the native
     # compilation path and never pay for a second parse.
-    lexer = DebugLexer(source) if engine.debug else Lexer(source)
+    lexer = make_lexer(source, engine.debug, allows_multiline_tags(engine))
     parser = Parser(
         lexer.tokenize(),
         engine.template_libraries,
@@ -30,11 +64,11 @@ def validate_syntax(source, engine, filename=None, template_name=None):
         parser.parse()
     except Exception as error:
         if engine.debug:
-            attach_debug(source, error, filename)
+            attach_debug(source, error, filename, allows_multiline_tags(engine))
         raise
 
 
-def attach_debug(source, error, filename=None):
+def attach_debug(source, error, filename=None, allow_multiline_tags=True):
     """Attach Django's source metadata without replacing the exception."""
     if hasattr(error, "template_debug"):
         return
@@ -47,7 +81,9 @@ def attach_debug(source, error, filename=None):
         token = next(
             (
                 token
-                for token in DebugLexer(source).tokenize()
+                for token in make_lexer(
+                    source, allow_multiline_tags=allow_multiline_tags
+                ).tokenize()
                 if len(source[: token.position[0]].encode())
                 <= start
                 < len(source[: token.position[1]].encode())

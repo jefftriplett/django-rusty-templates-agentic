@@ -34,6 +34,8 @@ Print dates, times, datetimes and `Decimal`s natively, and render the `{% load t
 
 Read context dicts lazily, so a small template with 500 context keys goes from 11× slower than Django to 1.7× faster, accept non-string keys as Django does, and keep `True`, `False` and `None` in `{% include … only %}`. ([#306](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/306), [#307](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/307))
 
+Let block tags span lines on Django 6.2 and accept its transitional `allow_multiline_tags` option, read 6.2 `comment` blocks as raw text, and close a comment only on an exact `endcomment`, as Django does. ([#311](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/311))
+
 ## 2026.11.1
 
 Build macOS wheels on `macos-15` after GitHub retired the `macos-14` runner. ([#206](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/206))

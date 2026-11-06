@@ -1821,7 +1821,9 @@ impl<'t, 'py> Parser<'t, 'py> {
         Self {
             py,
             template,
-            lexer: Lexer::new(template).with_modern_raw_blocks(engine.django_series >= (6, 2)),
+            lexer: Lexer::new(template)
+                .with_modern_raw_blocks(engine.django_series >= (6, 2))
+                .with_multiline_tags(engine.multiline_tags()),
             engine,
             origin,
             external_tags: HashMap::new(),
@@ -1855,7 +1857,9 @@ impl<'t, 'py> Parser<'t, 'py> {
         Self {
             py,
             template,
-            lexer: Lexer::new(template).with_modern_raw_blocks(engine.django_series >= (6, 2)),
+            lexer: Lexer::new(template)
+                .with_modern_raw_blocks(engine.django_series >= (6, 2))
+                .with_multiline_tags(engine.multiline_tags()),
             engine,
             origin: None,
             external_tags: HashMap::new(),
@@ -2258,11 +2262,24 @@ impl<'t, 'py> Parser<'t, 'py> {
         }
     }
 
+    /// The text Django compares when checking a named closing tag.
+    /// Django 6.2 joins the tag's words with single spaces, so the name may
+    /// sit on its own line.
+    fn end_tag_source(&self, at: At) -> Cow<'t, str> {
+        let source = self.template.content(at);
+        let source = source[START_TAG_LEN..source.len() - START_TAG_LEN].trim();
+        if self.engine.django_series >= (6, 2) {
+            Cow::Owned(source.split_whitespace().collect::<Vec<_>>().join(" "))
+        } else {
+            Cow::Borrowed(source)
+        }
+    }
+
     fn parse_comment(&mut self, at: At, _parts: TagParts) -> Result<Comment, PyParseError> {
         for token in self.lexer.by_ref() {
             if token.token_type == TokenType::Tag {
-                let content = token.content(self.template).trim();
-                if content.split_whitespace().next() == Some("endcomment") {
+                // Like Django's `skip_past`, only an exact `endcomment` closes.
+                if token.content(self.template).trim() == "endcomment" {
                     return Ok(Comment);
                 }
             }
@@ -2950,7 +2967,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             Cow::Borrowed("partialdef"),
             at,
         )?;
-        let close = self.template.content((end.at.0 + 2, end.at.1 - 4)).trim();
+        let close = self.end_tag_source(end.at);
         if close != "endpartialdef" && close != format!("endpartialdef {name}") {
             return Err(TemplateSyntaxError::new_err("Invalid endpartialdef name").into());
         }
@@ -2996,8 +3013,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             at,
         )?;
         if let Some(parts) = end.parts {
-            let end_source = self.template.content(end.at);
-            let end_source = end_source[START_TAG_LEN..end_source.len() - START_TAG_LEN].trim();
+            let end_source = self.end_tag_source(end.at);
             let end_name = self.template.content(parts.at).trim();
             if end_source != "endblock" && end_source != format!("endblock {name}") {
                 return Err(

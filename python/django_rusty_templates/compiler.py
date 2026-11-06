@@ -7,11 +7,11 @@ It never parses the native prefix or trailing native nodes.
 
 import re
 
-from django.template.base import DebugLexer, NodeList, Parser, TokenType
+from django.template.base import NodeList, Parser, TokenType
 from django.template.defaulttags import load
 from django.template import Origin
 
-from .diagnostics import get_exception_info
+from .diagnostics import allows_multiline_tags, get_exception_info, make_lexer
 
 
 class CompilerParser(Parser):
@@ -28,10 +28,15 @@ class CompilerParser(Parser):
         self.completed_spans = []
         self.compiler_failed = False
 
+    def _lexer(self, source):
+        return make_lexer(
+            source, allow_multiline_tags=allows_multiline_tags(self.engine)
+        )
+
     def load(self, source):
         # Loading a library updates the persistent parser's tags and filters;
         # it doesn't require parsing any surrounding template nodes.
-        token = DebugLexer(source).tokenize()[0]
+        token = self._lexer(source).tokenize()[0]
         load(self, token)
 
     def next_token(self):
@@ -43,7 +48,7 @@ class CompilerParser(Parser):
         if not self._tokenized:
             start = len(self._source_bytes[:byte_start].decode())
             suffix = self.source[start:]
-            tokens = DebugLexer(suffix).tokenize()
+            tokens = self._lexer(suffix).tokenize()
             line_offset = self.source[:start].count("\n")
             byte_cursor, char_cursor = byte_start, 0
             for token in tokens:
@@ -101,7 +106,7 @@ class CompilerParser(Parser):
             cursor = end
         pieces.append(self._source_bytes[cursor:].decode())
         source = "".join(pieces)
-        tokens = DebugLexer(source).tokenize()
+        tokens = self._lexer(source).tokenize()
         if not self.engine.debug:
             for token in tokens:
                 token.position = None

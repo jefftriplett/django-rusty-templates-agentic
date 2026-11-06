@@ -688,6 +688,8 @@ pub mod django_rusty_templates {
         pub template_builtins: Vec<Py<PyAny>>,
         pub autoescape: bool,
         pub django_series: (u8, u8),
+        /// Django 6.2's transitional `allow_multiline_tags` option.
+        pub allow_multiline_tags: bool,
         loaded_context_processors: Vec<Py<PyAny>>,
         pub libraries: HashMap<String, Py<PyAny>>,
     }
@@ -747,6 +749,11 @@ pub mod django_rusty_templates {
     }
 
     impl Engine {
+        /// Whether `{% ... %}` tags may span lines, as in Django 6.2+.
+        pub fn multiline_tags(&self) -> bool {
+            self.django_series >= (6, 2) && self.allow_multiline_tags
+        }
+
         /// Peek only at the first loader: later loaders cannot bypass an
         /// earlier uncached loader's search order. Misses use normal loading.
         pub(crate) fn cached_native_template(
@@ -805,6 +812,7 @@ pub mod django_rusty_templates {
                 template_builtins: Vec::new(),
                 autoescape: false,
                 django_series: (5, 2),
+                allow_multiline_tags: true,
                 loaded_context_processors: Vec::new(),
                 libraries: HashMap::new(),
             }
@@ -949,7 +957,7 @@ pub mod django_rusty_templates {
         }
 
         #[new]
-        #[pyo3(signature = (dirs=None, app_dirs=false, context_processors=None, debug=false, loaders=None, string_if_invalid=String::new(), file_charset="utf-8".to_string(), libraries=None, builtins=None, autoescape=true))]
+        #[pyo3(signature = (dirs=None, app_dirs=false, context_processors=None, debug=false, loaders=None, string_if_invalid=String::new(), file_charset="utf-8".to_string(), libraries=None, builtins=None, autoescape=true, allow_multiline_tags=None))]
         #[expect(
             clippy::too_many_lines,
             reason = "normalises every argument of Django's Engine.__init__"
@@ -967,6 +975,7 @@ pub mod django_rusty_templates {
             libraries: Option<Bound<'_, PyAny>>,
             #[allow(unused_variables)] builtins: Option<Bound<'_, PyAny>>,
             autoescape: bool,
+            allow_multiline_tags: Option<Bound<'_, PyAny>>,
         ) -> PyResult<Self> {
             let configuration = PyDict::new(py);
             configuration.set_item(
@@ -1076,8 +1085,25 @@ pub mod django_rusty_templates {
                 version.get_item(0)?.extract()?,
                 version.get_item(1)?.extract()?,
             );
+            let allow_multiline_tags = match allow_multiline_tags {
+                None => true,
+                // Django added the option in 6.2; older Engines reject it.
+                Some(_) if django_series < (6, 2) => {
+                    return Err(PyTypeError::new_err(
+                        "Engine.__init__() got an unexpected keyword argument \
+                         'allow_multiline_tags'",
+                    ));
+                }
+                Some(value) => {
+                    py.import("django_rusty_templates.diagnostics")?
+                        .getattr("warn_allow_multiline_tags")?
+                        .call0()?;
+                    value.is_truthy()?
+                }
+            };
             let engine = Engine {
                 django_series,
+                allow_multiline_tags,
                 dirs: Mutex::new(dirs),
                 app_dirs,
                 context_processors: processors,
@@ -1611,6 +1637,11 @@ pub mod django_rusty_templates {
         #[getter]
         pub fn autoescape(&self) -> bool {
             self.engine.autoescape
+        }
+
+        #[getter]
+        pub fn allow_multiline_tags(&self) -> bool {
+            self.engine.allow_multiline_tags
         }
 
         #[getter]
@@ -2267,6 +2298,7 @@ pub mod django_rusty_templates {
                                             self.filename
                                                 .as_ref()
                                                 .map(|path| path.to_string_lossy().into_owned()),
+                                            self.engine.allow_multiline_tags,
                                         ))?;
                                     Ok(())
                                 })();
@@ -2374,6 +2406,7 @@ pub mod django_rusty_templates {
                                 self.filename
                                     .as_ref()
                                     .map(|path| path.to_string_lossy().into_owned()),
+                                self.engine.allow_multiline_tags,
                             ))?;
                         Ok(())
                     })();
@@ -2586,6 +2619,7 @@ pub mod django_rusty_templates {
                             builtins,
                             self.origin(),
                             self.engine.debug.load(Ordering::Relaxed),
+                            self.engine.allow_multiline_tags,
                         ))?
                         .unbind())
                 })
@@ -3048,6 +3082,7 @@ user = User(["Lily"])
                 None,
                 None,
                 false,
+                None,
             )
             .unwrap();
             let template_string = PyString::new(py, "Hello {{ user }}!");
@@ -3092,6 +3127,7 @@ user = User(["Lily"])
                 ),
                 None,
                 false,
+                None,
             )
             .unwrap();
             let template = engine
@@ -3145,6 +3181,7 @@ user = User(["Lily"])
                 ),
                 None,
                 false,
+                None,
             )
             .unwrap();
 
@@ -3198,6 +3235,7 @@ user = User(["Lily"])
                 None,
                 None,
                 false,
+                None,
             )
             .unwrap_err();
 
