@@ -11,10 +11,11 @@ use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
-    EscapejsFilter, ExternalFilter, FilterType, FloatFormatFilter, ForceEscapeFilter, JoinFilter,
-    LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter, LowerFilter, SafeFilter,
-    SliceArgument, SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter,
-    TruncateWordsFilter, UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
+    EscapejsFilter, ExternalFilter, FilterType, FirstFilter, FloatFormatFilter, ForceEscapeFilter,
+    JoinFilter, LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter, LowerFilter,
+    SafeFilter, SliceArgument, SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter,
+    TruncateCharsFilter, TruncateWordsFilter, UpperFilter, WordcountFilter, WordwrapFilter,
+    YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -107,6 +108,7 @@ impl ResolveFilter for FilterType {
             Self::Escapejs(filter) => filter.resolve(variable, py, template, context),
             Self::External(filter) => filter.resolve(variable, py, template, context),
             Self::FloatFormat(filter) => filter.resolve(variable, py, template, context),
+            Self::First(filter) => filter.resolve(variable, py, template, context),
             Self::ForceEscape(filter) => filter.resolve(variable, py, template, context),
             Self::Join(filter) => filter.resolve(variable, py, template, context),
             Self::Last(filter) => filter.resolve(variable, py, template, context),
@@ -1219,6 +1221,35 @@ impl ResolveFilter for ForceEscapeFilter {
             other => other,
         };
         EscapeFilter.resolve(variable, py, template, context)
+    }
+}
+
+impl ResolveFilter for FirstFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        _template: TemplateString<'t>,
+        _context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let Some(content) = variable else {
+            return Ok(Some("".as_content()));
+        };
+        // Django's `first` returns `value[0]`, or "" on an `IndexError`.
+        // Indexing a string, even a safe one, gives a plain `str`.
+        if let Content::String(text) = &content {
+            let first = text.as_raw().chars().next().map(String::from);
+            return Ok(Some(Content::String(ContentString::HtmlUnsafe(
+                first.map_or(Cow::Borrowed(""), Cow::Owned),
+            ))));
+        }
+        match content.to_py(py).get_item(0) {
+            Ok(first) => Ok(Some(Content::Py(first))),
+            Err(error) if error.is_instance_of::<pyo3::exceptions::PyIndexError>(py) => {
+                Ok(Some("".as_content()))
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
