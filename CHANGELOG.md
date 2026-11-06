@@ -8,6 +8,10 @@ Render `first`, `linenumbers`, `ljust`, and `rjust` natively, and pass `truncate
 
 Fix the per-language cache, which never cached after #197, so `floatformat`, `truncatechars`, `timesince`, and `timeuntil` use their native paths again. ([#218](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/218))
 
+Render `pluralize`, `get_digit`, `phone2numeric`, `urlencode`, `iriencode`, `make_list`, `escapeseq`, and `safeseq` natively, and call `random` and `pprint` directly. ([#253](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/253), [#254](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/254), [#255](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/255), [#256](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/256), [#257](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/257))
+
+Follow Python's `int()` for integer filter arguments and handle more `join`, `slice`, `truncatewords`, `ljust`, `rjust`, and `center` inputs natively, including `center` on Django 6.0+ and string widths on 5.2. ([#258](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/258))
+
 ## 2026.11.1
 
 Build macOS wheels on `macos-15` after GitHub retired the `macos-14` runner. ([#206](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/206))
