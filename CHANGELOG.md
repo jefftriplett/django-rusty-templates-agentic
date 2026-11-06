@@ -28,6 +28,12 @@ Speed up compiling mixed templates by about 6%, run the `pytz` and `python-dateu
 
 Compile mixed templates with many variables 2–3× faster by parsing Django's filter expressions for native variables only when something reads them. ([#289](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/289))
 
+List what is ported in the README, and add a summary benchmark with a guide to what performance to expect. ([#291](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/291), [#297](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/297))
+
+Print dates, times, datetimes and `Decimal`s natively, and render the `{% load tz %}`, `{% load l10n %}` and `{% load i18n %}` filters natively, which makes them 8–27× faster than Django. ([#300](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/300), [#301](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/301), [#302](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/302), [#303](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/303), [#304](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/304))
+
+Read context dicts lazily, so a small template with 500 context keys goes from 11× slower than Django to 1.7× faster, accept non-string keys as Django does, and keep `True`, `False` and `None` in `{% include … only %}`. ([#306](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/306), [#307](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/307))
+
 ## 2026.11.1
 
 Build macOS wheels on `macos-15` after GitHub retired the `macos-14` runner. ([#206](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/206))

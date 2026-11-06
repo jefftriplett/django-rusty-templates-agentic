@@ -101,7 +101,7 @@ TEMPLATES = [
 
 * **Built-in tags.** All of Django's built-in tags (`defaulttags` and `loader_tags`), including `querystring`, `partialdef` and `partial` on the Django versions that have them.
 * **Built-in filters.** All 57 of Django's built-in filters.
-* **Stock library tags.** The tags from `{% load i18n %}`, `{% load l10n %}`, `{% load tz %}`, `{% load static %}` and `{% load cache %}`.
+* **Stock libraries.** The tags from `{% load i18n %}`, `{% load l10n %}`, `{% load tz %}`, `{% load static %}` and `{% load cache %}`, and the filters from `{% load l10n %}` (`localize`, `unlocalize`), `{% load tz %}` (`localtime`, `utc`, `timezone`) and `{% load i18n %}` (`language_name`, `language_name_local`, `language_name_translated`, `language_bidi`). A library that registers its own filters under these names keeps them.
 
 Checked against Django 5.2 and the development version with `engine.explain_template()`; see [Inspecting templates](#inspecting-templates).
 
@@ -109,9 +109,6 @@ Checked against Django 5.2 and the development version with `engine.explain_temp
 
 | Library | Filters and tags | Notes |
 |---|---|---|
-| `{% load l10n %}` | `localize`, `unlocalize` filters | [#292](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/292) |
-| `{% load tz %}` | `localtime`, `utc`, `timezone` filters | [#293](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/293) |
-| `{% load i18n %}` | `language_name`, `language_name_local`, `language_name_translated`, `language_bidi` filters | [#294](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/294) |
 | `django.contrib` | `humanize` filters (`intcomma`, `naturaltime`, …), admin tags, and other contrib libraries | Run as custom libraries. |
 | Your project | Custom filters and tags | See below. |
 
@@ -129,6 +126,9 @@ Custom filters run in Python and are called as Django calls them: `is_safe`, `ne
 * `json_script`: dates, decimals and lazy strings.
 * `stringformat`, `dictsort`, `unordered_list` and `floatformat`: unusual format specifiers, subclasses and generators.
 * The date formatter: time zones other than `datetime.timezone` and `ZoneInfo`.
+* Printing numbers, and `localize`/`unlocalize`: `Decimal`s written with an exponent or that aren't finite, floats with an exponent, and subclasses of `int`, `float`, `Decimal` and `str`. `unlocalize` of dates also calls Django.
+* `localtime`, `utc` and `timezone`: `datetime` subclasses and tzinfos without an offset.
+* `language_name*` and `language_bidi`: codes that aren't plain strings, and codes `get_language_info` rejects.
 
 The WebAssembly engine supports a smaller subset; see [its documentation](dtl-browser/README.md).
 
