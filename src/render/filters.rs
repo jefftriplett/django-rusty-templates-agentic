@@ -27,12 +27,14 @@ use crate::filters::{
     UrlencodeFilter, UrlizeFilter, UrlizetruncFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
     python_int,
 };
+use crate::filters::{LanguageField, LanguageInfoFilter};
 use crate::parse::Filter;
 use crate::render::common::gettext;
 use crate::render::dateformat::{
     Formatted, Formatter, convert_timezone, localize_date_value, template_localtime,
 };
 use crate::render::l10n::{Grouping, localize_number};
+use crate::render::language_cache::LanguageInfo;
 use crate::render::timesince::{TimeSince, TimeStrings, timesince};
 use crate::render::types::{
     AsBorrowedContent, Content, ContentString, Context, IntoOwnedContent, append_escaped,
@@ -49,6 +51,7 @@ static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 pub static DATE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TIME_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static PGETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static GETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static COMBINING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TRUNCATOR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static NORMALIZE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -133,6 +136,7 @@ impl ResolveFilter for FilterType {
             Self::FloatFormat(filter) => filter.resolve(variable, py, template, context),
             Self::Tz(filter) => filter.resolve(variable, py, template, context),
             Self::L10n(filter) => filter.resolve(variable, py, template, context),
+            Self::LanguageInfo(filter) => filter.resolve(variable, py, template, context),
             Self::First(filter) => filter.resolve(variable, py, template, context),
             Self::ForceEscape(filter) => filter.resolve(variable, py, template, context),
             Self::Join(filter) => filter.resolve(variable, py, template, context),
@@ -797,6 +801,78 @@ fn call_django_filter<'t, 'py>(
         result
     };
     Ok(Some(Content::Py(result)))
+}
+
+impl LanguageInfoFilter {
+    /// The filter's result for `code`, or `None` to call Django's filter.
+    fn native<'t, 'py>(
+        &self,
+        code: &str,
+        py: Python<'py>,
+        context: &mut Context,
+    ) -> PyResult<Option<Content<'t, 'py>>> {
+        let info = match context.language_info.get(code) {
+            Some(info) => info,
+            None => match LanguageInfo::load(py, code)? {
+                Some(info) => context.language_info.entry(code.to_owned()).or_insert(info),
+                None => return Ok(None),
+            },
+        };
+        let text = match self.field {
+            LanguageField::Name => info.name.clone(),
+            LanguageField::NameLocal => info.name_local.clone(),
+            LanguageField::Bidi => return Ok(Some(Content::Bool(info.bidi))),
+            LanguageField::NameTranslated => {
+                let name = info.name.clone();
+                let Some(names) = context
+                    .translated_language_names
+                    .get_or_try_init(py, |_| Ok(HashMap::new()))?
+                else {
+                    return Ok(None);
+                };
+                match names.get(code) {
+                    Some(translated) => translated.clone(),
+                    None => {
+                        let translated: String = GETTEXT
+                            .import(py, "django.utils.translation", "gettext")?
+                            .call1((&name,))?
+                            .str()?
+                            .extract()?;
+                        names.insert(code.to_owned(), translated.clone());
+                        translated
+                    }
+                }
+            }
+        };
+        Ok(Some(Content::String(ContentString::HtmlUnsafe(
+            Cow::Owned(text),
+        ))))
+    }
+}
+
+impl ResolveFilter for LanguageInfoFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let code = match &variable {
+            Some(Content::String(string)) => Some(string.as_raw().to_string()),
+            Some(Content::Py(object)) if object.is_exact_instance_of::<PyString>() => {
+                Some(object.extract::<String>()?)
+            }
+            _ => None,
+        };
+        if let Some(code) = code
+            && let Some(content) = self.native(&code, py, context)?
+        {
+            return Ok(Some(content));
+        }
+        let argument = self.django.resolve_argument(py, template, context)?;
+        self.django.call(variable, argument, py, context)
+    }
 }
 
 impl ResolveFilter for L10nFilter {

@@ -4,7 +4,7 @@ use pyo3::exceptions::PyAttributeError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
-use pyo3::types::{PyDict, PyModule, PyString, PyType};
+use pyo3::types::{PyBool, PyDict, PyModule, PyString, PyType};
 
 static GET_LANGUAGE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -239,5 +239,50 @@ impl<T> LanguageCache<T> {
             self.entry = Some((code.to_owned(), init(&language)?));
         }
         Ok(self.entry.as_mut().map(|(_, value)| value))
+    }
+}
+
+/// The fields of `get_language_info(code)` the i18n filters read.
+#[derive(Clone, Debug)]
+pub struct LanguageInfo {
+    pub name: String,
+    pub name_local: String,
+    pub bidi: bool,
+}
+
+static GET_LANGUAGE_INFO: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+impl LanguageInfo {
+    /// Calls Django's `get_language_info`. `None` when it raises or returns
+    /// something other than plain strings and a bool, so the caller can let
+    /// Django's filter raise or handle it.
+    pub fn load(py: Python<'_>, code: &str) -> PyResult<Option<Self>> {
+        let get_language_info =
+            GET_LANGUAGE_INFO.import(py, "django.utils.translation", "get_language_info")?;
+        let Ok(info) = get_language_info.call1((code,)) else {
+            return Ok(None);
+        };
+        let field = |name: &str| -> Option<Bound<'_, PyAny>> { info.get_item(name).ok() };
+        let text = |name: &str| -> Option<String> {
+            let value = field(name)?;
+            value
+                .is_exact_instance_of::<PyString>()
+                .then(|| value.extract().ok())
+                .flatten()
+        };
+        let bidi = field("bidi").and_then(|value| {
+            value
+                .is_exact_instance_of::<PyBool>()
+                .then(|| value.is_truthy().ok())
+                .flatten()
+        });
+        Ok(match (text("name"), text("name_local"), bidi) {
+            (Some(name), Some(name_local), Some(bidi)) => Some(Self {
+                name,
+                name_local,
+                bidi,
+            }),
+            _ => None,
+        })
     }
 }
