@@ -37,6 +37,7 @@ use crate::filters::EscapeFilter;
 use crate::filters::EscapejsFilter;
 use crate::filters::ExternalFilter;
 use crate::filters::FilterType;
+use crate::filters::FirstFilter;
 use crate::filters::FloatFormatFilter;
 use crate::filters::ForceEscapeFilter;
 use crate::filters::JoinFilter;
@@ -276,6 +277,11 @@ impl Filter {
                         }
                     });
                     FilterType::Slice(SliceFilter { django, literal })
+                }
+                BuiltinFilter::First
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::First(FirstFilter)
                 }
                 BuiltinFilter::Join
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>

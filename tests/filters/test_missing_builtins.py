@@ -733,6 +733,56 @@ def test_join_replaced_builtin(monkeypatch):
     assert rusty == django == "replacement"
 
 
+class FirstKeyError:
+    def __getitem__(self, key):
+        raise KeyError(key)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("<a&b>", id="string"),
+        pytest.param("", id="empty_string"),
+        pytest.param("é<", id="non_ascii"),
+        pytest.param("😀x", id="astral"),
+        pytest.param(mark_safe("<b>"), id="safe_string"),
+        pytest.param(["<a>", "b"], id="list"),
+        pytest.param([mark_safe("<a>"), "b"], id="safe_item"),
+        pytest.param([], id="empty_list"),
+        pytest.param((1, 2), id="tuple"),
+        pytest.param(range(3, 5), id="range"),
+        pytest.param({0: "zero"}, id="dict"),
+        pytest.param({"a": 1}, id="dict_missing_key"),
+        pytest.param(FirstKeyError(), id="key_error"),
+        pytest.param(12, id="int"),
+        pytest.param(1.5, id="float"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_first_matches_django(value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "[{{ value|first }}][{{ value|lower|first }}][{{ value|safe|first }}]"
+        "[{{ missing|first }}][{{ value|first|length }}]"
+        "{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {"value": value})
+    assert rusty == django
+
+
+def test_first_literals():
+    source = "[{{ 'abc'|first }}][{{ 12|first }}][{{ ''|first }}]"
+    django, rusty = render_both(source, {})
+    assert rusty == django
+
+
+def test_first_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "first", lambda value: "replacement")
+    django, rusty = render_both("{{ value|first }}", {"value": "abc"})
+    assert rusty == django == "replacement"
+
+
 @pytest.mark.parametrize(
     "value",
     [

@@ -331,6 +331,7 @@ impl Trace for FilterType {
             | Self::Date(_)
             | Self::Escape(_)
             | Self::Escapejs(_)
+            | Self::First(_)
             | Self::ForceEscape(_)
             | Self::Last(_)
             | Self::Linebreaks(_)

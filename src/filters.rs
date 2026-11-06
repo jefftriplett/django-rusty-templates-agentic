@@ -20,6 +20,7 @@ pub enum FilterType {
     Escape(EscapeFilter),
     Escapejs(EscapejsFilter),
     External(ExternalFilter),
+    First(FirstFilter),
     FloatFormat(FloatFormatFilter),
     ForceEscape(ForceEscapeFilter),
     Join(JoinFilter),
@@ -157,6 +158,9 @@ impl LastFilter {
         Self { at }
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirstFilter;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForceEscapeFilter;
