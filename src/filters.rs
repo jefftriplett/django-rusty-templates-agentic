@@ -53,6 +53,8 @@ pub enum FilterType {
     UnorderedList(UnorderedListFilter),
     Striptags(StriptagsFilter),
     Stringformat(StringformatFilter),
+    Dictsort(DictsortFilter),
+    Dictsortreversed(DictsortreversedFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -435,6 +437,20 @@ pub struct StriptagsFilter {
 /// integers and floats. Other inputs call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StringformatFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `dictsort`, sorting lists and tuples natively by a key path.
+/// Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DictsortFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `dictsortreversed`, sorting lists and tuples natively by a key
+/// path. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DictsortreversedFilter {
     pub django: DjangoFilter,
 }
 
