@@ -227,8 +227,7 @@ impl SliceArgument {
     }
 
     /// Parses `str(arg)` the way Django does. Returns `None` for bits that
-    /// are not plain optionally signed ASCII integers, leaving Python's
-    /// `int()` rules (whitespace, underscores, Unicode digits) to Django.
+    /// [`python_int`] can't convert, leaving them to Django.
     pub fn parse(text: &str) -> Option<Self> {
         let bits: Vec<&str> = text.split(':').collect();
         // `slice()` takes at most three arguments, so Django's TypeError
@@ -241,11 +240,7 @@ impl SliceArgument {
             if bit.is_empty() {
                 continue;
             }
-            let digits = bit.strip_prefix(['-', '+']).unwrap_or(bit);
-            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-                return None;
-            }
-            *value = Some(bit.parse().ok()?);
+            *value = Some(isize::try_from(python_int(bit)?).ok()?);
         }
         let [first, second, step] = values;
         Some(match bits.len() {
@@ -261,6 +256,37 @@ impl SliceArgument {
             },
         })
     }
+}
+
+/// Python's `int(text)` for ASCII text: surrounding whitespace, an optional
+/// sign, and digits with single underscores between them. Other text,
+/// including non-ASCII digits and whitespace, returns `None` and is left to
+/// Python, as are values beyond `i64`.
+pub fn python_int(text: &str) -> Option<i64> {
+    // The ASCII whitespace `int()` strips; unlike `str.isspace()`, it keeps
+    // the separators U+001C to U+001F.
+    let text = text.trim_matches(|c: char| matches!(c, '\t'..='\r' | ' '));
+    let digits = text.strip_prefix(['-', '+']).unwrap_or(text);
+    let mut previous_digit = false;
+    for byte in digits.bytes() {
+        match byte {
+            b'0'..=b'9' => previous_digit = true,
+            b'_' if previous_digit => previous_digit = false,
+            _ => return None,
+        }
+    }
+    if !previous_digit {
+        return None;
+    }
+    let negative = text.starts_with('-');
+    let mut value: i64 = 0;
+    for byte in digits.bytes().filter(u8::is_ascii_digit) {
+        let digit = i64::from(byte - b'0');
+        value = value
+            .checked_mul(10)?
+            .checked_add(if negative { -digit } else { digit })?;
+    }
+    Some(value)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
