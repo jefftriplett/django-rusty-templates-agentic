@@ -136,7 +136,8 @@ def test_debug_region_errors_match_django(failing_options, name):
     templates = {
         "property": marker
         + "é\nü {{ ok }}\n{% for v in values %}{{ v }} {{ noisy.value }}{% endfor %}",
-        "unpack": marker + "日本 {{ ok }}\n{% for a, b in values %}{{ a }}{% endfor %} {{ ok }}",
+        "unpack": marker
+        + "日本 {{ ok }}\n{% for a, b in values %}{{ a }}{% endfor %} {{ ok }}",
         "custom_tag": marker + "é {{ ok }} {% explode %} {{ ok }}",
         "include": marker + "é {{ ok }} {% include 'broken.html' %} {{ ok }}",
         "broken.html": "ok\n{{ noisy.value }}",

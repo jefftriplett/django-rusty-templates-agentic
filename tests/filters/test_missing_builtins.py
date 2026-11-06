@@ -2729,7 +2729,7 @@ def test_truncate_html_matches_django(name, value, autoescape):
         "…",
     ],
 )
-def test_truncatechars_html_translated_text(monkeypatch, text):
+def test_truncatechars_html_translated_text_random_html(monkeypatch, text):
     import random
 
     pgettext = translation._trans.pgettext
