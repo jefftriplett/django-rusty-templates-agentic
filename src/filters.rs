@@ -22,6 +22,7 @@ pub enum FilterType {
     External(ExternalFilter),
     First(FirstFilter),
     FloatFormat(FloatFormatFilter),
+    Tz(TzFilter),
     ForceEscape(ForceEscapeFilter),
     Join(JoinFilter),
     Justify(JustifyFilter),
@@ -530,6 +531,25 @@ impl DivisibleByFilter {
     pub fn new(at: At, argument: Argument) -> Self {
         Self { at, argument }
     }
+}
+
+/// Which conversion one of the `{% load tz %}` filters makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TzConversion {
+    /// `localtime`: to the current time zone.
+    Localtime,
+    /// `utc`: to UTC.
+    Utc,
+    /// `timezone:arg`: to a named time zone or tzinfo.
+    Timezone,
+}
+
+/// Django's `localtime`, `utc` and `timezone` filters, converted natively for
+/// exact `datetime` values. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TzFilter {
+    pub conversion: TzConversion,
+    pub django: DjangoFilter,
 }
 
 /// Django-backed filters preserve Python protocol and escaping behavior.

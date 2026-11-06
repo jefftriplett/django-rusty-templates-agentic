@@ -74,6 +74,8 @@ use crate::filters::TruncateCharsFilter;
 use crate::filters::TruncateCharsHtmlFilter;
 use crate::filters::TruncateWordsFilter;
 use crate::filters::TruncateWordsHtmlFilter;
+use crate::filters::TzConversion;
+use crate::filters::TzFilter;
 use crate::filters::UnorderedListFilter;
 use crate::filters::UpperFilter;
 use crate::filters::UrlencodeFilter;
@@ -227,6 +229,36 @@ fn is_django_filter(py: Python<'_>, filter: &Py<PyAny>, name: &str) -> bool {
         .is_ok_and(|django| django.is(filter))
 }
 
+/// A filter from a loaded library. Django's own `{% load tz %}` filters get a
+/// native port; anything else, including replacements registered under the
+/// same names, calls the Python function.
+fn external_filter(py: Python<'_>, filter: Py<PyAny>, argument: Option<Argument>) -> FilterType {
+    let bound = filter.bind(py);
+    let conversion = py
+        .import(intern!(py, "django.templatetags.tz"))
+        .ok()
+        .and_then(|module| {
+            [
+                ("localtime", TzConversion::Localtime),
+                ("utc", TzConversion::Utc),
+                ("do_timezone", TzConversion::Timezone),
+            ]
+            .into_iter()
+            .find(|(name, _)| module.getattr(*name).is_ok_and(|django| django.is(bound)))
+            .map(|(_, conversion)| conversion)
+        });
+    match conversion {
+        Some(conversion) => FilterType::Tz(TzFilter {
+            conversion,
+            django: DjangoFilter {
+                filter: Gc::new(filter),
+                argument,
+            },
+        }),
+        None => FilterType::External(ExternalFilter::new(filter, argument)),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Filter {
     pub at: At,
@@ -249,7 +281,7 @@ impl Filter {
                 at,
                 all_at,
                 left,
-                filter: FilterType::External(ExternalFilter::new(filter.clone().unbind(), right)),
+                filter: external_filter(parser.py, filter.clone().unbind(), right),
             });
         }
         if let Some(builtin) = BuiltinFilter::from_name(parser.template.content(at)) {
@@ -576,7 +608,7 @@ impl Filter {
                         });
                     }
                 };
-                FilterType::External(ExternalFilter::new(external, right))
+                external_filter(parser.py, external, right)
             }
         };
         Ok(Self {
