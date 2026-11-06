@@ -1115,3 +1115,88 @@ def test_get_digit_replaced_builtin(monkeypatch):
     monkeypatch.setitem(register.filters, "get_digit", lambda value, arg: "replacement")
     django, rusty = render_both("{{ value|get_digit:1 }}", {"value": 123})
     assert rusty == django == "replacement"
+
+
+URL_VALUES = [
+    pytest.param("", id="empty"),
+    pytest.param("abc-XYZ_0.9~", id="unreserved"),
+    pytest.param("a b&c=d/e?f#g", id="reserved"),
+    pytest.param("/I ♥ Django/ 日本 😀", id="non_ascii"),
+    pytest.param("100%", id="percent"),
+    pytest.param("<a href='x'>\"q\"</a>", id="html"),
+    pytest.param("[]=:;$&()+,!?*@'~", id="iri_safe"),
+    pytest.param(mark_safe("<b>&amp; é</b>"), id="safe"),
+    pytest.param(translation.gettext_lazy("Good morning"), id="lazy"),
+    pytest.param(12345, id="int"),
+    pytest.param(1.5, id="float"),
+    pytest.param(True, id="bool"),
+    pytest.param(["a b"], id="list"),
+    pytest.param(None, id="none"),
+]
+
+
+@pytest.mark.parametrize("value", URL_VALUES)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_urlencode_iriencode_match_django(value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "[{{ value|urlencode }}][{{ value|urlencode:'' }}][{{ value|urlencode:'/&= ' }}]"
+        "[{{ value|urlencode:'é' }}][{{ value|urlencode:safe }}][{{ value|urlencode:nothing }}]"
+        "[{{ value|iriencode }}][{{ value|safe|iriencode }}][{{ missing|iriencode }}]"
+        "[{{ missing|urlencode }}][{{ value|iriencode|length }}]"
+        "{% endautoescape %}"
+    )
+    django, rusty = render_both(
+        source, {"value": value, "safe": mark_safe("<>"), "nothing": None}
+    )
+    assert rusty == django
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("1-800-FLOWERS", id="letters"),
+        pytest.param("abcdefghijklmnopqrstuvwxyz", id="lower"),
+        pytest.param("ABCDEFGHIJKLMNOPQRSTUVWXYZ", id="upper"),
+        pytest.param("<call> & 'x'", id="html"),
+        pytest.param("", id="empty"),
+        pytest.param("ÄÖ İ ß", id="non_ascii"),
+        pytest.param(mark_safe("<b>CALL</b>"), id="safe"),
+        pytest.param(translation.gettext_lazy("Good morning"), id="lazy"),
+        pytest.param(12345, id="int"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_phone2numeric_matches_django(value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "[{{ value|phone2numeric }}][{{ value|lower|phone2numeric }}]"
+        "[{{ missing|phone2numeric }}][{{ value|phone2numeric|length }}]"
+        "{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {"value": value})
+    assert rusty == django
+
+
+def test_string_filter_literals():
+    source = (
+        "[{{ '1-800-GO'|phone2numeric }}][{{ 'a b/c'|urlencode }}]"
+        "[{{ 'a b/c'|urlencode:'' }}][{{ '/a b?é'|iriencode }}][{{ 12|urlencode }}]"
+    )
+    django, rusty = render_both(source, {})
+    assert rusty == django
+
+
+@pytest.mark.parametrize(
+    "name,replacement",
+    [
+        ("phone2numeric", lambda value: "replacement"),
+        ("urlencode", lambda value, safe=None: "replacement"),
+        ("iriencode", lambda value: "replacement"),
+    ],
+)
+def test_string_filters_replaced_builtin(monkeypatch, name, replacement):
+    monkeypatch.setitem(register.filters, name, replacement)
+    django, rusty = render_both("{{ value|" + name + " }}", {"value": "a b"})
+    assert rusty == django == "replacement"

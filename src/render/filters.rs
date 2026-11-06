@@ -14,11 +14,11 @@ use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
     EscapejsFilter, ExternalFilter, FilterType, FirstFilter, FloatFormatFilter, ForceEscapeFilter,
-    GetDigitFilter, JoinFilter, Justify, JustifyFilter, LastFilter, LengthFilter, LinebreaksFilter,
-    LinebreaksbrFilter, LinenumbersFilter, LowerFilter, PluralizeFilter, SafeFilter, SliceArgument,
-    SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter,
-    TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter, WordcountFilter, WordwrapFilter,
-    YesnoFilter,
+    GetDigitFilter, IriencodeFilter, JoinFilter, Justify, JustifyFilter, LastFilter, LengthFilter,
+    LinebreaksFilter, LinebreaksbrFilter, LinenumbersFilter, LowerFilter, Phone2numericFilter,
+    PluralizeFilter, SafeFilter, SliceArgument, SliceFilter, SlugifyFilter, TimesinceFilter,
+    TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter,
+    UrlencodeFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -131,6 +131,9 @@ impl ResolveFilter for FilterType {
             Self::TruncateWords(filter) => filter.resolve(variable, py, template, context),
             Self::Pluralize(filter) => filter.resolve(variable, py, template, context),
             Self::GetDigit(filter) => filter.resolve(variable, py, template, context),
+            Self::Phone2numeric(filter) => filter.resolve(variable, py, template, context),
+            Self::Urlencode(filter) => filter.resolve(variable, py, template, context),
+            Self::Iriencode(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -1986,6 +1989,109 @@ impl ResolveFilter for GetDigitFilter {
             return Ok(Some(Content::Int(digit.into())));
         }
         self.django.call(variable, argument, py, context)
+    }
+}
+
+/// Python's `urllib.parse.quote(text, safe)`: UTF-8 bytes outside
+/// `A-Za-z0-9_.-~` and `safe` become `%XX`.
+fn quote(text: &str, safe: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut output = String::with_capacity(text.len());
+    for &byte in text.as_bytes() {
+        if byte.is_ascii_alphanumeric() || b"_.-~".contains(&byte) || safe.contains(&byte) {
+            output.push(char::from(byte));
+        } else {
+            output.push('%');
+            output.push(char::from(HEX[usize::from(byte >> 4)]));
+            output.push(char::from(HEX[usize::from(byte & 0xF)]));
+        }
+    }
+    output
+}
+
+impl ResolveFilter for Phone2numericFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        // Python's `str.lower()` differs from Rust's for some non-ASCII
+        // characters, so only ASCII text is converted here.
+        if let Some(text) = Text::from_variable(variable.as_ref(), py)?
+            && text.as_str().is_ascii()
+        {
+            let numeric = text
+                .as_str()
+                .bytes()
+                .map(|byte| match byte.to_ascii_lowercase() {
+                    b'a'..=b'c' => '2',
+                    b'd'..=b'f' => '3',
+                    b'g'..=b'i' => '4',
+                    b'j'..=b'l' => '5',
+                    b'm'..=b'o' => '6',
+                    b'p'..=b's' => '7',
+                    b't'..=b'v' => '8',
+                    b'w'..=b'z' => '9',
+                    other => char::from(other),
+                })
+                .collect();
+            return Ok(Some(text.into_content(numeric, context)));
+        }
+        self.django.resolve(variable, py, template, context)
+    }
+}
+
+impl ResolveFilter for UrlencodeFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        let safe = match &argument {
+            // Django passes no `safe`, so `quote()` keeps its default "/".
+            ResolvedArgument::Absent | ResolvedArgument::Present(None) => Some(Cow::Borrowed("/")),
+            ResolvedArgument::Present(Some(Content::String(text))) => {
+                Some(Cow::Borrowed(text.as_raw().as_ref()))
+            }
+            ResolvedArgument::Present(Some(Content::Py(object))) => object
+                .cast::<PyString>()
+                .ok()
+                .and_then(|text| text.to_str().ok().map(|text| Cow::Owned(text.to_string()))),
+            ResolvedArgument::Present(Some(_)) => None,
+        };
+        // `quote()` drops non-ASCII `safe` characters; leave those to Django.
+        if let Some(safe) = safe.filter(|safe| safe.is_ascii()) {
+            let (text, _) = string_filter_text(variable, py)?;
+            let quoted = quote(&text, safe.as_bytes());
+            return Ok(Some(Content::String(ContentString::HtmlUnsafe(
+                Cow::Owned(quoted),
+            ))));
+        }
+        self.django.call(variable, argument, py, context)
+    }
+}
+
+impl ResolveFilter for IriencodeFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        _template: TemplateString<'t>,
+        _context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        // `iri_to_uri()`'s safe characters, unchanged from 5.2 to main.
+        let (text, safe) = string_filter_text(variable, py)?;
+        let quoted = Cow::Owned(quote(&text, b"/#%[]=:;$&()+,!?*@'~"));
+        Ok(Some(Content::String(if safe {
+            ContentString::HtmlSafe(quoted)
+        } else {
+            ContentString::HtmlUnsafe(quoted)
+        })))
     }
 }
 

@@ -41,6 +41,7 @@ use crate::filters::FirstFilter;
 use crate::filters::FloatFormatFilter;
 use crate::filters::ForceEscapeFilter;
 use crate::filters::GetDigitFilter;
+use crate::filters::IriencodeFilter;
 use crate::filters::JoinFilter;
 use crate::filters::Justify;
 use crate::filters::JustifyFilter;
@@ -50,6 +51,7 @@ use crate::filters::LinebreaksFilter;
 use crate::filters::LinebreaksbrFilter;
 use crate::filters::LinenumbersFilter;
 use crate::filters::LowerFilter;
+use crate::filters::Phone2numericFilter;
 use crate::filters::PluralizeFilter;
 use crate::filters::SafeFilter;
 use crate::filters::SliceArgument;
@@ -61,6 +63,7 @@ use crate::filters::TruncateCharsFilter;
 use crate::filters::TruncateCharsHtmlFilter;
 use crate::filters::TruncateWordsFilter;
 use crate::filters::UpperFilter;
+use crate::filters::UrlencodeFilter;
 use crate::filters::WordcountFilter;
 use crate::filters::WordwrapFilter;
 use crate::filters::YesnoFilter;
@@ -356,6 +359,21 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::GetDigit(GetDigitFilter { django })
+                }
+                BuiltinFilter::Phone2numeric
+                    if is_django_filter(parser.py, &django.filter, "phone2numeric_filter") =>
+                {
+                    FilterType::Phone2numeric(Phone2numericFilter { django })
+                }
+                BuiltinFilter::Urlencode
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Urlencode(UrlencodeFilter { django })
+                }
+                BuiltinFilter::Iriencode
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Iriencode(IriencodeFilter { django })
                 }
                 _ => FilterType::Django(django),
             };
