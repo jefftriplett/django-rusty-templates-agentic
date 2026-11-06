@@ -23,6 +23,14 @@ from .django_rusty_templates import Template as NativeTemplate
 from .inheritance import NativeExtendsNode
 
 
+class CulpritNode:
+    """The node Django's debug hook reports: a token in the full template."""
+
+    def __init__(self, token, origin):
+        self.token = token
+        self.origin = origin
+
+
 class NativeVariableNode(VariableNode):
     def __init__(self, node, engine, source):
         super().__init__(node.filter_expression)
@@ -33,17 +41,28 @@ class NativeVariableNode(VariableNode):
     @property
     def native(self):
         if self._native is None:
-            self._native = self.engine.from_string(self.source)
+            self._native = self.engine._from_string_fragment(self.source)
         return self._native
+
+    def debug_token(self, error):
+        return self.token
 
     def render(self, context):
         try:
             return self.native._render_fragment(context)
         except Exception as error:
-            # The fragment has its own source offsets. Let Django's node hook
-            # annotate this exception against the complete inherited template.
-            if hasattr(error, "template_debug"):
-                del error.template_debug
+            # The fragment has its own source offsets. Name the node that
+            # failed in the complete template, and let Django's node hook
+            # annotate the exception once it reaches that template. Inner
+            # Django nodes and other templates have already done so.
+            if (
+                self.engine.debug
+                and not hasattr(error, "template_debug")
+                and not hasattr(error, "_culprit_node")
+            ):
+                token = self.debug_token(error)
+                if token is not None and token.position is not None:
+                    error._culprit_node = CulpritNode(token, self.origin)
             raise
 
 
@@ -61,7 +80,7 @@ class NativeRegionNode(Node):
             )
         return self._native
 
-    def __init__(self, nodes, engine, source, callbacks=()):
+    def __init__(self, nodes, engine, source, callbacks=(), template_source=""):
         self.nodelist = NodeList(nodes)
         self.engine = engine
         self.source = source
@@ -71,6 +90,27 @@ class NativeRegionNode(Node):
         self.origin = nodes[0].origin
         self.load_prefix = nodes[0].load_prefix
         self._native_end = nodes[-1]._native_end
+        self.template_source = template_source
+
+    def debug_token(self, error):
+        """The full template's token at the fragment span Rust recorded."""
+        span = getattr(error, "_rusty_token_span", None)
+        if span is None:
+            return None
+        start = span[0] - len(self.load_prefix.encode())
+        region_start = self.token._native_position[0]
+        region = self.template_source[region_start : self._native_end].encode()
+        if not 0 <= start <= len(region):
+            return None
+        position = region_start + len(region[:start].decode(errors="ignore"))
+        return next(
+            (
+                token
+                for token in DebugLexer(self.template_source).tokenize()
+                if token.position[0] <= position < token.position[1]
+            ),
+            None,
+        )
 
 
 class NativeParser(Parser):
@@ -123,7 +163,7 @@ class NativeParser(Parser):
             nodes = super().parse(parse_until)
         finally:
             self.parse_depth -= 1
-        if self.native_engine.debug or self.parse_depth:
+        if self.parse_depth:
             return nodes
         self.inspection_nodes = nodes
         return self.group_nodes(nodes)
@@ -184,7 +224,9 @@ class NativeParser(Parser):
                 for node in region:
                     collect(node)
                 grouped.append(
-                    NativeRegionNode(region[:], self.native_engine, source, callbacks)
+                    NativeRegionNode(
+                        region[:], self.native_engine, source, callbacks, self.source
+                    )
                 )
             else:
                 grouped.extend(region)
@@ -246,17 +288,12 @@ class NativeParser(Parser):
         if type(node) is ExtendsNode:
             node.__class__ = NativeExtendsNode
             node.parent_name = ParentExpression(node.parent_name)
-        if (
-            not self.native_engine.debug
-            and type(node) is VariableNode
-            and not (
-                (VERSION >= (6, 1) and ".." in token.contents)
-                or (
-                    VERSION >= (6, 0)
-                    and any(
-                        exponent in token.contents
-                        for exponent in ("e+", "E+", "e-", "E-")
-                    )
+        if type(node) is VariableNode and not (
+            (VERSION >= (6, 1) and ".." in token.contents)
+            or (
+                VERSION >= (6, 0)
+                and any(
+                    exponent in token.contents for exponent in ("e+", "E+", "e-", "E-")
                 )
             )
         ):
@@ -301,11 +338,6 @@ class InteropTemplate(Template):
         try:
             nodes = parser.parse()
             self.extra_data = parser.extra_data
-            if self.engine.debug:
-                # This compatibility tree already has Django control flow and
-                # debug tokens. Avoid compiling one native fragment per value.
-                nodes.rendering_nodes = nodes
-                return nodes
             self.compile_native_nodes(nodes)
             for partial in self.extra_data.get("partials", {}).values():
                 self.compile_native_nodes(partial.nodelist)
