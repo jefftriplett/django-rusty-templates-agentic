@@ -781,3 +781,47 @@ def test_first_replaced_builtin(monkeypatch):
     monkeypatch.setitem(register.filters, "first", lambda value: "replacement")
     django, rusty = render_both("{{ value|first }}", {"value": "abc"})
     assert rusty == django == "replacement"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("one", id="one_line"),
+        pytest.param("a\nb\n", id="trailing_newline"),
+        pytest.param("\n".join("x" * n for n in range(12)), id="two_digit_width"),
+        pytest.param("\n" * 99, id="hundred_lines"),
+        pytest.param("a\r\nb\rc", id="carriage_returns"),
+        pytest.param("<a> & 'b' \"c\"\n<d>", id="html"),
+        pytest.param(mark_safe("<b>\n<i>"), id="safe"),
+        pytest.param("héllo\n日本語 😀", id="non_ascii"),
+        pytest.param(12345, id="int"),
+        pytest.param(1.5, id="float"),
+        pytest.param(True, id="bool"),
+        pytest.param(["<a>", "b"], id="list"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_linenumbers_matches_django(value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "[{{ value|linenumbers }}][{{ value|safe|linenumbers }}]"
+        "[{{ value|lower|linenumbers }}][{{ missing|linenumbers }}]"
+        "[{{ value|linenumbers|length }}]"
+        "{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {"value": value})
+    assert rusty == django
+
+
+def test_linenumbers_literals():
+    source = "[{{ 'a<\\nb'|linenumbers }}][{{ 12|linenumbers }}]"
+    django, rusty = render_both(source, {})
+    assert rusty == django
+
+
+def test_linenumbers_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "linenumbers", lambda value: "replacement")
+    django, rusty = render_both("{{ value|linenumbers }}", {"value": "a\nb"})
+    assert rusty == django == "replacement"
