@@ -6,7 +6,7 @@
 
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString, PyTuple, PyType};
 
 use super::types::Context;
 
@@ -167,10 +167,20 @@ impl Context {
 enum Number {
     Int,
     Float,
+    Decimal,
 }
 
-/// `localize(value, use_l10n)` for exact ints, floats and bools. `None` for
-/// other values and for floats Django formats as decimals.
+static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+
+/// Whether `value` is exactly a `decimal.Decimal`.
+fn is_decimal(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let decimal = DECIMAL.import(value.py(), "decimal", "Decimal")?;
+    Ok(value.get_type().is(decimal))
+}
+
+/// `localize(value, use_l10n)` for exact ints, floats, decimals and bools.
+/// `None` for other values, for floats Django formats as decimals, and for
+/// decimals it writes with an exponent or leaves unchanged when not finite.
 pub fn localize_number(
     value: &Bound<'_, PyAny>,
     use_l10n: Option<bool>,
@@ -184,6 +194,8 @@ pub fn localize_number(
         Number::Int
     } else if value.is_exact_instance_of::<PyFloat>() {
         Number::Float
+    } else if is_decimal(value)? {
+        Number::Decimal
     } else {
         return Ok(None);
     };
@@ -192,7 +204,7 @@ pub fn localize_number(
             Ok(number) => number.to_string(),
             Err(_) => value.str()?.extract()?,
         },
-        Number::Float => value.str()?.extract()?,
+        Number::Float | Number::Decimal => value.str()?.extract()?,
     };
     if use_l10n == Some(false) {
         return Ok(Some(number));
@@ -204,6 +216,14 @@ pub fn localize_number(
         Number::Int if matches!(format.grouping, Grouping::Off) => Ok(Some(number)),
         // Django formats floats with an exponent through Decimal.
         Number::Float if number.contains('e') => Ok(None),
-        Number::Int | Number::Float => Ok(Some(format.format(&number))),
+        // `str()` matches Django's `"{:f}"` unless it uses an exponent or the
+        // value isn't finite. Django switches to `"{:e}"` past 200 digits,
+        // which a string of 100 characters can't reach.
+        Number::Decimal
+            if number.len() > 100 || number.bytes().any(|byte| byte.is_ascii_alphabetic()) =>
+        {
+            Ok(None)
+        }
+        Number::Int | Number::Float | Number::Decimal => Ok(Some(format.format(&number))),
     }
 }
