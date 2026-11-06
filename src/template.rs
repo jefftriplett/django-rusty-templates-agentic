@@ -2648,7 +2648,7 @@ pub mod django_rusty_templates {
                     .call_method1("render", (context, request))?
                     .extract();
             }
-            let mut base_context = HashMap::from([
+            let mut base_context = Vec::from([
                 ("None".to_string(), py.None()),
                 ("True".to_string(), PyBool::new(py, true).to_owned().into()),
                 (
@@ -2804,6 +2804,7 @@ pub mod django_rusty_templates {
                 }
             }
             let mut autoescape = self.engine.autoescape;
+            let mut source = None;
             let mut use_l10n = None;
             let mut use_tz = None;
             if let Some(ref context) = context {
@@ -2828,13 +2829,22 @@ pub mod django_rusty_templates {
                     }
                 } else {
                     base_context.extend(processor_values);
-                    base_context.extend(context.extract::<HashMap<String, Py<PyAny>>>()?);
+                    // A dict is read lazily, so names the template never uses
+                    // cost nothing. Like Django, other key types are ignored.
+                    if let Ok(dict) = context.cast::<PyDict>() {
+                        source = Some(dict.copy()?);
+                    } else {
+                        base_context.extend(context.extract::<HashMap<String, Py<PyAny>>>()?);
+                    }
                 }
             } else {
                 base_context.extend(processor_values);
             }
             let mut rendering_context =
                 Context::new(base_context, request.map(pyo3::Bound::unbind), autoescape);
+            if let Some(source) = &source {
+                rendering_context = rendering_context.with_source(source);
+            }
             rendering_context.use_l10n = use_l10n;
             rendering_context.use_tz = use_tz;
             rendering_context.format_values = true;

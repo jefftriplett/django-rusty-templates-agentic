@@ -611,7 +611,7 @@ user = User('Lily')
             )
             .unwrap();
 
-            let context = locals.extract().unwrap();
+            let context: HashMap<String, Py<PyAny>> = locals.extract().unwrap();
             let mut context = Context::new(context, None, false);
             let template = TemplateString("{{ user.name }}");
             let variable = Variable::new((3, 9));

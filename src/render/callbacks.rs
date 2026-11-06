@@ -46,8 +46,8 @@ impl Context {
                 if context.get_for_loop(0).is_some() {
                     overlay.set_item("forloop", context.loop_dictionary(py, 0)?)?;
                 }
-                if let Some(block) = context.get("block")
-                    && let Ok(marker) = block.bind(py).extract::<PyRef<'_, BlockMarker>>()
+                if let Some(block) = context.get(py, "block")
+                    && let Ok(marker) = block.extract::<PyRef<'_, BlockMarker>>()
                 {
                     overlay.set_item(
                         "block",
