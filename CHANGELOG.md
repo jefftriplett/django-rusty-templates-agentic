@@ -12,6 +12,10 @@ Render `pluralize`, `get_digit`, `phone2numeric`, `urlencode`, `iriencode`, `mak
 
 Follow Python's `int()` for integer filter arguments and handle more `join`, `slice`, `truncatewords`, `ljust`, `rjust`, and `center` inputs natively, including `center` on Django 6.0+ and string widths on 5.2. ([#258](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/258))
 
+Read the active translation without asgiref's lock, and render `filesizeformat` and `floatformat` strings and `g`/`u` suffixes natively. ([#260](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/260), [#261](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/261), [#262](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/262))
+
+Render `unordered_list`, `striptags`, `stringformat`, `dictsort`, `dictsortreversed`, and `json_script` natively for common inputs. ([#263](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/263), [#264](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/264), [#265](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/265), [#266](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/266), [#267](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/267))
+
 ## 2026.11.1
 
 Build macOS wheels on `macos-15` after GitHub retired the `macos-14` runner. ([#206](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/206))
