@@ -13,12 +13,13 @@ use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
-    EscapejsFilter, ExternalFilter, FilterType, FirstFilter, FloatFormatFilter, ForceEscapeFilter,
-    GetDigitFilter, IriencodeFilter, JoinFilter, Justify, JustifyFilter, LastFilter, LengthFilter,
-    LinebreaksFilter, LinebreaksbrFilter, LinenumbersFilter, LowerFilter, Phone2numericFilter,
-    PluralizeFilter, SafeFilter, SliceArgument, SliceFilter, SlugifyFilter, TimesinceFilter,
-    TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter,
-    UrlencodeFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
+    EscapejsFilter, EscapeseqFilter, ExternalFilter, FilterType, FirstFilter, FloatFormatFilter,
+    ForceEscapeFilter, GetDigitFilter, IriencodeFilter, JoinFilter, Justify, JustifyFilter,
+    LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter, LinenumbersFilter, LowerFilter,
+    MakeListFilter, Phone2numericFilter, PluralizeFilter, SafeFilter, SafeseqFilter, SliceArgument,
+    SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter,
+    TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter, UrlencodeFilter, WordcountFilter,
+    WordwrapFilter, YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -134,6 +135,9 @@ impl ResolveFilter for FilterType {
             Self::Phone2numeric(filter) => filter.resolve(variable, py, template, context),
             Self::Urlencode(filter) => filter.resolve(variable, py, template, context),
             Self::Iriencode(filter) => filter.resolve(variable, py, template, context),
+            Self::MakeList(filter) => filter.resolve(variable, py, template, context),
+            Self::Escapeseq(filter) => filter.resolve(variable, py, template, context),
+            Self::Safeseq(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -2092,6 +2096,112 @@ impl ResolveFilter for IriencodeFilter {
         } else {
             ContentString::HtmlUnsafe(quoted)
         })))
+    }
+}
+
+impl ResolveFilter for MakeListFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        _template: TemplateString<'t>,
+        _context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        // `list(str(value))`: the characters are plain strings, even when the
+        // value was safe.
+        let (text, _) = string_filter_text(variable, py)?;
+        let mut buffer = [0; 4];
+        let characters = PyList::empty(py);
+        for character in text.chars() {
+            characters.append(character.encode_utf8(&mut buffer) as &str)?;
+        }
+        Ok(Some(Content::Py(characters.into_any())))
+    }
+}
+
+/// The items of an exact list or tuple, which `escapeseq` and `safeseq`
+/// walk natively. Other iterables are left to Django.
+fn sequence_items<'py>(variable: Option<&Content<'_, 'py>>) -> Option<Vec<Bound<'py, PyAny>>> {
+    let Some(Content::Py(value)) = variable else {
+        return None;
+    };
+    if let Ok(list) = value.cast::<PyList>()
+        && value.is_exact_instance_of::<PyList>()
+    {
+        Some(list.iter().collect())
+    } else if let Ok(tuple) = value.cast::<PyTuple>()
+        && value.is_exact_instance_of::<PyTuple>()
+    {
+        Some(tuple.iter().collect())
+    } else {
+        None
+    }
+}
+
+impl ResolveFilter for EscapeseqFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let Some(items) = sequence_items(variable.as_ref()) else {
+            return self.django.resolve(variable, py, template, context);
+        };
+        let safe_string = SAFESTRING.import(py, "django.utils.safestring", "SafeString")?;
+        let escaped = PyList::empty(py);
+        for item in items {
+            // `conditional_escape()`: plain strings are escaped, `SafeString`
+            // is its own `__html__()`, and other items go to Django.
+            if item.is_exact_instance_of::<PyString>() {
+                let mut text = String::new();
+                encode_quoted_attribute_to_string(item.extract::<&str>()?, &mut text);
+                escaped.append(safe_string.call1((text,))?)?;
+            } else if item.get_type().is(safe_string) {
+                escaped.append(item)?;
+            } else {
+                escaped.append(
+                    CONDITIONAL_ESCAPE
+                        .import(py, "django.utils.html", "conditional_escape")?
+                        .call1((item,))?,
+                )?;
+            }
+        }
+        Ok(Some(Content::Py(escaped.into_any())))
+    }
+}
+
+impl ResolveFilter for SafeseqFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let Some(items) = sequence_items(variable.as_ref()) else {
+            return self.django.resolve(variable, py, template, context);
+        };
+        let safe_string = SAFESTRING.import(py, "django.utils.safestring", "SafeString")?;
+        let marked = PyList::empty(py);
+        for item in items {
+            // `mark_safe()`: plain strings become `SafeString`, values with
+            // `__html__` such as `SafeString` stay as they are, and other
+            // items go to Django.
+            if item.is_exact_instance_of::<PyString>() {
+                marked.append(safe_string.call1((item,))?)?;
+            } else if item.get_type().is(safe_string) {
+                marked.append(item)?;
+            } else {
+                marked.append(
+                    MARK_FILTER_SAFE
+                        .import(py, "django.utils.safestring", "mark_safe")?
+                        .call1((item,))?,
+                )?;
+            }
+        }
+        Ok(Some(Content::Py(marked.into_any())))
     }
 }
 

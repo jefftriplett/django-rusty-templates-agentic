@@ -1200,3 +1200,64 @@ def test_string_filters_replaced_builtin(monkeypatch, name, replacement):
     monkeypatch.setitem(register.filters, name, replacement)
     django, rusty = render_both("{{ value|" + name + " }}", {"value": "a b"})
     assert rusty == django == "replacement"
+
+
+class SeqHtml:
+    def __html__(self):
+        return "<i>html</i>"
+
+    def __str__(self):
+        return "<str>"
+
+
+class SeqSafeSubclass(type(mark_safe(""))):
+    pass
+
+
+SEQUENCE_VALUES = [
+    pytest.param(["<a>", "b&c", "'d'"], id="strings"),
+    pytest.param(("<a>", '"q"'), id="tuple"),
+    pytest.param([mark_safe("<b>"), "<i>"], id="safe_item"),
+    pytest.param([SeqSafeSubclass("<s>")], id="safe_subclass"),
+    pytest.param([SeqHtml(), 1, 2.5, None, True], id="objects"),
+    pytest.param([translation.gettext_lazy("Good morning"), "<x>"], id="lazy"),
+    pytest.param([["<n>"], ("<t>",)], id="nested"),
+    pytest.param([], id="empty"),
+    pytest.param("<ab>", id="string"),
+    pytest.param(mark_safe("<ab>"), id="safe_string"),
+    pytest.param(range(3), id="range"),
+    pytest.param({"<k>": 1}, id="dict"),
+    pytest.param(12, id="int"),
+    pytest.param(None, id="none"),
+]
+
+
+@pytest.mark.parametrize("value", SEQUENCE_VALUES)
+@pytest.mark.parametrize("name", ["escapeseq", "safeseq", "make_list"])
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_sequence_filters_match_django(value, name, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "{% for item in value|NAME %}[{{ item }}]{% endfor %}"
+        "[{{ value|NAME|join:', ' }}][{{ value|NAME|first }}][{{ value|NAME|length }}]"
+        "[{{ value|NAME }}][{{ missing|NAME|length }}]"
+        "{% endautoescape %}"
+    ).replace("NAME", name)
+    django, rusty = render_both(source, {"value": value})
+    assert rusty == django
+
+
+def test_sequence_filter_literals():
+    source = (
+        "[{{ 'a<b'|make_list|join:',' }}][{{ 123|make_list|length }}]"
+        "[{{ 'é😀'|make_list|last }}]"
+    )
+    django, rusty = render_both(source, {})
+    assert rusty == django
+
+
+@pytest.mark.parametrize("name", ["escapeseq", "safeseq", "make_list"])
+def test_sequence_filters_replaced_builtin(monkeypatch, name):
+    monkeypatch.setitem(register.filters, name, lambda value: "replacement")
+    django, rusty = render_both("{{ value|" + name + " }}", {"value": ["a"]})
+    assert rusty == django == "replacement"
