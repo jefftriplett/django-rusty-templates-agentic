@@ -1,4 +1,6 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use html_escape::encode_quoted_attribute_to_string;
 use num_traits::{ToPrimitive, Zero};
@@ -13,13 +15,14 @@ use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
-    EscapejsFilter, EscapeseqFilter, ExternalFilter, FilterType, FirstFilter, FloatFormatFilter,
-    ForceEscapeFilter, GetDigitFilter, IriencodeFilter, JoinFilter, Justify, JustifyFilter,
-    LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter, LinenumbersFilter, LowerFilter,
-    MakeListFilter, Phone2numericFilter, PluralizeFilter, PprintFilter, RandomFilter, SafeFilter,
-    SafeseqFilter, SliceArgument, SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter,
-    TruncateCharsFilter, TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter,
-    UrlencodeFilter, WordcountFilter, WordwrapFilter, YesnoFilter, python_int,
+    EscapejsFilter, EscapeseqFilter, ExternalFilter, FilesizeformatFilter, FilterType, FirstFilter,
+    FloatFormatFilter, ForceEscapeFilter, GetDigitFilter, IriencodeFilter, JoinFilter, Justify,
+    JustifyFilter, LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter,
+    LinenumbersFilter, LowerFilter, MakeListFilter, Phone2numericFilter, PluralizeFilter,
+    PprintFilter, RandomFilter, SafeFilter, SafeseqFilter, SliceArgument, SliceFilter,
+    SlugifyFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter,
+    TruncateWordsFilter, UpperFilter, UrlencodeFilter, WordcountFilter, WordwrapFilter,
+    YesnoFilter, python_int,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -140,6 +143,7 @@ impl ResolveFilter for FilterType {
             Self::Safeseq(filter) => filter.resolve(variable, py, template, context),
             Self::Random(filter) => filter.resolve(variable, py, template, context),
             Self::Pprint(filter) => filter.resolve(variable, py, template, context),
+            Self::Filesizeformat(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -2334,6 +2338,148 @@ impl ResolveFilter for PprintFilter {
         Ok(Some(Content::String(ContentString::HtmlUnsafe(
             Cow::Owned(formatted),
         ))))
+    }
+}
+
+static NGETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static GETTEXT_FUNCTION: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+/// The `filesizeformat` units above bytes, as Django's translatable strings.
+const FILE_SIZE_UNITS: [&str; 5] = ["%s KB", "%s MB", "%s GB", "%s TB", "%s PB"];
+
+/// A translated `"%s KB"`-style template.
+#[derive(Clone, Debug)]
+enum UnitTemplate {
+    /// Split around its only `%s`.
+    Split(String, String),
+    /// Any other template, %-formatted by Python.
+    Python(String),
+}
+
+/// `filesizeformat`'s translated strings for one language.
+#[derive(Clone, Debug, Default)]
+pub struct FileSizeStrings {
+    /// `ngettext("%(size)d byte", "%(size)d bytes", n) % {"size": n}`.
+    bytes: HashMap<u64, String>,
+    units: [Option<UnitTemplate>; 5],
+}
+
+impl FileSizeStrings {
+    fn bytes(&mut self, py: Python<'_>, count: u64) -> PyResult<&str> {
+        Ok(match self.bytes.entry(count) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let size = PyDict::new(py);
+                size.set_item("size", count)?;
+                let text = NGETTEXT
+                    .import(py, "django.utils.translation", "ngettext")?
+                    .call1(("%(size)d byte", "%(size)d bytes", count))?
+                    .rem(size)?;
+                entry.insert(text.extract()?)
+            }
+        })
+    }
+
+    fn unit(&mut self, py: Python<'_>, index: usize, number: &str) -> PyResult<String> {
+        let template = match &mut self.units[index] {
+            Some(template) => template,
+            slot @ None => {
+                let text: String = GETTEXT_FUNCTION
+                    .import(py, "django.utils.translation", "gettext")?
+                    .call1((FILE_SIZE_UNITS[index],))?
+                    .extract()?;
+                slot.insert(match text.split_once("%s") {
+                    Some((before, after)) if text.matches('%').count() == 1 => {
+                        UnitTemplate::Split(before.to_string(), after.to_string())
+                    }
+                    _ => UnitTemplate::Python(text),
+                })
+            }
+        };
+        Ok(match template {
+            UnitTemplate::Split(before, after) => format!("{before}{number}{after}"),
+            UnitTemplate::Python(text) => PyString::new(py, text).rem(number)?.extract()?,
+        })
+    }
+}
+
+/// Python's `round(n / divisor, 1)` for `n < 2⁵³`, where the division is
+/// exact: the nearest tenth, ties to even. Returns the integer part and the
+/// tenths digit.
+fn round_tenths(n: u64, divisor: u64) -> (u64, u64) {
+    let scaled = n * 10;
+    let mut tenths = scaled / divisor;
+    let remainder = scaled % divisor;
+    if remainder * 2 > divisor || (remainder * 2 == divisor && tenths % 2 == 1) {
+        tenths += 1;
+    }
+    (tenths / 10, tenths % 10)
+}
+
+impl ResolveFilter for FilesizeformatFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        // Django converts with `int()`; failures give "0 bytes", left to it.
+        // Above 2⁵³, `bytes / unit` isn't exact.
+        let Some(bytes) = variable.as_ref().and_then(integer_argument) else {
+            return self.django.resolve(variable, py, template, context);
+        };
+        let size = bytes.unsigned_abs();
+        if size >= 1 << 53 {
+            return self.django.resolve(variable, py, template, context);
+        }
+        let safe = match &variable {
+            Some(Content::String(ContentString::HtmlSafe(_))) => true,
+            Some(Content::Py(value)) => {
+                value.is_instance(SAFEDATA.import(py, "django.utils.safestring", "SafeData")?)?
+            }
+            _ => false,
+        };
+        let text = if size < 1 << 10 {
+            let Some(strings) = context
+                .file_size_strings
+                .get_or_try_init(py, |_| Ok(FileSizeStrings::default()))?
+            else {
+                return self.django.resolve(variable, py, template, context);
+            };
+            strings.bytes(py, size)?.to_string()
+        } else {
+            let index = (63 - size.leading_zeros() as usize) / 10 - 1;
+            let index = index.min(FILE_SIZE_UNITS.len() - 1);
+            let (integer, tenth) = round_tenths(size, 1 << (10 * (index + 1)));
+            // `formats.number_format(value, 1)`, localized like `floatformat`.
+            let Some(Some(format)) = context
+                .float_number_format
+                .get_or_try_init(py, |language| FloatNumberFormat::new(py, language))?
+            else {
+                return self.django.resolve(variable, py, template, context);
+            };
+            let number = format.format(&Rounded {
+                sign: Sign::Plus,
+                integer: integer.to_string(),
+                fraction: tenth.to_string(),
+            });
+            let Some(strings) = context
+                .file_size_strings
+                .get_or_try_init(py, |_| Ok(FileSizeStrings::default()))?
+            else {
+                return self.django.resolve(variable, py, template, context);
+            };
+            strings.unit(py, index, &number)?
+        };
+        // `"-%s" % value` for negative sizes, then `avoid_wrapping()`.
+        let sign = if bytes < 0 { "-" } else { "" };
+        let text = format!("{sign}{}", text.replace(' ', "\u{a0}"));
+        Ok(Some(Content::String(if safe {
+            ContentString::HtmlSafe(Cow::Owned(text))
+        } else {
+            ContentString::HtmlUnsafe(Cow::Owned(text))
+        })))
     }
 }
 

@@ -1612,3 +1612,87 @@ def test_active_language_with_thread_critical_local(monkeypatch):
         django, rusty = render_active_language()
     assert rusty == django
     assert "1234,57" in rusty
+
+
+FILESIZE_VALUES = [
+    0,
+    1,
+    2,
+    5,
+    1023,
+    1024,
+    1025,
+    1280,  # 1.25 KB, a tie that rounds to even
+    1331,
+    1536,
+    10239,
+    1048575,  # rounds up to 1024.0 KB
+    1048576,
+    123456789,
+    2**30 * 1.5,
+    2**40 * 3 + 2**39,
+    2**50 * 7,
+    2**53 - 1,
+    2**53,
+    2**60,
+    -1,
+    -1536,
+    -(2**40),
+    True,
+    1536.9,
+    "2048",
+    " 2048 ",
+    "1_024",
+    "x",
+    "",
+    None,
+    Decimal("1536"),
+    [1],
+]
+
+
+@pytest.mark.parametrize("language", ["en", "de", "fr", "he", "ckb"])
+@pytest.mark.parametrize("thousand_separator", [False, True])
+def test_filesizeformat_matches_django(settings, language, thousand_separator):
+    settings.USE_THOUSAND_SEPARATOR = thousand_separator
+    source = (
+        "{% for value in values %}[{{ value|filesizeformat }}]{% endfor %}"
+        "[{{ missing|filesizeformat }}][{{ safe|filesizeformat }}]"
+        "[{{ 2048|filesizeformat }}][{{ '5000'|filesizeformat }}]"
+    )
+    context = {"values": FILESIZE_VALUES, "safe": mark_safe("4096")}
+    with translation.override(language):
+        django, rusty = render_both(source, context)
+    assert rusty == django
+
+
+def test_filesizeformat_every_tenth_matches_django():
+    values = list(range(1000, 1100)) + [1024 * n // 20 for n in range(20, 21000, 7)]
+    source = "{% for value in values %}[{{ value|filesizeformat }}]{% endfor %}"
+    django, rusty = render_both(source, {"values": values})
+    assert rusty == django
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["%s KiB", "KB: %s", "%s", "%s %% KB"],
+    ids=["suffix", "prefix", "bare", "escaped_percent"],
+)
+def test_filesizeformat_translated_units(monkeypatch, text):
+    gettext = translation._trans.gettext
+
+    def translate(message):
+        if message == "%s KB":
+            return text
+        return gettext(message)
+
+    monkeypatch.setattr(translation._trans, "gettext", translate)
+    source = "[{{ 2048|filesizeformat }}][{{ 1536|filesizeformat }}]"
+    django, rusty = render_both(source, {})
+    assert rusty == django
+
+
+def test_filesizeformat_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "filesizeformat", lambda value: "replacement")
+    django, rusty = render_both("{{ value|filesizeformat }}", {"value": 2048})
+    assert rusty == django == "replacement"

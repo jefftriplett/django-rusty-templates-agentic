@@ -49,6 +49,7 @@ pub enum FilterType {
     Safeseq(SafeseqFilter),
     Random(RandomFilter),
     Pprint(PprintFilter),
+    Filesizeformat(FilesizeformatFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -403,6 +404,13 @@ pub struct RandomFilter {
 /// aren't safe strings. Safe strings call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PprintFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `filesizeformat`, computed natively for values `int()` converts,
+/// below 2⁵³. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilesizeformatFilter {
     pub django: DjangoFilter,
 }
 
