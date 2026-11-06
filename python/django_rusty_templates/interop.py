@@ -6,7 +6,6 @@ from django.template.backends.django import copy_exception
 from django.template.context import make_context
 from django.template import defaultfilters
 from django.template.base import (
-    DebugLexer,
     FilterExpression,
     Node,
     NodeList,
@@ -24,6 +23,7 @@ from django.template.library import InclusionNode, SimpleNode
 
 from . import _django_get_template
 from .django_rusty_templates import Template as NativeTemplate
+from .diagnostics import allows_multiline_tags, make_lexer
 from .inheritance import NativeExtendsNode
 
 
@@ -149,7 +149,10 @@ class NativeRegionNode(Node):
         return next(
             (
                 token
-                for token in DebugLexer(self.template_source).tokenize()
+                for token in make_lexer(
+                    self.template_source,
+                    allow_multiline_tags=allows_multiline_tags(self.engine),
+                ).tokenize()
                 if token.position[0] <= position < token.position[1]
             ),
             None,
@@ -158,7 +161,9 @@ class NativeRegionNode(Node):
 
 class NativeParser(Parser):
     def __init__(self, source, engine, origin, lazy=False):
-        tokens = DebugLexer(source).tokenize()
+        tokens = make_lexer(
+            source, allow_multiline_tags=allows_multiline_tags(engine)
+        ).tokenize()
         for token in tokens:
             token._native_position = token.position
             if not engine.debug:

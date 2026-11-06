@@ -1,8 +1,6 @@
 """Compatible inspection nodes; these never replace the native rendering tree."""
 
 from django.template.base import (
-    DebugLexer,
-    Lexer,
     NodeList,
     Parser,
     TextNode,
@@ -10,9 +8,13 @@ from django.template.base import (
     VariableNode,
 )
 
+from .diagnostics import make_lexer
 
-def build_nodelist(source, libraries, builtins, origin, debug):
-    tokens = (DebugLexer(source) if debug else Lexer(source)).tokenize()
+
+def build_nodelist(
+    source, libraries, builtins, origin, debug, allow_multiline_tags=True
+):
+    tokens = make_lexer(source, debug, allow_multiline_tags).tokenize()
     parser = Parser(tokens, libraries, builtins, origin)
     # Stateful tags and library compilers require Django's complete inspection
     # grammar. Keep this compatibility parse explicit and cached by Template.

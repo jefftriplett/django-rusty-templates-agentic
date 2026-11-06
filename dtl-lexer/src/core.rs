@@ -74,8 +74,10 @@ pub struct Lexer<'t> {
     template: TemplateString<'t>,
     rest: &'t str,
     byte: usize,
+    /// The opening tag of the `verbatim` (or 6.2 `comment`) block being lexed.
     verbatim: Option<&'t str>,
     modern_raw_blocks: bool,
+    multiline_tags: bool,
 }
 
 impl<'t> Lexer<'t> {
@@ -86,11 +88,22 @@ impl<'t> Lexer<'t> {
             byte: 0,
             verbatim: None,
             modern_raw_blocks: false,
+            multiline_tags: false,
         }
     }
 
+    /// Django 6.2 lexes `comment` and `verbatim` contents as raw text up to
+    /// the closing tag, which may span lines.
     pub fn with_modern_raw_blocks(mut self, enabled: bool) -> Self {
         self.modern_raw_blocks = enabled;
+        self
+    }
+
+    /// Django 6.2 lets `{% ... %}` tags span lines unless the engine sets
+    /// the transitional `allow_multiline_tags` option to `False`.
+    /// Variables and comments still end at a newline.
+    pub fn with_multiline_tags(mut self, enabled: bool) -> Self {
+        self.multiline_tags = enabled;
         self
     }
 
@@ -119,6 +132,14 @@ impl<'t> Lexer<'t> {
                     closing?
                 }
             };
+            // Callers already rejected a token at the start; text is never
+            // empty, so lexing always moves forward.
+            if index == 0 {
+                return None;
+            }
+            if kind == 1 && self.multiline_tags {
+                return Some(index);
+            }
             if next_newline.is_none_or(|newline| newline < index) {
                 next_newline = self.rest[index..closing]
                     .find('\n')
@@ -161,8 +182,8 @@ impl<'t> Lexer<'t> {
         let Some(n) = self.rest.find(end_str) else {
             return self.lex_text();
         };
-        // This can be removed if https://code.djangoproject.com/ticket/35899 lands
-        if self.rest[..n].contains('\n') {
+        let multiline = matches!(end_tag, EndTag::Tag) && self.multiline_tags;
+        if !multiline && self.rest[..n].contains('\n') {
             return self.lex_text();
         }
         let len = n + end_str.len();
@@ -177,9 +198,29 @@ impl<'t> Lexer<'t> {
         }
     }
 
+    fn closes_verbatim(&self, inner: &str, verbatim: &str) -> bool {
+        if verbatim.split_whitespace().next() == Some("comment") {
+            return inner == "endcomment";
+        }
+        if !self.multiline_tags {
+            return inner.strip_prefix("end") == Some(verbatim);
+        }
+        // Django matches each word of a named `verbatim` with any whitespace
+        // between them, so `{% endverbatim a b %}` closes `{% verbatim a  b %}`.
+        let Some(mut rest) = inner.strip_prefix("end") else {
+            return false;
+        };
+        for bit in verbatim.split_whitespace() {
+            rest = match rest.strip_prefix(bit) {
+                Some(rest) => rest.trim_start(),
+                None => return false,
+            };
+        }
+        rest.is_empty()
+    }
+
     fn lex_verbatim(&mut self, verbatim: &'t str) -> Token {
         let verbatim = verbatim.trim();
-        self.verbatim = None;
 
         let mut rest = self.rest;
         let mut index = 0;
@@ -191,10 +232,12 @@ impl<'t> Lexer<'t> {
             let Some(end_tag) = rest.find("%}") else {
                 return self.lex_text_to_end();
             };
-            let inner = &rest[2..end_tag].trim();
-            let multiline = rest[..end_tag].contains('\n');
+            let inner = rest[2..end_tag].trim();
+            // Django 6.2 allows any whitespace, including newlines, around
+            // the closing tag's name. Earlier versions reject newlines.
+            let multiline = !self.modern_raw_blocks && rest[..end_tag].contains('\n');
             // Check we have the right endverbatim tag
-            if multiline || inner.strip_prefix("end") != Some(verbatim) {
+            if multiline || !self.closes_verbatim(inner, verbatim) {
                 let consumed = if self.modern_raw_blocks || multiline {
                     // A literal opener must not hide a later valid closing tag.
                     2
@@ -209,12 +252,15 @@ impl<'t> Lexer<'t> {
             index += start_tag;
             if index == 0 {
                 // Return the endverbatim tag since we have no text
+                self.verbatim = None;
                 let tag_len = end_tag + "%}".len();
                 let at = (self.byte, tag_len);
                 self.byte += tag_len;
                 self.rest = &self.rest[tag_len..];
                 return Token::tag(at);
             } else {
+                // Stay in the raw block so the next call returns the closing
+                // tag, even one the normal lexer would treat as text.
                 self.rest = &self.rest[index..];
                 let at = (self.byte, index);
                 self.byte += index;
@@ -242,7 +288,16 @@ impl Iterator for Lexer<'_> {
                     } = tag
                     {
                         let verbatim = tag.content(self.template).trim();
-                        if verbatim == "verbatim" || verbatim.starts_with("verbatim ") {
+                        // Django 6.2 also keeps `comment` contents as raw text.
+                        let opens_verbatim = if self.modern_raw_blocks {
+                            matches!(
+                                verbatim.split_whitespace().next(),
+                                Some("verbatim" | "comment")
+                            )
+                        } else {
+                            verbatim == "verbatim" || verbatim.starts_with("verbatim ")
+                        };
+                        if opens_verbatim {
                             self.verbatim = Some(verbatim)
                         }
                     }
@@ -559,6 +614,118 @@ mod tests {
         assert_eq!(
             contents(template, tokens),
             vec![" verbatim ", "Don't end verbatim"]
+        );
+    }
+
+    fn lex_multiline(template: &str, multiline_tags: bool) -> Vec<(TokenType, &str)> {
+        Lexer::new(template.into())
+            .with_modern_raw_blocks(true)
+            .with_multiline_tags(multiline_tags)
+            .map(|token| {
+                let content = token.content(template.into());
+                (token.token_type, content)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_multiline_block_tag() {
+        assert_eq!(
+            lex_multiline("a{% if\n x\n%}b{{ y\n }}{# z\n #}", true),
+            vec![
+                (TokenType::Text, "a"),
+                (TokenType::Tag, " if\n x\n"),
+                (TokenType::Text, "b{{ y\n }}{# z\n #}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_multiline_block_tag_disabled() {
+        assert_eq!(
+            lex_multiline("a{% if\n x\n%}b", false),
+            vec![(TokenType::Text, "a{% if\n x\n%}b")]
+        );
+    }
+
+    #[test]
+    fn test_multiline_tag_after_literal_brace() {
+        assert_eq!(
+            lex_multiline("{{% for\n x in y %}}", true),
+            vec![
+                (TokenType::Text, "{"),
+                (TokenType::Tag, " for\n x in y "),
+                (TokenType::Text, "}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_multiline_verbatim_named_closing_tag() {
+        assert_eq!(
+            lex_multiline("{% verbatim a  b %}x{%\n endverbatim\n a b\n%}", true),
+            vec![
+                (TokenType::Tag, " verbatim a  b "),
+                (TokenType::Text, "x"),
+                (TokenType::Tag, "\n endverbatim\n a b\n"),
+            ]
+        );
+        // Without multiline tags the name must keep its exact spacing.
+        assert_eq!(
+            lex_multiline(
+                "{% verbatim a  b %}{% endverbatim a b %}{% endverbatim a  b %}",
+                false
+            ),
+            vec![
+                (TokenType::Tag, " verbatim a  b "),
+                (TokenType::Text, "{% endverbatim a b %}"),
+                (TokenType::Tag, " endverbatim a  b "),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_multiline_raw_closing_tag_without_multiline_tags() {
+        assert_eq!(
+            lex_multiline("{% verbatim %}x{%\nendverbatim\n%}", false),
+            vec![
+                (TokenType::Tag, " verbatim "),
+                (TokenType::Text, "x"),
+                (TokenType::Tag, "\nendverbatim\n"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_raw_comment_block() {
+        assert_eq!(
+            lex_multiline("{%comment%}{% hidden{%endcomment%}after", true),
+            vec![
+                (TokenType::Tag, "comment"),
+                (TokenType::Text, "{% hidden"),
+                (TokenType::Tag, "endcomment"),
+                (TokenType::Text, "after"),
+            ]
+        );
+        assert_eq!(
+            lex_multiline("{% comment %}{% endcomment x %}{% endcomment %}", true),
+            vec![
+                (TokenType::Tag, " comment "),
+                (TokenType::Text, "{% endcomment x %}"),
+                (TokenType::Tag, " endcomment "),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_comment_is_not_raw_before_django_6_2() {
+        let template = "{% comment %}{% x %}{% endcomment %}";
+        let tokens: Vec<_> = Lexer::new(template.into()).collect();
+        assert_eq!(tokens.len(), 3);
+        assert!(
+            tokens
+                .iter()
+                .all(|token| token.token_type == TokenType::Tag)
         );
     }
 
