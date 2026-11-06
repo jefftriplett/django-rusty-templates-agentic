@@ -1554,7 +1554,18 @@ impl Include {
                 rendered
             }
             true => {
-                let mut inner_context = HashMap::new();
+                // Django's `Context.new()` starts from the built-in names.
+                let mut inner_context = HashMap::from([
+                    (
+                        "True".to_string(),
+                        PyBool::new(py, true).to_owned().into_any().unbind(),
+                    ),
+                    (
+                        "False".to_string(),
+                        PyBool::new(py, false).to_owned().into_any().unbind(),
+                    ),
+                    ("None".to_string(), py.None()),
+                ]);
                 for (at, element) in &self.kwargs {
                     let key = template.content(*at).to_string();
                     if let Some(value) = element.resolve(

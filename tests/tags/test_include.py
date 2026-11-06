@@ -973,3 +973,27 @@ def test_include_broken_template(assert_render_error):
         rusty_message=rusty_message,
         exception=ZeroDivisionError,
     )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{% include 'builtins.txt' only %}",
+        "{% include 'builtins.txt' with True='kwarg' only %}",
+        "{% include 'builtins.txt' with name='x' only %}",
+        "{% include 'builtins.txt' %}",
+    ],
+)
+@pytest.mark.parametrize("context", [{}, {"True": "caller", "name": "caller"}])
+def test_include_only_keeps_builtins(source, context):
+    from django.template import Context, Engine as DjangoEngine
+
+    from django_rusty_templates import Engine
+
+    templates = {
+        "builtins.txt": "<{{ True }}|{{ False }}|{{ None }}|{{ name }}|"
+        "{% if missing is None %}none{% endif %}>"
+    }
+    options = {"loaders": [("django.template.loaders.locmem.Loader", templates)]}
+    expected = DjangoEngine(**options).from_string(source).render(Context(context))
+    assert Engine(**options).from_string(source).render(context) == expected
