@@ -85,6 +85,7 @@ use crate::filters::UrlizetruncFilter;
 use crate::filters::WordcountFilter;
 use crate::filters::WordwrapFilter;
 use crate::filters::YesnoFilter;
+use crate::filters::{LanguageField, LanguageInfoFilter};
 use dtl_lexer::common::{LexerError, get_all_at, text_content_at, translated_text_content_at};
 use dtl_lexer::core::{Lexer, TokenType};
 use dtl_lexer::tag::autoescape::{AutoescapeEnabled, AutoescapeError, lex_autoescape_argument};
@@ -233,52 +234,76 @@ fn is_django_filter(py: Python<'_>, filter: &Py<PyAny>, name: &str) -> bool {
 /// A filter from a loaded library. Django's own `{% load tz %}` filters get a
 /// native port; anything else, including replacements registered under the
 /// same names, calls the Python function.
+/// Finds which of `module`'s functions, if any, `filter` is.
+fn stock_filter<T: Copy>(
+    py: Python<'_>,
+    filter: &Bound<'_, PyAny>,
+    module: &str,
+    names: &[(&str, T)],
+) -> Option<T> {
+    let module = py.import(module).ok()?;
+    names
+        .iter()
+        .find(|(name, _)| module.getattr(*name).is_ok_and(|django| django.is(filter)))
+        .map(|(_, kind)| *kind)
+}
+
+/// A library filter, natively handled when it is one of Django's own
+/// `{% load tz %}`, `{% load l10n %}` or `{% load i18n %}` filters.
 fn external_filter(py: Python<'_>, filter: Py<PyAny>, argument: Option<Argument>) -> FilterType {
     let bound = filter.bind(py);
-    let conversion = py
-        .import(intern!(py, "django.templatetags.tz"))
-        .ok()
-        .and_then(|module| {
-            [
-                ("localtime", TzConversion::Localtime),
-                ("utc", TzConversion::Utc),
-                ("do_timezone", TzConversion::Timezone),
-            ]
-            .into_iter()
-            .find(|(name, _)| module.getattr(*name).is_ok_and(|django| django.is(bound)))
-            .map(|(_, conversion)| conversion)
-        });
-    match conversion {
-        Some(conversion) => FilterType::Tz(TzFilter {
+    let tz = stock_filter(
+        py,
+        bound,
+        "django.templatetags.tz",
+        &[
+            ("localtime", TzConversion::Localtime),
+            ("utc", TzConversion::Utc),
+            ("do_timezone", TzConversion::Timezone),
+        ],
+    );
+    let l10n = || {
+        stock_filter(
+            py,
+            bound,
+            "django.templatetags.l10n",
+            &[("localize", true), ("unlocalize", false)],
+        )
+    };
+    let i18n = || {
+        stock_filter(
+            py,
+            bound,
+            "django.templatetags.i18n",
+            &[
+                ("language_name", LanguageField::Name),
+                ("language_name_local", LanguageField::NameLocal),
+                ("language_name_translated", LanguageField::NameTranslated),
+                ("language_bidi", LanguageField::Bidi),
+            ],
+        )
+    };
+    let django = || DjangoFilter {
+        filter: Gc::new(filter.clone_ref(py)),
+        argument: argument.clone(),
+    };
+    if let Some(conversion) = tz {
+        FilterType::Tz(TzFilter {
             conversion,
-            django: DjangoFilter {
-                filter: Gc::new(filter),
-                argument,
-            },
-        }),
-        None => {
-            let localize = py
-                .import(intern!(py, "django.templatetags.l10n"))
-                .ok()
-                .and_then(|module| {
-                    [("localize", true), ("unlocalize", false)]
-                        .into_iter()
-                        .find(|(name, _)| {
-                            module.getattr(*name).is_ok_and(|django| django.is(bound))
-                        })
-                        .map(|(_, localize)| localize)
-                });
-            match localize {
-                Some(localize) => FilterType::L10n(L10nFilter {
-                    localize,
-                    django: DjangoFilter {
-                        filter: Gc::new(filter),
-                        argument,
-                    },
-                }),
-                None => FilterType::External(ExternalFilter::new(filter, argument)),
-            }
-        }
+            django: django(),
+        })
+    } else if let Some(localize) = l10n() {
+        FilterType::L10n(L10nFilter {
+            localize,
+            django: django(),
+        })
+    } else if let Some(field) = i18n() {
+        FilterType::LanguageInfo(LanguageInfoFilter {
+            field,
+            django: django(),
+        })
+    } else {
+        FilterType::External(ExternalFilter::new(filter, argument))
     }
 }
 

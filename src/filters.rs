@@ -24,6 +24,7 @@ pub enum FilterType {
     FloatFormat(FloatFormatFilter),
     Tz(TzFilter),
     L10n(L10nFilter),
+    LanguageInfo(LanguageInfoFilter),
     ForceEscape(ForceEscapeFilter),
     Join(JoinFilter),
     Justify(JustifyFilter),
@@ -559,6 +560,27 @@ pub struct TzFilter {
 pub struct L10nFilter {
     /// `true` for `localize`, `false` for `unlocalize`.
     pub localize: bool,
+    pub django: DjangoFilter,
+}
+
+/// Which field of `get_language_info(code)` an `{% load i18n %}` filter reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LanguageField {
+    /// `language_name`.
+    Name,
+    /// `language_name_local`.
+    NameLocal,
+    /// `language_name_translated`: `gettext` of the English name.
+    NameTranslated,
+    /// `language_bidi`.
+    Bidi,
+}
+
+/// Django's `language_name*` and `language_bidi` filters, answered from a
+/// per-render cache of `get_language_info`. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LanguageInfoFilter {
+    pub field: LanguageField,
     pub django: DjangoFilter,
 }
 
