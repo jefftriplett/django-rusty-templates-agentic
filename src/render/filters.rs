@@ -20,9 +20,9 @@ use crate::filters::{
     JustifyFilter, LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter,
     LinenumbersFilter, LowerFilter, MakeListFilter, Phone2numericFilter, PluralizeFilter,
     PprintFilter, RandomFilter, SafeFilter, SafeseqFilter, SliceArgument, SliceFilter,
-    SlugifyFilter, StriptagsFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter,
-    TruncateCharsHtmlFilter, TruncateWordsFilter, UnorderedListFilter, UpperFilter,
-    UrlencodeFilter, WordcountFilter, WordwrapFilter, YesnoFilter, python_int,
+    SlugifyFilter, StringformatFilter, StriptagsFilter, TimesinceFilter, TitleFilter,
+    TruncateCharsFilter, TruncateCharsHtmlFilter, TruncateWordsFilter, UnorderedListFilter,
+    UpperFilter, UrlencodeFilter, WordcountFilter, WordwrapFilter, YesnoFilter, python_int,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -146,6 +146,7 @@ impl ResolveFilter for FilterType {
             Self::Filesizeformat(filter) => filter.resolve(variable, py, template, context),
             Self::UnorderedList(filter) => filter.resolve(variable, py, template, context),
             Self::Striptags(filter) => filter.resolve(variable, py, template, context),
+            Self::Stringformat(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -2850,6 +2851,255 @@ impl ResolveFilter for StriptagsFilter {
             return Ok(Some(text.into_content(stripped, context)));
         }
         self.django.resolve(variable, py, template, context)
+    }
+}
+
+/// How `%` formatting pads to the width.
+#[derive(Default, PartialEq, Eq)]
+enum FormatAlign {
+    #[default]
+    Right,
+    /// The `-` flag, which overrides `0`.
+    Left,
+    /// The `0` flag, for numbers.
+    Zeros,
+}
+
+/// What `%` formatting puts before a positive number.
+#[derive(Default)]
+enum PositiveSign {
+    #[default]
+    Nothing,
+    /// The ` ` flag.
+    Space,
+    /// The `+` flag, which overrides ` `.
+    Plus,
+}
+
+/// A `%` specifier such as `05d` or `-10s`, as `stringformat` takes it.
+#[derive(Default)]
+struct FormatSpec {
+    align: FormatAlign,
+    positive: PositiveSign,
+    alternate: bool,
+    width: usize,
+    precision: Option<usize>,
+    conversion: u8,
+}
+
+impl FormatSpec {
+    /// Parses one complete specifier, or returns `None` for anything else,
+    /// such as mapping keys, `*` widths or trailing text.
+    fn parse(spec: &str) -> Option<Self> {
+        let bytes = spec.as_bytes();
+        let mut result = Self::default();
+        let mut index = 0;
+        while let Some(&flag) = bytes.get(index) {
+            match flag {
+                b'-' => result.align = FormatAlign::Left,
+                b'0' if result.align == FormatAlign::Right => result.align = FormatAlign::Zeros,
+                b'0' => {}
+                b'+' => result.positive = PositiveSign::Plus,
+                b' ' if matches!(result.positive, PositiveSign::Nothing) => {
+                    result.positive = PositiveSign::Space;
+                }
+                b' ' => {}
+                b'#' => result.alternate = true,
+                _ => break,
+            }
+            index += 1;
+        }
+        let digits = |index: &mut usize| -> Option<usize> {
+            let start = *index;
+            while bytes.get(*index).is_some_and(u8::is_ascii_digit) {
+                *index += 1;
+            }
+            let text = spec.get(start..*index)?;
+            // Keep widths small; Django's formatting handles the rest.
+            if text.len() > 3 {
+                return None;
+            }
+            Some(text.parse().unwrap_or(0))
+        };
+        result.width = digits(&mut index)?;
+        if bytes.get(index) == Some(&b'.') {
+            index += 1;
+            result.precision = Some(digits(&mut index)?);
+        }
+        result.conversion = *bytes.get(index)?;
+        (index + 1 == bytes.len()).then_some(result)
+    }
+
+    /// Pads `body`, whose sign and prefix are `sign`, to the width.
+    fn pad(&self, sign: &str, body: &str, numeric: bool) -> String {
+        let length = sign.chars().count() + body.chars().count();
+        let fill = self.width.saturating_sub(length);
+        let mut output = String::with_capacity(length + fill);
+        match self.align {
+            FormatAlign::Left => {
+                output.push_str(sign);
+                output.push_str(body);
+                output.extend(std::iter::repeat_n(' ', fill));
+            }
+            FormatAlign::Zeros if numeric => {
+                output.push_str(sign);
+                output.extend(std::iter::repeat_n('0', fill));
+                output.push_str(body);
+            }
+            FormatAlign::Zeros | FormatAlign::Right => {
+                output.extend(std::iter::repeat_n(' ', fill));
+                output.push_str(sign);
+                output.push_str(body);
+            }
+        }
+        output
+    }
+
+    const fn sign(&self, negative: bool) -> &'static str {
+        if negative {
+            return "-";
+        }
+        match self.positive {
+            PositiveSign::Nothing => "",
+            PositiveSign::Space => " ",
+            PositiveSign::Plus => "+",
+        }
+    }
+
+    fn format_text(&self, text: &str) -> Option<String> {
+        if self.conversion != b's' {
+            return None;
+        }
+        let text = match self.precision {
+            Some(precision) => match text.char_indices().nth(precision) {
+                Some((end, _)) => &text[..end],
+                None => text,
+            },
+            None => text,
+        };
+        Some(self.pad("", text, false))
+    }
+
+    fn format_int(&self, value: i64) -> Option<String> {
+        let magnitude = value.unsigned_abs();
+        let (digits, prefix) = match self.conversion {
+            b's' => return self.format_text(&value.to_string()),
+            b'd' | b'i' => (magnitude.to_string(), ""),
+            b'x' => (format!("{magnitude:x}"), "0x"),
+            b'X' => (format!("{magnitude:X}"), "0X"),
+            b'o' => (format!("{magnitude:o}"), "0o"),
+            b'f' | b'F' | b'e' | b'E' => {
+                // Python converts to float, which is exact up to 2**53.
+                return if magnitude <= 1 << 53 {
+                    #[allow(clippy::cast_precision_loss)]
+                    self.format_float(value as f64)
+                } else {
+                    None
+                };
+            }
+            _ => return None,
+        };
+        let digits = match self.precision {
+            Some(_) if self.align == FormatAlign::Zeros => return None,
+            Some(precision) if precision > digits.len() => {
+                format!("{}{digits}", "0".repeat(precision - digits.len()))
+            }
+            _ => digits,
+        };
+        let prefix = if self.alternate && !prefix.is_empty() {
+            prefix
+        } else {
+            ""
+        };
+        let sign = format!("{}{prefix}", self.sign(value < 0));
+        Some(self.pad(&sign, &digits, true))
+    }
+
+    fn format_float(&self, value: f64) -> Option<String> {
+        if !value.is_finite() || self.alternate {
+            return None;
+        }
+        let precision = self.precision.unwrap_or(6);
+        let magnitude = value.abs();
+        let body = match self.conversion {
+            b'f' | b'F' => format!("{magnitude:.precision$}"),
+            b'e' | b'E' => {
+                let formatted = format!("{magnitude:.precision$e}");
+                let (mantissa, exponent) = formatted.split_once('e')?;
+                let exponent: i32 = exponent.parse().ok()?;
+                let sign = if exponent < 0 { '-' } else { '+' };
+                let marker = if self.conversion == b'E' { 'E' } else { 'e' };
+                format!("{mantissa}{marker}{sign}{:02}", exponent.unsigned_abs())
+            }
+            _ => return None,
+        };
+        Some(self.pad(self.sign(value.is_sign_negative()), &body, true))
+    }
+}
+
+/// The argument of `stringformat` as text, when it is a string.
+fn format_spec_text<'a>(argument: &'a Content<'_, '_>) -> Option<&'a str> {
+    match argument {
+        Content::String(
+            ContentString::String(text)
+            | ContentString::HtmlSafe(text)
+            | ContentString::HtmlUnsafe(text),
+        ) => Some(text),
+        Content::Py(object) if object.is_exact_instance_of::<PyString>() => {
+            object.cast::<PyString>().ok()?.to_str().ok()
+        }
+        _ => None,
+    }
+}
+
+impl ResolveFilter for StringformatFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        if let Some(spec) = argument
+            .value()
+            .and_then(format_spec_text)
+            .and_then(FormatSpec::parse)
+        {
+            let number = |output: Option<String>| {
+                output.map(|output| Content::String(ContentString::String(Cow::Owned(output))))
+            };
+            let formatted = match &variable {
+                Some(Content::Int(value)) => number(
+                    i64::try_from(value)
+                        .ok()
+                        .and_then(|value| spec.format_int(value)),
+                ),
+                Some(Content::Float(value)) => number(spec.format_float(*value)),
+                Some(Content::Py(value)) if value.is_exact_instance_of::<PyInt>() => number(
+                    value
+                        .extract::<i64>()
+                        .ok()
+                        .and_then(|value| spec.format_int(value)),
+                ),
+                Some(Content::Py(value)) if value.is_exact_instance_of::<PyFloat>() => number(
+                    value
+                        .extract::<f64>()
+                        .ok()
+                        .and_then(|value| spec.format_float(value)),
+                ),
+                _ => match Text::from_variable(variable.as_ref(), py)? {
+                    Some(text) => spec
+                        .format_text(text.as_str())
+                        .map(|output| text.into_content(output, context)),
+                    None => None,
+                },
+            };
+            if let Some(formatted) = formatted {
+                return Ok(Some(formatted));
+            }
+        }
+        self.django.call(variable, argument, py, context)
     }
 }
 

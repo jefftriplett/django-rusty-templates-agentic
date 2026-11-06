@@ -63,6 +63,7 @@ use crate::filters::SafeseqFilter;
 use crate::filters::SliceArgument;
 use crate::filters::SliceFilter;
 use crate::filters::SlugifyFilter;
+use crate::filters::StringformatFilter;
 use crate::filters::StriptagsFilter;
 use crate::filters::TimesinceFilter;
 use crate::filters::TitleFilter;
@@ -422,6 +423,11 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::Striptags(StriptagsFilter { django })
+                }
+                BuiltinFilter::Stringformat
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Stringformat(StringformatFilter { django })
                 }
                 _ => FilterType::Django(django),
             };
