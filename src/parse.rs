@@ -49,6 +49,7 @@ use crate::filters::LinebreaksFilter;
 use crate::filters::LinebreaksbrFilter;
 use crate::filters::LinenumbersFilter;
 use crate::filters::LowerFilter;
+use crate::filters::PluralizeFilter;
 use crate::filters::SafeFilter;
 use crate::filters::SliceArgument;
 use crate::filters::SliceFilter;
@@ -344,6 +345,11 @@ impl Filter {
                         django,
                         until: true,
                     })
+                }
+                BuiltinFilter::Pluralize
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Pluralize(PluralizeFilter { django })
                 }
                 _ => FilterType::Django(django),
             };

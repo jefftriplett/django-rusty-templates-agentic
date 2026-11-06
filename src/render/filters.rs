@@ -5,7 +5,9 @@ use num_traits::{ToPrimitive, Zero};
 use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDateTime, PyFloat, PyInt, PyList, PySlice, PyString, PyTuple, PyType};
+use pyo3::types::{
+    PyBool, PyDateTime, PyDict, PyFloat, PyInt, PyList, PySlice, PyString, PyTuple, PyType,
+};
 
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{
@@ -13,9 +15,10 @@ use crate::filters::{
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
     EscapejsFilter, ExternalFilter, FilterType, FirstFilter, FloatFormatFilter, ForceEscapeFilter,
     JoinFilter, Justify, JustifyFilter, LastFilter, LengthFilter, LinebreaksFilter,
-    LinebreaksbrFilter, LinenumbersFilter, LowerFilter, SafeFilter, SliceArgument, SliceFilter,
-    SlugifyFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter,
-    TruncateWordsFilter, UpperFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
+    LinebreaksbrFilter, LinenumbersFilter, LowerFilter, PluralizeFilter, SafeFilter, SliceArgument,
+    SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter,
+    TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter, WordcountFilter, WordwrapFilter,
+    YesnoFilter,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -126,6 +129,7 @@ impl ResolveFilter for FilterType {
             Self::TruncateCharsHtml(filter) => filter.resolve(variable, py, template, context),
             Self::Slice(filter) => filter.resolve(variable, py, template, context),
             Self::TruncateWords(filter) => filter.resolve(variable, py, template, context),
+            Self::Pluralize(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -1870,6 +1874,85 @@ impl ResolveFilter for JustifyFilter {
                 justified.extend(std::iter::repeat_n(' ', padding));
             }
             return Ok(Some(text.into_content(justified, context)));
+        }
+        self.django.call(variable, argument, py, context)
+    }
+}
+
+/// Whether `pluralize` picks the singular suffix, or `None` to leave the
+/// value to Django: `float(value) == 1` for numbers, `len(value) == 1` for
+/// sized values. Strings stay with Django, whose `float()` accepts forms
+/// such as `" 1 "` and `"1_0"`.
+fn pluralize_singular(value: &Content<'_, '_>) -> Option<bool> {
+    match value {
+        // `float()` of an int too big for a float raises `OverflowError`.
+        Content::Int(n) => n.to_i64().map(|n| n == 1),
+        #[expect(clippy::float_cmp, reason = "Django compares `float(value) == 1`")]
+        Content::Float(n) => Some(*n == 1.0),
+        Content::Bool(b) => Some(*b),
+        Content::String(_) => None,
+        Content::Py(object) => {
+            if object.is_exact_instance_of::<PyInt>() {
+                object.extract::<i64>().ok().map(|n| n == 1)
+            } else if object.is_exact_instance_of::<PyBool>() {
+                object.extract::<bool>().ok()
+            } else if object.is_exact_instance_of::<PyFloat>() {
+                #[expect(clippy::float_cmp, reason = "Django compares `float(value) == 1`")]
+                object.extract::<f64>().ok().map(|n| n == 1.0)
+            } else if object.is_exact_instance_of::<PyList>()
+                || object.is_exact_instance_of::<PyTuple>()
+                || object.is_exact_instance_of::<PyDict>()
+            {
+                object.len().ok().map(|len| len == 1)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+impl ResolveFilter for PluralizeFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        let suffixes = match &argument {
+            ResolvedArgument::Absent => Some(Cow::Borrowed("s")),
+            ResolvedArgument::Present(Some(Content::String(text))) => {
+                Some(Cow::Borrowed(text.as_raw().as_ref()))
+            }
+            ResolvedArgument::Present(Some(Content::Py(object))) => object
+                .cast::<PyString>()
+                .ok()
+                .and_then(|text| text.to_str().ok().map(|text| Cow::Owned(text.to_string()))),
+            ResolvedArgument::Present(_) => None,
+        };
+        if let Some(suffixes) = suffixes {
+            let (singular, plural) = suffixes.split_once(',').unwrap_or(("", &suffixes));
+            // More than two suffixes give "" whatever the value.
+            if plural.contains(',') {
+                return Ok(Some("".as_content()));
+            }
+            let singular_value = match &variable {
+                // Django's filter gets "", and `float("")` fails.
+                None => Some(None),
+                Some(value) => pluralize_singular(value).map(Some),
+            };
+            if let Some(singular_value) = singular_value {
+                let suffix = match singular_value {
+                    None => "",
+                    Some(true) => singular,
+                    Some(false) => plural,
+                };
+                // The suffix is a plain `str`, so it is escaped.
+                return Ok(Some(Content::String(ContentString::HtmlUnsafe(
+                    Cow::Owned(suffix.to_string()),
+                ))));
+            }
         }
         self.django.call(variable, argument, py, context)
     }
