@@ -2195,3 +2195,136 @@ def test_dictsort_replaced_builtin(monkeypatch, name):
     monkeypatch.setitem(register.filters, name, lambda value, arg: "replacement")
     django, rusty = render_both("{{ value|" + name + ":'a' }}", {"value": []})
     assert rusty == django == "replacement"
+
+
+JSON_SCRIPT_FLOATS = [
+    0.0,
+    -0.0,
+    1.0,
+    -2.5,
+    0.1,
+    1 / 3,
+    1e-4,
+    9.999e-5,
+    1e-5,
+    1.5e-7,
+    1e15,
+    1e16,
+    1.5e16,
+    123456789012345678.0,
+    1e22,
+    1.7976931348623157e308,
+    5e-324,
+    # Halfway between two shortest forms; Python rounds to even.
+    -777852399010546.25,
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+]
+
+
+def circular_list():
+    items = []
+    items.append(items)
+    return items
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        True,
+        False,
+        0,
+        -7,
+        2**70,
+        *JSON_SCRIPT_FLOATS,
+        "",
+        "plain",
+        "<script>&</script>",
+        'quote " backslash \\ slash /',
+        "\n\r\t\b\f\x00\x1f\x7f",
+        "é日本\U0001f600",
+        mark_safe("<b>safe</b>"),
+        "\ud800",
+        [],
+        [1, "two", [3.5, None]],
+        (1, (2, 3)),
+        {},
+        {"a": 1, "b": [True, {"c": "<d>"}]},
+        {1: "int key", 2**70: "big key"},
+        {True: "bool key"},
+        {1.5: "float key"},
+        {None: "none key"},
+        {("a",): "tuple key"},
+        {"\ud800": "surrogate key"},
+        datetime.date(2026, 11, 5),
+        Decimal("1.5"),
+        translation.gettext_lazy("Yes"),
+        ListSubclass([1]),
+        {"nested": [datetime.time(1, 2)]},
+        circular_list(),
+    ],
+    ids=repr,
+)
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "",
+        ":'data'",
+        ":''",
+        ":'<id> & \"x\"'",
+        ":_('<id>')",
+        ":element_id",
+        ":safe_id",
+        ":empty",
+        ":number",
+        ":zero",
+        ":nothing",
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_json_script_matches_django(value, argument, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "{{ value|json_script" + argument + " }}{% endautoescape %}"
+    )
+    context = {
+        "value": value,
+        "element_id": "<id>",
+        "safe_id": mark_safe("<id>"),
+        "empty": "",
+        "number": 5,
+        "zero": 0,
+        "nothing": None,
+    }
+    django, rusty = render_both(source, context)
+    assert rusty == django
+
+
+def test_json_script_deep_nesting_matches_django():
+    value = "leaf"
+    for _ in range(150):
+        value = [value]
+    django, rusty = render_both("{{ value|json_script }}", {"value": value})
+    assert rusty == django
+
+
+def test_json_script_random_floats_match_django():
+    import random
+    import struct
+
+    generator = random.Random(234)
+    values = [struct.unpack("<d", generator.randbytes(8))[0] for _ in range(3000)] + [
+        generator.uniform(-1e6, 1e6) for _ in range(1000)
+    ]
+    django, rusty = render_both("{{ value|json_script }}", {"value": values})
+    assert rusty == django
+
+
+def test_json_script_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(
+        register.filters, "json_script", lambda value, arg=None: "replacement"
+    )
+    django, rusty = render_both("{{ value|json_script }}", {"value": [1]})
+    assert rusty == django == "replacement"

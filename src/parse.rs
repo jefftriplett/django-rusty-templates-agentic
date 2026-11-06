@@ -47,6 +47,7 @@ use crate::filters::ForceEscapeFilter;
 use crate::filters::GetDigitFilter;
 use crate::filters::IriencodeFilter;
 use crate::filters::JoinFilter;
+use crate::filters::JsonScriptFilter;
 use crate::filters::Justify;
 use crate::filters::JustifyFilter;
 use crate::filters::LastFilter;
@@ -440,6 +441,11 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::Dictsortreversed(DictsortreversedFilter { django })
+                }
+                BuiltinFilter::JsonScript
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::JsonScript(JsonScriptFilter { django })
                 }
                 _ => FilterType::Django(django),
             };
