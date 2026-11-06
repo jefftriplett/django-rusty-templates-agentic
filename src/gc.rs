@@ -317,6 +317,8 @@ impl Trace for FilterType {
             Self::TruncateChars(filter) => filter.django.filter.trace(visit),
             Self::TruncateCharsHtml(filter) => filter.django.filter.trace(visit),
             Self::TruncateWords(filter) => filter.django.filter.trace(visit),
+            Self::Urlizetrunc(filter) => filter.django.filter.trace(visit),
+            Self::Urlize(filter) => filter.django.filter.trace(visit),
             Self::TruncateWordsHtml(filter) => filter.django.filter.trace(visit),
             Self::JsonScript(filter) => filter.django.filter.trace(visit),
             Self::Dictsortreversed(filter) => filter.django.filter.trace(visit),
