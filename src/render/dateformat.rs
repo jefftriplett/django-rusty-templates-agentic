@@ -10,7 +10,8 @@
 //! Anything else is left to Django. Subclasses of the `datetime` types and
 //! tzinfo implementations other than `datetime.timezone` and
 //! `zoneinfo.ZoneInfo` go to the filter itself. The timezone specifiers
-//! (`e I O r T U Z`) and specifiers the value lacks go to
+//! (`e I O r T U Z`) ask the tzinfo for its offset, name and DST, as Django
+//! does. Specifiers the value lacks, and offsets with seconds in `r`, go to
 //! `django.utils.dateformat` with the already resolved format.
 
 use std::collections::HashMap;
@@ -21,7 +22,8 @@ use pyo3::exceptions::{PyAttributeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
-    PyDate, PyDateAccess, PyDateTime, PyString, PyTime, PyTimeAccess, PyType, PyTzInfoAccess,
+    PyDate, PyDateAccess, PyDateTime, PyDelta, PyDeltaAccess, PyDict, PyString, PyTime,
+    PyTimeAccess, PyType, PyTzInfoAccess,
 };
 use pyo3::{PyTraverseError, PyVisit};
 
@@ -42,6 +44,11 @@ static ZONE_INFO: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 const FORMAT_CHARS: &str = "aAbcdDeEfFgGhHiIjlLmMnNoOPrsStTUuwWyYzZ";
 /// The specifiers `TimeFormat` defines. `DateFormat` adds the rest.
 const TIME_CHARS: &str = "aAefgGhHiOPsTuZ";
+/// The specifiers that depend on the timezone.
+const ZONE_CHARS: &str = "eIOrTUZ";
+static GET_DEFAULT_TIMEZONE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static DATETIME_COMBINE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static TIME_MIN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 /// Which of Django's formatter classes to mirror.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -392,6 +399,7 @@ fn format_value(
     names: &mut Names,
 ) -> PyResult<Option<String>> {
     let mut output = String::with_capacity(format.len() * 2);
+    let mut zone = Zone::Unknown;
     let mut chars = format.chars().peekable();
     let mut previous = None;
     while let Some(character) = chars.next() {
@@ -408,7 +416,9 @@ fn format_value(
             }
             continue;
         }
-        let specifier = if TIME_CHARS.contains(character) {
+        let specifier = if ZONE_CHARS.contains(character) {
+            push_zone_specifier(character, fields, formatter, value, &mut zone, &mut output)?
+        } else if TIME_CHARS.contains(character) {
             // Django raises TypeError for time specifiers on a plain date.
             match fields.time() {
                 Some(time) => push_time_specifier(character, time, names, &mut output, value)?,
@@ -428,6 +438,226 @@ fn format_value(
         }
     }
     Ok(Some(output))
+}
+
+/// `TimeFormat.timezone`: the value's tzinfo, or the default timezone for a
+/// naive value, unless the local time is ambiguous or imaginary there.
+fn value_timezone<'py>(value: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let py = value.py();
+    let datetime = value.cast::<PyDateTime>()?;
+    let timezone = match datetime.get_tzinfo() {
+        Some(tzinfo) => tzinfo.into_any(),
+        None => GET_DEFAULT_TIMEZONE
+            .import(py, "django.utils.timezone", "get_default_timezone")?
+            .call0()?,
+    };
+    if timezone
+        .get_type()
+        .is(FIXED_OFFSET.import(py, "datetime", "timezone")?)
+    {
+        return Ok(Some(timezone));
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("fold", u8::from(!datetime.get_fold()))?;
+    let flipped = value.call_method("replace", (), Some(&kwargs))?;
+    let offset = timezone.call_method1("utcoffset", (value,))?;
+    let flipped_offset = timezone.call_method1("utcoffset", (flipped,))?;
+    Ok(offset.eq(flipped_offset)?.then_some(timezone))
+}
+
+/// A `timedelta` offset as `days * 86400 + seconds`, and whether it has
+/// microseconds. `None` when the tzinfo returned something else.
+fn offset_seconds(offset: &Bound<'_, PyAny>) -> Option<(i64, bool)> {
+    let offset = offset.cast_exact::<PyDelta>().ok()?;
+    let seconds = i64::from(offset.get_days()) * 86400 + i64::from(offset.get_seconds());
+    Some((seconds, offset.get_microseconds() != 0))
+}
+
+/// Appends an offset as `+HHMM`, as `O` and `%z` write it.
+fn push_offset(seconds: i64, output: &mut String) {
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let seconds = seconds.unsigned_abs();
+    push_fmt(
+        output,
+        format_args!("{sign}{:02}{:02}", seconds / 3600, (seconds / 60) % 60),
+    );
+}
+
+/// [`value_timezone`] for the value being formatted, once it is needed.
+enum Zone<'py> {
+    Unknown,
+    Known(Option<Bound<'py, PyAny>>),
+}
+
+/// Appends one specifier that depends on the timezone. `zone` caches
+/// [`value_timezone`] for the value.
+fn push_zone_specifier<'py>(
+    specifier: char,
+    fields: Fields,
+    formatter: Formatter,
+    value: &Bound<'py, PyAny>,
+    zone: &mut Zone<'py>,
+    output: &mut String,
+) -> PyResult<Specifier> {
+    let py = value.py();
+    let timezone = match (fields, specifier) {
+        // `TimeFormat` has no `I`, `r` or `U`.
+        (_, 'I' | 'r' | 'U') if formatter == Formatter::Time => {
+            return Ok(Specifier::Unsupported);
+        }
+        // Time specifiers raise TypeError for a date, and `r` and `U`
+        // can't combine a time.
+        (Fields::Date(_), 'e' | 'O' | 'T' | 'Z') | (Fields::Time(_), 'r' | 'U') => {
+            return Ok(Specifier::Unsupported);
+        }
+        (Fields::Date(date), 'r') => {
+            // Midnight in the default timezone.
+            let timezone = GET_DEFAULT_TIMEZONE
+                .import(py, "django.utils.timezone", "get_default_timezone")?
+                .call0()?;
+            let midnight = midnight(value)?;
+            let offset = timezone.call_method1("utcoffset", (midnight,))?;
+            let time = Time {
+                hour: 0,
+                minute: 0,
+                second: 0,
+                microsecond: 0,
+            };
+            return Ok(push_rfc5322(date, time, &offset, output));
+        }
+        (Fields::Date(_), 'U') => {
+            let midnight = midnight(value)?;
+            return push_timestamp(&midnight, output);
+        }
+        (Fields::DateTime(..), 'U') => return push_timestamp(value, output),
+        // Django gives a date or time no timezone.
+        (Fields::Date(_) | Fields::Time(_), _) => None,
+        (Fields::DateTime(..), _) => {
+            if matches!(zone, Zone::Unknown) {
+                *zone = Zone::Known(value_timezone(value)?);
+            }
+            match zone {
+                Zone::Known(timezone) => timezone.clone(),
+                Zone::Unknown => None,
+            }
+        }
+    };
+    let Some(timezone) = timezone else {
+        // Without a timezone these are empty, but `r` needs one for a naive value.
+        if specifier == 'r' {
+            let datetime = value.cast::<PyDateTime>()?;
+            if datetime.get_tzinfo().is_none() {
+                return Ok(Specifier::Unsupported);
+            }
+        } else {
+            return Ok(Specifier::Written);
+        }
+        return Ok(push_datetime_rfc5322(
+            fields,
+            &value.call_method0("utcoffset")?,
+            output,
+        ));
+    };
+    match specifier {
+        'e' => {
+            let datetime = value.cast::<PyDateTime>()?;
+            if datetime.get_tzinfo().is_some() {
+                let name = value.call_method0("tzname")?;
+                if name.is_truthy()? {
+                    output.push_str(&name.str()?.to_cow()?);
+                }
+            }
+        }
+        'I' => output.push(if timezone.call_method1("dst", (value,))?.is_truthy()? {
+            '1'
+        } else {
+            '0'
+        }),
+        'O' | 'Z' => {
+            let offset = timezone.call_method1("utcoffset", (value,))?;
+            let Some((seconds, _)) = offset_seconds(&offset) else {
+                return Ok(Specifier::Unsupported);
+            };
+            if specifier == 'O' {
+                push_offset(seconds, output);
+            } else {
+                push_fmt(output, format_args!("{seconds}"));
+            }
+        }
+        'T' => output.push_str(&timezone.call_method1("tzname", (value,))?.str()?.to_cow()?),
+        'r' => {
+            // `make_aware` uses the value's timezone; an aware value keeps its own.
+            let offset = match value.cast::<PyDateTime>()?.get_tzinfo() {
+                Some(_) => value.call_method0("utcoffset")?,
+                None => timezone.call_method1("utcoffset", (value,))?,
+            };
+            return Ok(push_datetime_rfc5322(fields, &offset, output));
+        }
+        _ => return Ok(Specifier::Unsupported),
+    }
+    Ok(Specifier::Written)
+}
+
+/// `datetime.combine(value, time.min)` for a date.
+fn midnight<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = value.py();
+    let min = TIME_MIN.import(py, "datetime", "time")?.getattr("min")?;
+    DATETIME_COMBINE
+        .import(py, "datetime", "datetime")?
+        .call_method1("combine", (value, min))
+}
+
+/// `int(value.timestamp())`.
+fn push_timestamp(value: &Bound<'_, PyAny>, output: &mut String) -> PyResult<Specifier> {
+    let timestamp: f64 = value.call_method0("timestamp")?.extract()?;
+    #[allow(clippy::cast_possible_truncation)]
+    push_fmt(output, format_args!("{}", timestamp.trunc() as i64));
+    Ok(Specifier::Written)
+}
+
+fn push_datetime_rfc5322(
+    fields: Fields,
+    offset: &Bound<'_, PyAny>,
+    output: &mut String,
+) -> Specifier {
+    let (Some(date), Some(time)) = (fields.date(), fields.time()) else {
+        return Specifier::Unsupported;
+    };
+    push_rfc5322(date, time, offset, output)
+}
+
+/// `email.utils.format_datetime`, for offsets in whole minutes.
+fn push_rfc5322(
+    date: Date,
+    time: Time,
+    offset: &Bound<'_, PyAny>,
+    output: &mut String,
+) -> Specifier {
+    const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let Some((seconds, false)) = offset_seconds(offset) else {
+        return Specifier::Unsupported;
+    };
+    if seconds % 60 != 0 {
+        return Specifier::Unsupported;
+    }
+    push_fmt(
+        output,
+        format_args!(
+            "{}, {:02} {} {:04} {:02}:{:02}:{:02} ",
+            WEEKDAYS[usize::from(weekday(date))],
+            date.day,
+            MONTHS[usize::from(date.month - 1)],
+            date.year,
+            time.hour,
+            time.minute,
+            time.second,
+        ),
+    );
+    push_offset(seconds, output);
+    Specifier::Written
 }
 
 /// Appends one `TimeFormat` specifier.
