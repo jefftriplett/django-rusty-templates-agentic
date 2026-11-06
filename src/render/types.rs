@@ -19,6 +19,7 @@ use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
 use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyType};
 
+use super::filters::FileSizeStrings;
 use super::filters::FloatNumberFormat;
 use super::filters::TruncationText;
 use super::inheritance::{BlockEntry, BlockMarker};
@@ -193,6 +194,7 @@ pub struct Context {
     cycle_variables: HashSet<String>,
     pub(crate) truncation_text: LanguageCache<TruncationText>,
     pub(crate) time_strings: LanguageCache<TimeStrings>,
+    pub(crate) file_size_strings: LanguageCache<FileSizeStrings>,
 }
 
 impl Trace for Context {
@@ -280,6 +282,7 @@ impl Context {
             cycle_variables: HashSet::new(),
             truncation_text: LanguageCache::default(),
             time_strings: LanguageCache::default(),
+            file_size_strings: LanguageCache::default(),
         }
     }
 
@@ -329,6 +332,7 @@ impl Context {
                 .collect(),
             truncation_text: self.truncation_text.clone(),
             time_strings: self.time_strings.clone(),
+            file_size_strings: self.file_size_strings.clone(),
         }
     }
 

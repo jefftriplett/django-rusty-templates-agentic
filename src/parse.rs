@@ -37,6 +37,7 @@ use crate::filters::EscapeFilter;
 use crate::filters::EscapejsFilter;
 use crate::filters::EscapeseqFilter;
 use crate::filters::ExternalFilter;
+use crate::filters::FilesizeformatFilter;
 use crate::filters::FilterType;
 use crate::filters::FirstFilter;
 use crate::filters::FloatFormatFilter;
@@ -404,6 +405,11 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::Pprint(PprintFilter { django })
+                }
+                BuiltinFilter::Filesizeformat
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Filesizeformat(FilesizeformatFilter { django })
                 }
                 _ => FilterType::Django(django),
             };
