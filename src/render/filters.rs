@@ -19,7 +19,7 @@ use crate::filters::{
     MakeListFilter, Phone2numericFilter, PluralizeFilter, PprintFilter, RandomFilter, SafeFilter,
     SafeseqFilter, SliceArgument, SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter,
     TruncateCharsFilter, TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter,
-    UrlencodeFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
+    UrlencodeFilter, WordcountFilter, WordwrapFilter, YesnoFilter, python_int,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -253,6 +253,22 @@ impl ResolveFilter for CenterFilter {
             .expect("missing argument in context should already have raised");
 
         if context.django_series(py)? >= (6, 0) {
+            // Django 6.0's `f"{value:^{width}}"` returns the value for a width
+            // of zero or less and puts the odd padding space on the right.
+            if let Some(width) = integer_argument(&arg)
+                && usize::try_from(width).map_or(true, |width| width <= MAX_JUSTIFY_WIDTH)
+            {
+                let Ok(width @ 1..) = usize::try_from(width) else {
+                    return Ok(Some(Content::String(content)));
+                };
+                let padding = width.saturating_sub(length);
+                let left = padding / 2;
+                let mut centered = String::with_capacity(content.as_raw().len() + padding);
+                centered.extend(std::iter::repeat_n(' ', left));
+                centered.push_str(content.as_raw());
+                centered.extend(std::iter::repeat_n(' ', padding - left));
+                return Ok(Some(content.map_content(|_| Cow::Owned(centered))));
+            }
             let centered = py
                 .import("django.template.defaultfilters")?
                 .getattr("center")?
@@ -261,7 +277,12 @@ impl ResolveFilter for CenterFilter {
             return Ok(Some(content.map_content(|_| Cow::Owned(centered))));
         }
 
-        let size = arg.resolve_usize(self.argument.at)?;
+        // Django 5.2's `value.center(int(arg))`; a negative width leaves the
+        // value unchanged.
+        let size = match integer_argument(&arg) {
+            Some(width) => usize::try_from(width).unwrap_or(0),
+            None => arg.resolve_usize(self.argument.at)?,
+        };
 
         if size <= length {
             return Ok(Some(Content::String(content)));
@@ -745,21 +766,26 @@ impl ResolveFilter for DjangoFilter {
 /// The integer Django's `int(arg)` produces, for arguments that convert
 /// unambiguously. Anything else returns `None` and is left to Django.
 fn integer_argument(argument: &Content<'_, '_>) -> Option<i64> {
-    fn parse(text: &str) -> Option<i64> {
-        let digits = text.strip_prefix('-').unwrap_or(text);
-        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-            return None;
-        }
-        text.parse().ok()
-    }
     match argument {
         Content::Int(n) => n.to_i64(),
-        Content::String(text) => parse(text.as_raw()),
+        // `int()` truncates floats; infinities and NaN raise.
+        Content::Float(n) => n.to_i64(),
+        Content::Bool(b) => Some(i64::from(*b)),
+        Content::String(text) => python_int(text.as_raw()),
         Content::Py(object) if object.is_exact_instance_of::<PyInt>() => object.extract().ok(),
-        Content::Py(object) if object.is_exact_instance_of::<PyString>() => {
-            parse(object.cast::<PyString>().ok()?.to_str().ok()?)
+        Content::Py(object) if object.is_exact_instance_of::<PyBool>() => {
+            object.extract::<bool>().ok().map(i64::from)
         }
-        Content::Py(_) | Content::Float(_) | Content::Bool(_) => None,
+        Content::Py(object) if object.is_exact_instance_of::<PyFloat>() => {
+            object.extract::<f64>().ok()?.to_i64()
+        }
+        Content::Py(object)
+            if object.is_exact_instance_of::<PyString>()
+                || is_exact_safe_string(object).unwrap_or(false) =>
+        {
+            python_int(object.cast::<PyString>().ok()?.to_str().ok()?)
+        }
+        Content::Py(_) => None,
     }
 }
 
@@ -1084,8 +1110,18 @@ fn join_items<'py>(
     py: Python<'py>,
 ) -> PyResult<Joined> {
     let mut output = String::new();
-    for (index, item) in value.try_iter()?.enumerate() {
-        let item = item?;
+    // Django catches a `TypeError` from iterating, as for a non-iterable.
+    let items = match value.try_iter() {
+        Err(error) if error.is_instance_of::<PyTypeError>(py) => return Ok(Joined::Unchanged),
+        items => items?,
+    };
+    for (index, item) in items.enumerate() {
+        let item = match item {
+            Err(error) if error.is_instance_of::<PyTypeError>(py) => {
+                return Ok(Joined::Unchanged);
+            }
+            item => item?,
+        };
         if index > 0 {
             output.push_str(separator);
         }
@@ -1131,15 +1167,20 @@ impl ResolveFilter for JoinFilter {
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
         let argument = self.django.resolve_argument(py, template, context)?;
-        if let Some(Content::Py(value)) = &variable
-            && let Some(separator) = argument.value()
-            && (value.is_exact_instance_of::<PyList>() || value.is_exact_instance_of::<PyTuple>())
+        if let Some(separator) = argument.value()
             && let Some(separator) = join_separator(separator, context.autoescape)?
         {
-            let joined = join_items(value, &separator, context.autoescape, py)?;
+            // Any value goes through Python's iteration, as in Django: strings
+            // join their characters and non-iterables are returned unchanged.
+            let value = match &variable {
+                Some(value) => value.to_py(py),
+                // Django's filter gets "".
+                None => PyString::new(py, "").into_any(),
+            };
+            let joined = join_items(&value, &separator, context.autoescape, py)?;
             return Ok(Some(match joined {
                 Joined::Text(text) => Content::String(ContentString::HtmlSafe(Cow::Owned(text))),
-                Joined::Unchanged => Content::Py(value.clone()),
+                Joined::Unchanged => variable.unwrap_or_else(|| "".as_content()),
             }));
         }
         self.django.call(variable, argument, py, context)
@@ -1525,6 +1566,22 @@ impl<'a> Text<'a> {
     }
 }
 
+/// An `is_safe` `@stringfilter` result: safe only when the input was.
+fn string_filter_result<'t, 'py>(
+    result: String,
+    safe: bool,
+    context: &Context,
+) -> Content<'t, 'py> {
+    let result = Cow::Owned(result);
+    Content::String(if safe {
+        ContentString::HtmlSafe(result)
+    } else if context.autoescape {
+        ContentString::HtmlUnsafe(result)
+    } else {
+        ContentString::String(result)
+    })
+}
+
 /// `Truncator(text).chars(length)`. `None` defers to Django's filter.
 fn truncate_chars(
     text: &str,
@@ -1582,7 +1639,8 @@ fn slice_argument(argument: Option<&Content<'_, '_>>) -> Option<SliceArgument> {
         Some(Content::Py(object)) if object.is_exact_instance_of::<PyString>() => {
             SliceArgument::parse(object.cast::<PyString>().ok()?.to_str().ok()?)
         }
-        Some(Content::Py(_)) => None,
+        // Django parses `str(arg)`.
+        Some(Content::Py(object)) => SliceArgument::parse(object.str().ok()?.to_str().ok()?),
     }
 }
 
@@ -1868,22 +1926,22 @@ impl ResolveFilter for JustifyFilter {
         let argument = self.django.resolve_argument(py, template, context)?;
         if let Some(width) = argument.value().and_then(integer_argument)
             && usize::try_from(width).map_or(true, |width| width <= MAX_JUSTIFY_WIDTH)
-            && let Some(text) = Text::from_variable(variable.as_ref(), py)?
         {
+            // `@stringfilter`: other values are converted with `str()`.
             // `str.ljust` and `str.rjust` count code points and leave text
             // at least `width` long unchanged.
-            let content = text.as_str();
+            let (content, safe) = string_filter_text(variable, py)?;
             let length = content.chars().count();
             let padding = usize::try_from(width).unwrap_or(0).saturating_sub(length);
             let mut justified = String::with_capacity(content.len() + padding);
             if self.side == Justify::Right {
                 justified.extend(std::iter::repeat_n(' ', padding));
             }
-            justified.push_str(content);
+            justified.push_str(&content);
             if self.side == Justify::Left {
                 justified.extend(std::iter::repeat_n(' ', padding));
             }
-            return Ok(Some(text.into_content(justified, context)));
+            return Ok(Some(string_filter_result(justified, safe, context)));
         }
         self.django.call(variable, argument, py, context)
     }
@@ -2288,11 +2346,11 @@ impl ResolveFilter for TruncateWordsFilter {
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
         let argument = self.django.resolve_argument(py, template, context)?;
-        if let Some(length) = argument.value().and_then(integer_argument)
-            && let Some(text) = Text::from_variable(variable.as_ref(), py)?
-        {
-            let truncated = truncate_words(text.as_str(), length);
-            return Ok(Some(text.into_content(truncated, context)));
+        if let Some(length) = argument.value().and_then(integer_argument) {
+            // `@stringfilter`: other values are converted with `str()`.
+            let (text, safe) = string_filter_text(variable, py)?;
+            let truncated = truncate_words(&text, length);
+            return Ok(Some(string_filter_result(truncated, safe, context)));
         }
         self.django.call(variable, argument, py, context)
     }

@@ -1358,3 +1358,165 @@ def test_random_pprint_replaced_builtin(monkeypatch, name):
     monkeypatch.setitem(register.filters, name, lambda value: "replacement")
     django, rusty = render_both("{{ value|" + name + " }}", {"value": ["a"]})
     assert rusty == django == "replacement"
+
+
+INT_ARGUMENTS = [
+    "+4",
+    " 4 ",
+    "\t5\n",
+    "\x1c3\x1f",
+    "1_0",
+    "1__0",
+    "_1",
+    "4_",
+    "-0",
+    "+-1",
+    "1e3",
+    "0x10",
+    "٣",
+    "\xa04",
+    "99999999999999999999",
+    4.9,
+    -2.5,
+    float("inf"),
+    float("nan"),
+    True,
+    False,
+    mark_safe("3"),
+]
+
+
+@pytest.mark.parametrize(
+    "name", ["ljust", "rjust", "center", "truncatewords", "truncatechars", "get_digit"]
+)
+def test_python_int_arguments_match_django(name):
+    value = "alpha beta gamma delta" if "trunc" in name else "12345"
+    source = "{% for argument in arguments %}[{{ value|NAME:argument }}]{% endfor %}"
+    context = {"value": value, "arguments": INT_ARGUMENTS}
+    django, rusty = render_both(source.replace("NAME", name), context)
+    if name == "center" and isinstance(django, tuple):
+        # Rusty reports `center`'s conversion error with its own message.
+        assert rusty[0] == django[0]
+    else:
+        assert rusty == django
+
+
+@pytest.mark.parametrize("argument", INT_ARGUMENTS + ["2", "-1"])
+def test_floatformat_python_int_arguments_match_django(argument):
+    django, rusty = render_both(
+        "{{ value|floatformat:argument }}", {"value": 1.23456, "argument": argument}
+    )
+    assert rusty == django
+
+
+def join_generator():
+    yield "<a>"
+    yield mark_safe("<b>")
+
+
+def join_failing_generator():
+    yield "a"
+    raise TypeError("stop")
+
+
+class JoinNotIterable:
+    pass
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(range(4), id="range"),
+        pytest.param("<ab>", id="string"),
+        pytest.param(mark_safe("<ab>"), id="safe_string"),
+        pytest.param(translation.gettext_lazy("Good"), id="lazy"),
+        pytest.param({"<k>": 1, "j": 2}, id="dict"),
+        pytest.param({"<k>": 1}.keys(), id="dict_keys"),
+        pytest.param(frozenset(["<x>"]), id="frozenset"),
+        pytest.param(12, id="int"),
+        pytest.param(1.5, id="float"),
+        pytest.param(JoinNotIterable(), id="not_iterable"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_join_other_values_match_django(value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "[{{ value|join:', ' }}][{{ value|join:'&' }}][{{ missing|join:',' }}]"
+        "[{{ value|join:'-'|length }}]"
+        "{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {"value": value})
+    assert rusty == django
+
+
+@pytest.mark.parametrize("make", [join_generator, join_failing_generator])
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_join_generators_match_django(make, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}{{ value|join:'|' }}{% endautoescape %}"
+    )
+    results = []
+    for name in ("django", "rusty"):
+        try:
+            results.append(engines[name].from_string(source).render({"value": make()}))
+        except Exception as error:
+            results.append((type(error), str(error)))
+    django, rusty = results
+    # A consumed generator renders with its address, so compare the kind of
+    # result rather than the text when it is returned unchanged.
+    if isinstance(django, str) and "generator object" in django:
+        assert isinstance(rusty, str) and "generator object" in rusty
+    else:
+        assert rusty == django
+
+
+class SliceStr:
+    def __str__(self):
+        return "1:3"
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [mark_safe("1:3"), mark_safe("::-1"), Decimal("2"), SliceStr(), ["x"], {"a": 1}],
+    ids=["safe", "safe_reverse", "decimal", "str_object", "list", "dict"],
+)
+@pytest.mark.parametrize("value", ["abcdef", ["a", "b", "c", "d"]], ids=["str", "list"])
+def test_slice_object_arguments_match_django(argument, value):
+    django, rusty = render_both(
+        "{{ value|slice:argument }}", {"value": value, "argument": argument}
+    )
+    assert rusty == django
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(1234567, id="int"),
+        pytest.param(translation.gettext_lazy("Good morning to you"), id="lazy"),
+        pytest.param(Decimal("1.5"), id="decimal"),
+        pytest.param(["<a>", "b c"], id="list"),
+        pytest.param(mark_safe("<b>one two three</b>"), id="safe"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_stringfilter_values_match_django(value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "[{{ value|truncatewords:2 }}][{{ value|ljust:12 }}][{{ value|rjust:12 }}]"
+        "[{{ value|center:13 }}][{{ value|center:0 }}][{{ value|center:-3 }}]"
+        "{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {"value": value})
+    assert rusty == django
+
+
+@pytest.mark.parametrize("width", [-1, 0, 1, 2, 3, 4, 5, 6, 7, 10, "8", " 9"])
+@pytest.mark.parametrize("value", ["", "a", "ab", "abc", "é日", mark_safe("<b>")])
+def test_center_widths_match_django(value, width):
+    django, rusty = render_both(
+        "[{{ value|center:width }}]", {"value": value, "width": width}
+    )
+    assert rusty == django
