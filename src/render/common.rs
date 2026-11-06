@@ -370,14 +370,13 @@ impl Resolve for Text {
         &self,
         _py: Python<'py>,
         template: TemplateString<'t>,
-        context: &mut Context,
+        _context: &mut Context,
         _failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
-        let resolved = unescape_literal(template.content(self.at));
-        Ok(Some(Content::String(match context.autoescape {
-            false => ContentString::String(resolved),
-            true => ContentString::HtmlSafe(resolved),
-        })))
+        // Django marks string literals safe whatever the autoescape setting.
+        Ok(Some(Content::String(ContentString::HtmlSafe(
+            unescape_literal(template.content(self.at)),
+        ))))
     }
 }
 
@@ -386,15 +385,15 @@ impl Resolve for TranslatedText {
         &self,
         py: Python<'py>,
         template: TemplateString<'t>,
-        context: &mut Context,
+        _context: &mut Context,
         _failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
         let text = template.content(self.at);
         let resolved = gettext(py, &unescape_literal(text))?;
-        Ok(Some(Content::String(match context.autoescape {
-            false => ContentString::String(Cow::Owned(resolved)),
-            true => ContentString::HtmlSafe(Cow::Owned(resolved)),
-        })))
+        // Django translates the literal's safe string, so the result is safe.
+        Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
+            resolved,
+        )))))
     }
 }
 

@@ -5,6 +5,7 @@ use std::collections::hash_map::Entry;
 use html_escape::encode_quoted_attribute_to_string;
 use num_traits::{ToPrimitive, Zero};
 use pyo3::exceptions::{PyAttributeError, PyIndexError, PyKeyError, PyTypeError, PyValueError};
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
@@ -91,8 +92,14 @@ impl Resolve for Filter {
         }
         if left.is_none()
             && matches!(failures, ResolveFailures::IgnoreVariableDoesNotExist)
-            && matches!(self.filter, FilterType::DefaultIfNone(_))
+            && matches!(
+                self.filter,
+                FilterType::DefaultIfNone(_) | FilterType::Django(_) | FilterType::External(_)
+            )
         {
+            // Django gives filters `None` for a missing variable when failures
+            // are ignored, as in `{% if %}` and `{% for %}`; otherwise the
+            // empty `string_if_invalid`.
             left = Some(Content::Py(py.None().into_bound(py)));
         }
         self.filter.resolve(left, py, template, context)
@@ -653,16 +660,8 @@ impl ResolveFilter for ExternalFilter {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
-        let arg = match &self.argument {
-            Some(arg) => arg.resolve(py, template, context, ResolveFailures::Raise)?,
-            None => None,
-        };
-        let filter = self.filter.bind(py);
-        let value = match arg {
-            Some(arg) => filter.call1((variable, arg))?,
-            None => filter.call1((variable,))?,
-        };
-        Ok(Some(Content::Py(value)))
+        let argument = resolve_django_argument(self.argument.as_ref(), py, template, context)?;
+        call_django_filter(self.filter.bind(py), variable, argument, py, context)
     }
 }
 
@@ -699,15 +698,7 @@ impl DjangoFilter {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> Result<ResolvedArgument<'t, 'py>, PyRenderError> {
-        Ok(match &self.argument {
-            None => ResolvedArgument::Absent,
-            Some(argument) => ResolvedArgument::Present(argument.resolve(
-                py,
-                template,
-                context,
-                ResolveFailures::Raise,
-            )?),
-        })
+        resolve_django_argument(self.argument.as_ref(), py, template, context)
     }
 
     fn call<'t, 'py>(
@@ -717,57 +708,87 @@ impl DjangoFilter {
         py: Python<'py>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
-        let filter = self.filter.bind(py);
-        let value = variable.unwrap_or_else(|| "".as_content());
-        if filter.is(TIME_FILTER.import(py, "django.template.defaultfilters", "time")?) {
-            return Ok(Some(format_date(
-                value,
-                argument.into_value(),
-                Formatter::Time,
-                filter,
-                context,
-            )?));
-        }
-        let mut value = value.to_py(py);
-        if value.is_instance_of::<PyDateTime>()
-            && filter
-                .getattr_opt("expects_localtime")?
-                .is_some_and(|flag| flag.is_truthy().unwrap_or(false))
-        {
-            value = template_localtime(value, context.use_tz, &mut context.date_cache)?;
-        }
-        let safe_type = SAFEDATA.import(py, "django.utils.safestring", "SafeData")?;
-        let preserve_safe = filter
-            .getattr("is_safe")
-            .is_ok_and(|flag| flag.is_truthy().unwrap_or(false))
-            && value.is_instance(safe_type)?;
-        let mut args = vec![value];
-        match argument {
-            ResolvedArgument::Absent => {}
-            ResolvedArgument::Present(value) => {
-                args.push(value.map_or_else(|| py.None().into_bound(py), |value| value.to_py(py)));
-            }
-        }
-        let kwargs = if filter
-            .getattr("needs_autoescape")
-            .is_ok_and(|flag| flag.is_truthy().unwrap_or(false))
-        {
-            let kwargs = pyo3::types::PyDict::new(py);
-            kwargs.set_item("autoescape", context.autoescape)?;
-            Some(kwargs)
-        } else {
-            None
-        };
-        let result = filter.call(pyo3::types::PyTuple::new(py, args)?, kwargs.as_ref())?;
-        let result = if preserve_safe {
-            MARK_FILTER_SAFE
-                .import(py, "django.utils.safestring", "mark_safe")?
-                .call1((result,))?
-        } else {
-            result
-        };
-        Ok(Some(Content::Py(result)))
+        call_django_filter(self.filter.bind(py), variable, argument, py, context)
     }
+}
+
+fn resolve_django_argument<'t, 'py>(
+    argument: Option<&crate::types::Argument>,
+    py: Python<'py>,
+    template: TemplateString<'t>,
+    context: &mut Context,
+) -> Result<ResolvedArgument<'t, 'py>, PyRenderError> {
+    Ok(match argument {
+        None => ResolvedArgument::Absent,
+        Some(argument) => ResolvedArgument::Present(argument.resolve(
+            py,
+            template,
+            context,
+            ResolveFailures::Raise,
+        )?),
+    })
+}
+
+/// A filter function's flag, as Django's `getattr(func, flag, False)`.
+/// Django reads the flags on every call, so changes after compiling apply.
+fn filter_flag(filter: &Bound<'_, PyAny>, name: &Bound<'_, PyString>) -> bool {
+    filter
+        .getattr_opt(name)
+        .ok()
+        .flatten()
+        .is_some_and(|flag| flag.is_truthy().unwrap_or(false))
+}
+
+/// Calls a Django filter function as Django's `FilterExpression` does,
+/// honouring its `expects_localtime`, `is_safe` and `needs_autoescape` flags.
+fn call_django_filter<'t, 'py>(
+    filter: &Bound<'py, PyAny>,
+    variable: Option<Content<'t, 'py>>,
+    argument: ResolvedArgument<'t, 'py>,
+    py: Python<'py>,
+    context: &mut Context,
+) -> ResolveResult<'t, 'py> {
+    let value = variable.unwrap_or_else(|| "".as_content());
+    if filter.is(TIME_FILTER.import(py, "django.template.defaultfilters", "time")?) {
+        return Ok(Some(format_date(
+            value,
+            argument.into_value(),
+            Formatter::Time,
+            filter,
+            context,
+        )?));
+    }
+    let mut value = value.to_py(py);
+    if value.is_instance_of::<PyDateTime>() && filter_flag(filter, intern!(py, "expects_localtime"))
+    {
+        value = template_localtime(value, context.use_tz, &mut context.date_cache)?;
+    }
+    let safe_type = SAFEDATA.import(py, "django.utils.safestring", "SafeData")?;
+    let preserve_safe =
+        filter_flag(filter, intern!(py, "is_safe")) && value.is_instance(safe_type)?;
+    let mut args = vec![value];
+    match argument {
+        ResolvedArgument::Absent => {}
+        ResolvedArgument::Present(value) => {
+            args.push(value.map_or_else(|| py.None().into_bound(py), |value| value.to_py(py)));
+        }
+    }
+    let kwargs = if filter_flag(filter, intern!(py, "needs_autoescape")) {
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("autoescape", context.autoescape)?;
+        Some(kwargs)
+    } else {
+        None
+    };
+    let result = filter.call(pyo3::types::PyTuple::new(py, args)?, kwargs.as_ref())?;
+    let result = if preserve_safe {
+        MARK_FILTER_SAFE
+            .import(py, "django.utils.safestring", "mark_safe")?
+            .call1((result,))?
+    } else {
+        result
+    };
+    Ok(Some(Content::Py(result)))
 }
 
 impl ResolveFilter for DjangoFilter {

@@ -95,6 +95,20 @@ TEMPLATES = [
 ]
 ```
 
+### What still runs in Python
+
+All of Django's built-in tags and filters are parsed and rendered in Rust. Some still call Python code:
+
+* **Your own filters and tags.** Filters registered with `Library.filter` run in Python and are called as Django calls them: `is_safe`, `needs_autoescape` and `expects_localtime` are honoured, and quoted string arguments arrive as `SafeString`.
+* **Library filters.** The filters from `{% load l10n %}` (`localize`, `unlocalize`), `{% load tz %}` (`localtime`, `utc`, `timezone`) and `{% load i18n %}` (`language_name`, `language_name_local`, `language_name_translated`, `language_bidi`) call Django's functions ([#281](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/281)). The tags in those libraries are native.
+* **Tags that use Django services.** `url`, `static`, `cache`, `csrf_token`, `translate` and `blocktranslate` are parsed in Rust, then call Django's URL resolver, storage, cache, CSRF and translation APIs.
+* **Unusual input.** Some built-in filters fall back to Django only for input where Python or Django behave differently between versions:
+  * `urlize` and `urlizetrunc`: words that might be links.
+  * `striptags`, `truncatechars_html` and `truncatewords_html`: HTML with entities, comments or loosely formed tags.
+  * `json_script`: dates, decimals and lazy strings.
+  * `stringformat`, `dictsort`, `unordered_list` and `floatformat`: unusual format specifiers, subclasses and generators.
+  * The date formatter: time zones other than `datetime.timezone` and `ZoneInfo`.
+
 ## WebAssembly for JavaScript clients
 
 This fork also includes an experimental WebAssembly (Wasm) version for JavaScript clients. Templates render directly in the browser using the `BrowserEngine` JavaScript API, with JSON context data and support for variables, selected filters, conditionals, loops, includes, and inheritance.
