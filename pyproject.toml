@@ -55,6 +55,8 @@ dev = [
     "pre-commit",
     "inline-snapshot",
     "time-machine",
+    "pytz",
+    "python-dateutil",
 ]
 
 [tool.ruff]
