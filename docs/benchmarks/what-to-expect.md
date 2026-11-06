@@ -10,15 +10,15 @@ Warm renders with the cached loader, which both backends use by default when you
 
 | Scenario | Django | Rusty | Speedup |
 |---|---|---|---|
-| Realistic page: `extends`, 25 included cards, `User` objects, i18n tags, a request and 7 context processors | 2,941 µs | 404 µs | 7.3× |
-| Table, 200 rows: `title`, `lower`, `date`, `floatformat`, `default`, `truncatechars`, `cycle`, `if` | 5,730 µs | 437 µs | 13.1× |
-| Inheritance: `extends`, `block.super`, 20 includes | 193 µs | 30 µs | 6.5× |
-| 200 model-style objects: properties, methods, related attributes | 1,612 µs | 259 µs | 6.2× |
-| Custom filter on each of 200 rows | 341 µs | 65 µs | 5.3× |
-| Mixed template: one custom `Node` tag, rest native | 1,947 µs | 536 µs | 3.6× |
-| Tiny template, two variables | 4.7 µs | 1.8 µs | 2.7× |
-| Tiny template, 100 context keys | 5.1 µs | 2.0 µs | 2.5× |
-| Tiny template, 500 context keys | 5.1 µs | 2.9 µs | 1.7× |
+| Realistic page: `extends`, 25 included cards, `User` objects, i18n tags, a request and 7 context processors | 2,903 µs | 402 µs | 7.2× |
+| Table, 200 rows: `title`, `lower`, `date`, `floatformat`, `default`, `truncatechars`, `cycle`, `if` | 5,564 µs | 429 µs | 13.0× |
+| Inheritance: `extends`, `block.super`, 20 includes | 190 µs | 29 µs | 6.5× |
+| 200 model-style objects: properties, methods, related attributes | 1,612 µs | 263 µs | 6.1× |
+| Custom filter on each of 200 rows | 331 µs | 63 µs | 5.3× |
+| Mixed template: one custom `Node` tag, rest native | 1,922 µs | 516 µs | 3.7× |
+| Tiny template, two variables | 5.0 µs | 1.8 µs | 2.7× |
+| Tiny template, 100 context keys | 4.6 µs | 1.8 µs | 2.5× |
+| Tiny template, 500 context keys | 4.6 µs | 2.7 µs | 1.7× |
 
 Built-in filters in a loop gain the most. Each filter is 7–17× faster than Django's, apart from `urlize` (below). This includes the `{% load l10n %}`, `{% load tz %}` and `{% load i18n %}` filters, and printing dates, times and `Decimal`s. Keys the template never reads cost almost nothing, because a context `dict` is read lazily. Python attribute access and method calls still run in Python, which is why model-heavy templates gain less than plain data.
 
@@ -26,19 +26,19 @@ Compiling is also much faster, which matters for the first request after a deplo
 
 | Compile only | Django | Rusty | Speedup |
 |---|---|---|---|
-| Table template | 114 µs | 6.0 µs | 19× |
-| Inheritance page | 54 µs | 3.7 µs | 15× |
-| Tiny template | 9.9 µs | 1.2 µs | 8× |
+| Table template | 108 µs | 5.3 µs | 20× |
+| Inheritance page | 50 µs | 3.6 µs | 14× |
+| Tiny template | 9.1 µs | 1.2 µs | 8× |
 
-`DEBUG = True` warm renders are as fast as non-debug ones: 13.3× for the table, 3.7× for the mixed template.
+`DEBUG = True` warm renders are as fast as non-debug ones: 13.7× for the table, 3.7× for the mixed template.
 
 ## Where it is not faster
 
 | Scenario | Django | Rusty | Speedup |
 |---|---|---|---|
-| Compile a mixed template (custom `Node` tag) | 50 µs | 71 µs | 0.70× |
-| `urlize` on 200 email addresses | 2,720 µs | 2,304 µs | 1.18× |
-| Custom `simple_tag` on each of 200 rows | 322 µs | 191 µs | 1.7× |
+| Compile a mixed template (custom `Node` tag) | 46 µs | 69 µs | 0.66× |
+| `urlize` on 200 email addresses | 2,651 µs | 2,276 µs | 1.16× |
+| Custom `simple_tag` on each of 200 rows | 332 µs | 189 µs | 1.8× |
 
 - **Mixed templates compile slower.** A custom tag with its own compile function makes the template "mixed". Django's parser then builds that template, and Rust compiles the native regions on top. Warm renders are still several times faster, so this only matters without the cached loader.
 - **Inputs handed to Django.** `urlize` sends any word that might be a link to Django's `urlizer`, which keeps validators and IDNA handling exact. Text full of email addresses or URLs therefore runs at about Django's speed. The README lists the other fallbacks under "What is ported".
@@ -63,7 +63,7 @@ Things that affect what you will see:
 - **Check which templates are native.** `engine.explain_template(source)` reports `native`, `hybrid` or `unsupported` and the first blocker; see [Inspecting templates](../../README.md#inspecting-templates). Hybrid templates still render faster, but compile slower.
 - **Hot custom tags and filters stay in Python.** If profiling shows one custom filter or tag dominating, moving its work into the view, or using a built-in, gains more than the engine can.
 - **Database queries triggered from templates** take the same time with either engine, for example a lazy queryset first evaluated in `{% for %}`.
-- **Memory.** In `benchmark_realistic_page.py`, after the first window, Rusty's traced Python memory grew 1.5–7 KB per window, about the same with 200 or 1,000 renders per window. So it isn't growing with each render. Django's grew under 1 KB. A discarded Rusty engine retains less Python memory than Django's (about 1,000 vs 1,300 bytes). `tracemalloc` doesn't see Rust's own allocations, so watch process memory in long-running workers too.
+- **Memory.** In `benchmark_realistic_page.py`, after the first window, Rusty's traced Python memory grew 1.5–4 KB per window, about the same with 200 or 1,000 renders per window. So it isn't growing with each render. Django's grew under 1 KB. A discarded Rusty engine retains less Python memory than Django's (about 1,000 vs 1,400 bytes). `tracemalloc` doesn't see Rust's own allocations, so watch process memory in long-running workers too.
 
 ## Measuring your own project
 

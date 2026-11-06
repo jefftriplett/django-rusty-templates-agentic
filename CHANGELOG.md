@@ -36,6 +36,8 @@ Read context dicts lazily, so a small template with 500 context keys goes from 1
 
 Let block tags span lines on Django 6.2 and accept its transitional `allow_multiline_tags` option, read 6.2 `comment` blocks as raw text, and close a comment only on an exact `endcomment`, as Django does. ([#311](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/311))
 
+Refresh the benchmark numbers and summarize them in the README. ([#312](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/312))
+
 ## 2026.11.1
 
 Build macOS wheels on `macos-15` after GitHub retired the `macos-14` runner. ([#206](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/206))

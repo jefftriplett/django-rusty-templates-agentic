@@ -155,7 +155,7 @@ For detailed instructions on setting up your development environment and contrib
 
 ### Benchmarks
 
-For an overview of where Rusty is faster, where it isn't, and what that means for request times, see [What to expect](docs/benchmarks/what-to-expect.md). A plain `dict` context is read lazily, so keys a template never reads cost almost nothing. `uv run python scripts/benchmark_summary.py --json-output summary.json` runs its scenarios through both Django backends. The scripts below measure individual mechanisms.
+In the bundled benchmarks, a realistic page (`extends`, 25 included cards, i18n tags, a request and context processors) renders 7.2× faster than Django, a 200-row table with built-in filters 13×, and templates compile 8–20× faster. Custom tags and filters run in Python, so templates that lean on them gain less, and compiling a template with a custom compiled tag is slower than Django. For an overview of where Rusty is faster, where it isn't, and what that means for request times, see [What to expect](docs/benchmarks/what-to-expect.md). A plain `dict` context is read lazily, so keys a template never reads cost almost nothing. `uv run python scripts/benchmark_summary.py --json-output summary.json` runs its scenarios through both Django backends. The scripts below measure individual mechanisms.
 
 `uv run python scripts/benchmark_loop_values.py --json-output results.json`
 measures integer loops, text-only loops, repeated variables, and mixed component
