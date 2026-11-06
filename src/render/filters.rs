@@ -20,9 +20,9 @@ use crate::filters::{
     JustifyFilter, LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter,
     LinenumbersFilter, LowerFilter, MakeListFilter, Phone2numericFilter, PluralizeFilter,
     PprintFilter, RandomFilter, SafeFilter, SafeseqFilter, SliceArgument, SliceFilter,
-    SlugifyFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter,
-    TruncateWordsFilter, UnorderedListFilter, UpperFilter, UrlencodeFilter, WordcountFilter,
-    WordwrapFilter, YesnoFilter, python_int,
+    SlugifyFilter, StriptagsFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter,
+    TruncateCharsHtmlFilter, TruncateWordsFilter, UnorderedListFilter, UpperFilter,
+    UrlencodeFilter, WordcountFilter, WordwrapFilter, YesnoFilter, python_int,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -145,6 +145,7 @@ impl ResolveFilter for FilterType {
             Self::Pprint(filter) => filter.resolve(variable, py, template, context),
             Self::Filesizeformat(filter) => filter.resolve(variable, py, template, context),
             Self::UnorderedList(filter) => filter.resolve(variable, py, template, context),
+            Self::Striptags(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -2747,6 +2748,106 @@ impl ResolveFilter for UnorderedListFilter {
                     output,
                 )))));
             }
+        }
+        self.django.resolve(variable, py, template, context)
+    }
+}
+
+/// Elements whose content Python's HTML parser reads as raw text.
+const RAW_TEXT_ELEMENTS: [&str; 10] = [
+    "iframe",
+    "noembed",
+    "noframes",
+    "noscript",
+    "plaintext",
+    "script",
+    "style",
+    "textarea",
+    "title",
+    "xmp",
+];
+
+/// The length of the simple tag at the start of `text`, which begins with
+/// `<`: a start or end tag with an ASCII name and plain attributes, with no
+/// `<` or `>` inside it. Returns `None` for anything else, such as comments,
+/// raw text elements or a bare `<`, whose handling depends on the version of
+/// Python's HTML parser.
+fn simple_tag_length(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let end_tag = bytes.get(1) == Some(&b'/');
+    let name_start = if end_tag { 2 } else { 1 };
+    let name_length = bytes
+        .get(name_start..)?
+        .iter()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'-')
+        .count();
+    let name = text.get(name_start..name_start + name_length)?;
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic())
+        || RAW_TEXT_ELEMENTS
+            .iter()
+            .any(|element| element.eq_ignore_ascii_case(name))
+    {
+        return None;
+    }
+    let mut index = name_start + name_length;
+    if !matches!(bytes.get(index), Some(b'>' | b'/' | b' ' | b'\t' | b'\n')) {
+        return None;
+    }
+    let mut quote = None;
+    let mut previous = 0;
+    loop {
+        let byte = *bytes.get(index)?;
+        match quote {
+            Some(open) if byte == open => quote = None,
+            Some(_) if byte == b'<' || byte == b'>' => return None,
+            Some(_) => {}
+            None => match byte {
+                b'>' => return Some(index + 1),
+                b'<' => return None,
+                // Quotes only open an attribute value in a start tag.
+                b'"' | b'\'' if !end_tag && previous == b'=' => quote = Some(byte),
+                b'"' | b'\'' | b'`' => return None,
+                _ => {}
+            },
+        }
+        previous = byte;
+        index += 1;
+    }
+}
+
+/// Django's `strip_tags` for text whose tags are all simple, or `None` to
+/// leave the text to Django. Entities are left to Django too, because its
+/// parser rewrites some of them.
+fn strip_simple_tags(text: &str) -> Option<String> {
+    if !text.contains('<') {
+        return Some(text.to_owned());
+    }
+    if text.contains('&') {
+        return None;
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        output.push_str(&rest[..start]);
+        let length = simple_tag_length(&rest[start..])?;
+        rest = &rest[start + length..];
+    }
+    output.push_str(rest);
+    Some(output)
+}
+
+impl ResolveFilter for StriptagsFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        if let Some(text) = Text::from_variable(variable.as_ref(), py)?
+            && let Some(stripped) = strip_simple_tags(text.as_str())
+        {
+            return Ok(Some(text.into_content(stripped, context)));
         }
         self.django.resolve(variable, py, template, context)
     }

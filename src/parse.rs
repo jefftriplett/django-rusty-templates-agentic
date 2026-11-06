@@ -63,6 +63,7 @@ use crate::filters::SafeseqFilter;
 use crate::filters::SliceArgument;
 use crate::filters::SliceFilter;
 use crate::filters::SlugifyFilter;
+use crate::filters::StriptagsFilter;
 use crate::filters::TimesinceFilter;
 use crate::filters::TitleFilter;
 use crate::filters::TruncateCharsFilter;
@@ -416,6 +417,11 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::UnorderedList(UnorderedListFilter { django })
+                }
+                BuiltinFilter::Striptags
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Striptags(StriptagsFilter { django })
                 }
                 _ => FilterType::Django(django),
             };
