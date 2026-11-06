@@ -1962,3 +1962,121 @@ def test_striptags_replaced_builtin(monkeypatch):
     monkeypatch.setitem(register.filters, "striptags", lambda value: "replacement")
     django, rusty = render_both("{{ value|striptags }}", {"value": "<b>a</b>"})
     assert rusty == django == "replacement"
+
+
+STRINGFORMAT_SPECS = [
+    *(
+        flags + width + precision + conversion
+        for flags in ["", "-", "0", "+", " ", "#", "-0", "0-", "+ ", " +", "#0", "-#+"]
+        for width in ["", "1", "8"]
+        for precision in ["", ".0", ".2", "."]
+        for conversion in "sdixXofFeE"
+    ),
+    "r",
+    "a",
+    "%",
+    "5",
+    "",
+    "ds",
+    "(key)s",
+    "*d",
+    "ld",
+    "1000d",
+    "10.30f",
+]
+
+STRINGFORMAT_VALUES = [
+    0,
+    7,
+    -42,
+    255,
+    2**53,
+    2**53 + 1,
+    -(2**63),
+    2**70,
+    0.0,
+    -0.0,
+    3.14159,
+    -2.5,
+    0.5,
+    1.5,
+    2.675,
+    1e-7,
+    123456789.125,
+    1e22,
+    float("inf"),
+    float("nan"),
+    True,
+    "",
+    "text",
+    "é日本語",
+    "<b>",
+    mark_safe("<i>safe</i>"),
+    translation.gettext_lazy("Yes"),
+    None,
+    (1, 2),
+    [1, 2],
+    Decimal("1.5"),
+]
+
+
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+@pytest.mark.parametrize("value", STRINGFORMAT_VALUES, ids=repr)
+def test_stringformat_matches_django(value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "{{ value|stringformat:spec }}{% endautoescape %}"
+    )
+    templates = {
+        name: engines[name].from_string(source) for name in ("django", "rusty")
+    }
+    mismatches = []
+    rendered = 0
+    for spec in STRINGFORMAT_SPECS:
+        results = []
+        for name in ("django", "rusty"):
+            try:
+                results.append(templates[name].render({"value": value, "spec": spec}))
+            except Exception as error:
+                results.append((type(error), str(error)))
+        if results[0] != results[1]:
+            mismatches.append((spec, *results))
+        rendered += isinstance(results[0], str)
+    assert mismatches == []
+    assert rendered
+
+
+@pytest.mark.parametrize("value", [65, 2**70, "a", "ab", 1.5])
+def test_stringformat_character_matches_django(value):
+    django, rusty = render_both("{{ value|stringformat:'c' }}", {"value": value})
+    assert rusty == django
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "7|stringformat:'03d'",
+        "7|stringformat:'s'",
+        "1.5|stringformat:'.3f'",
+        "'abc'|stringformat:'5s'",
+        "missing|stringformat:'s'",
+        "missing|stringformat:'d'",
+        "value|stringformat:5",
+        "value|stringformat:missing",
+        "value|stringformat",
+    ],
+)
+def test_stringformat_literals_match_django(expression):
+    source = "{{ " + expression + " }}"
+    django, rusty = render_both(source, {"value": 7})
+    assert type(rusty) is type(django)
+    if isinstance(django, str):
+        assert rusty == django
+
+
+def test_stringformat_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(
+        register.filters, "stringformat", lambda value, arg: "replacement"
+    )
+    django, rusty = render_both("{{ value|stringformat:'d' }}", {"value": 1})
+    assert rusty == django == "replacement"
