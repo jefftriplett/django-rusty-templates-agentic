@@ -41,6 +41,9 @@ pub enum FilterType {
     TruncateWords(TruncateWordsFilter),
     Pluralize(PluralizeFilter),
     GetDigit(GetDigitFilter),
+    Phone2numeric(Phone2numericFilter),
+    Urlencode(UrlencodeFilter),
+    Iriencode(IriencodeFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -314,6 +317,27 @@ pub struct PluralizeFilter {
 /// digit strings with an integer argument. Other inputs call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GetDigitFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `phone2numeric`, computed natively for ASCII strings. Other
+/// inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Phone2numericFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `urlencode`, computed natively with the default or an ASCII
+/// `safe` argument. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UrlencodeFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `iriencode`, computed natively. Values whose `str()` fails call
+/// Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IriencodeFilter {
     pub django: DjangoFilter,
 }
 
