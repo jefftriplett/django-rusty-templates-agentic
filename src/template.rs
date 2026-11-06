@@ -373,7 +373,7 @@ pub mod django_rusty_templates {
                 .with_loader(py, |loader| {
                     loader.find_template(py, &template_name, &self.engine)
                 })
-                .map_err(|_| TemplateDoesNotExist::new_err(template_name.clone()))??;
+                .map_err(|error| template_does_not_exist(template_name.clone(), error.tried))??;
             let mut template = match lookup {
                 Lookup::Cached(template) => template,
                 // Compile without the loader lock, as the engine's `get_template` does.
@@ -559,10 +559,12 @@ pub mod django_rusty_templates {
             Some(item) => item?,
             None => return Err(ImproperlyConfigured::new_err("Configuration is empty")),
         };
-        let loader_path = first_item.extract::<String>().map_err(|_| {
-            ImproperlyConfigured::new_err(
+        let loader_path = first_item.extract::<String>().map_err(|error| {
+            let configuration = ImproperlyConfigured::new_err(
                 "First element of tuple configuration must be a Loader class name",
-            )
+            );
+            configuration.set_cause(loader.py(), Some(error));
+            configuration
         })?;
         let remaining_args = match items.next() {
             Some(item) => item?,
@@ -601,10 +603,12 @@ pub mod django_rusty_templates {
         }
 
         let (loader_path, args) = unpack(&loader).map_err(|e| {
-            ImproperlyConfigured::new_err(format!(
+            let invalid = ImproperlyConfigured::new_err(format!(
                 "Invalid template loader: {loader}. {}",
                 e.value(py),
-            ))
+            ));
+            invalid.set_cause(py, Some(e));
+            invalid
         })?;
 
         map_loader(py, &loader_path, Some(args), encoding, dirs)
@@ -887,23 +891,26 @@ pub mod django_rusty_templates {
             template.loader_path.insert(0, index);
             return Ok(template);
         }
-        let requested_name = template_name.to_string();
-        Err(TemplateDoesNotExist::new_err((
-            template_name.into_owned(),
-            tried
-                .into_iter()
-                .map(|(name, reason)| {
-                    (
-                        Origin {
-                            name,
-                            template_name: Some(requested_name.clone()),
-                            loader: None,
-                        },
-                        reason,
-                    )
-                })
-                .collect::<Vec<_>>(),
-        )))
+        Err(template_does_not_exist(template_name.into_owned(), tried))
+    }
+
+    /// Django's `TemplateDoesNotExist`, with `tried` listing each skipped
+    /// origin and why.
+    fn template_does_not_exist(template_name: String, tried: Vec<(String, String)>) -> PyErr {
+        let tried = tried
+            .into_iter()
+            .map(|(name, reason)| {
+                (
+                    Origin {
+                        name,
+                        template_name: Some(template_name.clone()),
+                        loader: None,
+                    },
+                    reason,
+                )
+            })
+            .collect::<Vec<_>>();
+        TemplateDoesNotExist::new_err((template_name, tried))
     }
 
     pub fn select_template(
@@ -2747,26 +2754,29 @@ pub mod django_rusty_templates {
                 }
                 for processor in processors {
                     let result = processor.call1((request,))?;
-                    let values: HashMap<String, Py<PyAny>> = result.extract().map_err(|_| {
-                        let name = processor
-                            .getattr("__qualname__")
-                            .map_or_else(|_| "unknown".to_string(), |name| name.to_string());
-                        let name = if is_django_context {
-                            name
-                        } else {
-                            let module = processor.getattr("__module__").map_or_else(
-                                |_| "unknown".to_string(),
-                                |module| module.to_string(),
-                            );
-                            format!("{module}.{name}")
-                        };
-                        let message = if is_django_context {
-                            format!("Context processor {name} didn't return a dictionary.")
-                        } else {
-                            format!("Context processor '{name}' didn't return a dictionary.")
-                        };
-                        PyTypeError::new_err(message)
-                    })?;
+                    let values: HashMap<String, Py<PyAny>> =
+                        result.extract().map_err(|error: PyErr| {
+                            let name = processor
+                                .getattr("__qualname__")
+                                .map_or_else(|_| "unknown".to_string(), |name| name.to_string());
+                            let name = if is_django_context {
+                                name
+                            } else {
+                                let module = processor.getattr("__module__").map_or_else(
+                                    |_| "unknown".to_string(),
+                                    |module| module.to_string(),
+                                );
+                                format!("{module}.{name}")
+                            };
+                            let message = if is_django_context {
+                                format!("Context processor {name} didn't return a dictionary.")
+                            } else {
+                                format!("Context processor '{name}' didn't return a dictionary.")
+                            };
+                            let not_a_dict = PyTypeError::new_err(message);
+                            not_a_dict.set_cause(py, Some(error));
+                            not_a_dict
+                        })?;
                     processor_values.extend(values);
                 }
             }

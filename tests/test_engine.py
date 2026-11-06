@@ -346,6 +346,22 @@ def test_invalid_loader_configurations(loaders, error_message):
     assert error_message == str(exc_info.value)
 
 
+def test_invalid_loader_name_keeps_cause():
+    with pytest.raises(ImproperlyConfigured) as exc_info:
+        RustyTemplates(
+            {
+                "OPTIONS": {"loaders": [(123, "arg")]},
+                "NAME": "rust",
+                "DIRS": [],
+                "APP_DIRS": False,
+            }
+        )
+
+    unpack_error = exc_info.value.__cause__
+    assert isinstance(unpack_error, ImproperlyConfigured)
+    assert isinstance(unpack_error.__cause__, TypeError)
+
+
 def test_valid_file_charset():
     RustyTemplates(
         {

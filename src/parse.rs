@@ -1662,7 +1662,9 @@ impl<'t, 'py> Parser<'t, 'py> {
         })();
         let filter = Gc::new(
             lookup
-                .map_err(|_| ParseError::InvalidFilter {
+                // A built-in missing from the filter library is what Django
+                // reports as an invalid filter, so the lookup error isn't needed.
+                .map_err(|_missing_filter| ParseError::InvalidFilter {
                     at: at.into(),
                     filter: name.to_string(),
                 })?
