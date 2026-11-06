@@ -73,6 +73,7 @@ use crate::filters::TitleFilter;
 use crate::filters::TruncateCharsFilter;
 use crate::filters::TruncateCharsHtmlFilter;
 use crate::filters::TruncateWordsFilter;
+use crate::filters::TruncateWordsHtmlFilter;
 use crate::filters::UnorderedListFilter;
 use crate::filters::UpperFilter;
 use crate::filters::UrlencodeFilter;
@@ -446,6 +447,11 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::JsonScript(JsonScriptFilter { django })
+                }
+                BuiltinFilter::TruncatewordsHtml
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::TruncateWordsHtml(TruncateWordsHtmlFilter { django })
                 }
                 _ => FilterType::Django(django),
             };

@@ -2614,3 +2614,154 @@ def test_truncatechars_unicode_safety_matches_django(value, autoescape):
     )
     django, rusty = render_both(source, {"value": value})
     assert rusty == django
+
+
+TRUNCATE_HTML_PIECES = [
+    "word",
+    "two words",
+    " ",
+    "  \n\t ",
+    "é",
+    "é",
+    "日本",
+    "\x1c",
+    " ",
+    "a > b",
+    'say "hi"',
+    "it's",
+    "…",
+    " …",
+    "<p>",
+    "</p>",
+    "<P>",
+    "</P >",
+    "<b>",
+    "</b>",
+    "<i>",
+    "</i>",
+    "<br>",
+    "<br/>",
+    "<br />",
+    "</br>",
+    "<img src='a.png' alt=\"x\">",
+    "<b/>",
+    '<a href="/path?x=1" class=link>',
+    "</a>",
+    "<div data-x=1 hidden>",
+    "</div>",
+    "<my-tag>",
+    "</my-tag>",
+    '<a href="x"/>',
+    "<a href=x/>",
+    "<script>",
+    "</script>",
+    "<style>x</style>",
+    "<!-- c -->",
+    "<!DOCTYPE html>",
+    "&amp;",
+    "&",
+    "<",
+    "</>",
+    "<1>",
+    "< b>",
+    "<b title='a>b'>",
+    "<b =x>",
+]
+
+
+def random_html(generator):
+    return "".join(
+        generator.choice(TRUNCATE_HTML_PIECES) for _ in range(generator.randint(1, 10))
+    )
+
+
+@pytest.mark.parametrize("name", ["truncatechars_html", "truncatewords_html"])
+def test_truncate_html_random_matches_django(name):
+    import random
+
+    generator = random.Random(252)
+    values = [random_html(generator) for _ in range(2000)]
+    source = (
+        "{% for value in values %}{% for length in lengths %}"
+        "[{{ value|" + name + ":length }}]{% endfor %}{% endfor %}"
+    )
+    lengths = [0, 1, 2, 3, 4, 5, 7, 10, 15, 40]
+    django, rusty = render_both(source, {"values": values, "lengths": lengths})
+    assert isinstance(django, str)
+    assert rusty == django
+
+
+@pytest.mark.parametrize("name", ["truncatechars_html", "truncatewords_html"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "<p>Joel is a slug</p>",
+        "<p>Joel is <i>a</i> slug</p>",
+        "<p>one <br>two <b>three</b> four</p><p>five six</p>",
+        "<div><p>Hello <b>World</b>, how are <i>you</i> today?</p></div>",
+        "<p>Café crème brûlée</p>",
+        "plain text with no tags at all",
+        "<ul><li>a</li> <li>b</li> <li>c</li></ul>",
+        "<p>unclosed <b>bold",
+        "</b>stray end<b>",
+        mark_safe("<p>safe <b>text</b> here</p>"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_truncate_html_matches_django(name, value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "{% for length in lengths %}[{{ value|" + name + ":length }}]{% endfor %}"
+        "{% endautoescape %}"
+    )
+    lengths = [-1, 0, 1, 2, 3, 4, 5, 8, 12, 17, 20, 30, 100, "3", "x"]
+    django, rusty = render_both(source, {"value": value, "lengths": lengths})
+    assert rusty == django
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "%(truncated_text)s",
+        "%(truncated_text)s [more]",
+        "[more] %(truncated_text)s",
+        "%(truncated_text)ś…",
+        "…",
+    ],
+)
+def test_truncatechars_html_translated_text(monkeypatch, text):
+    import random
+
+    pgettext = translation._trans.pgettext
+
+    def translate(context, message):
+        if context == "String to return when truncating text":
+            return text
+        return pgettext(context, message)
+
+    monkeypatch.setattr(translation._trans, "pgettext", translate)
+    generator = random.Random(len(text))
+    values = [random_html(generator) for _ in range(300)]
+    source = (
+        "{% for value in values %}{% for length in lengths %}"
+        "[{{ value|truncatechars_html:length }}]{% endfor %}{% endfor %}"
+    )
+    lengths = [1, 3, 5, 8, 13, 30]
+    django, rusty = render_both(source, {"values": values, "lengths": lengths})
+    assert rusty == django
+
+
+@pytest.mark.parametrize(
+    "value", [123, None, ["<b>x</b>"], translation.gettext_lazy("Yes")]
+)
+def test_truncatewords_html_non_strings_match_django(value):
+    django, rusty = render_both("{{ value|truncatewords_html:1 }}", {"value": value})
+    assert rusty == django
+
+
+def test_truncatewords_html_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(
+        register.filters, "truncatewords_html", lambda value, arg: "replacement"
+    )
+    django, rusty = render_both("{{ value|truncatewords_html:1 }}", {"value": "a b"})
+    assert rusty == django == "replacement"
