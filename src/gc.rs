@@ -339,6 +339,7 @@ impl Trace for FilterType {
             Self::Pluralize(filter) => filter.django.filter.trace(visit),
             Self::Justify(filter) => filter.django.filter.trace(visit),
             Self::FloatFormat(filter) => filter.django.filter.trace(visit),
+            Self::Tz(filter) => filter.django.filter.trace(visit),
             Self::Slice(filter) => filter.django.filter.trace(visit),
             Self::Join(filter) => filter.django.filter.trace(visit),
             Self::Timesince(filter) => filter.django.filter.trace(visit),

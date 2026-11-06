@@ -24,11 +24,13 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     PyDate, PyDateAccess, PyDateTime, PyDelta, PyDeltaAccess, PyDict, PyString, PyTime,
-    PyTimeAccess, PyType, PyTzInfoAccess,
+    PyTimeAccess, PyType, PyTzInfo, PyTzInfoAccess,
 };
 use pyo3::{PyTraverseError, PyVisit};
 
+use crate::filters::TzConversion;
 use crate::gc::Trace;
+use crate::render::Content;
 use crate::render::common::gettext;
 
 static GET_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -51,6 +53,8 @@ static GET_DEFAULT_TIMEZONE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DATETIME_COMBINE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TIME_MIN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TZ_DATETIME: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static UTC: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static ZONE_INFO_NOT_FOUND: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
 /// Whether `value` is `django.templatetags.tz.datetimeobject`, the subclass
 /// the `tz` filters return so later formatting skips local time conversion.
@@ -181,7 +185,7 @@ impl Trace for DateCache {
 }
 
 impl DateCache {
-    fn current_timezone<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    pub fn current_timezone<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if let Some(timezone) = &self.timezone {
             return Ok(timezone.bind(py).clone());
         }
@@ -313,6 +317,105 @@ pub fn template_localtime<'py>(
         pyo3::intern!(py, "astimezone"),
         (cache.current_timezone(py)?,),
     )
+}
+
+/// Django's `do_timezone`, behind the `localtime`, `utc` and `timezone`
+/// filters.
+///
+/// Returns `Some(None)` where Django returns `""`, and `None` to call
+/// Django's filter: subclasses, unusual time zone arguments, and errors.
+pub fn convert_timezone<'py>(
+    conversion: TzConversion,
+    value: Option<&Content<'_, 'py>>,
+    argument: Option<&Content<'_, 'py>>,
+    py: Python<'py>,
+    cache: &mut DateCache,
+) -> PyResult<Option<Option<Bound<'py, PyAny>>>> {
+    // Missing variables reach Django's filter as "", which isn't a datetime.
+    let Some(Content::Py(value)) = value else {
+        return Ok(Some(None));
+    };
+    let Ok(datetime) = value.cast_exact::<PyDateTime>() else {
+        return Ok(match value.is_instance_of::<PyDateTime>() {
+            true => None,
+            false => Some(None),
+        });
+    };
+    // `is_naive`, then `make_aware` with the default time zone.
+    let Ok(offset) = value.call_method0(pyo3::intern!(py, "utcoffset")) else {
+        return Ok(None);
+    };
+    let aware = if offset.is_none() {
+        if datetime.get_tzinfo().is_some() {
+            // An aware-looking value whose tzinfo has no offset.
+            return Ok(None);
+        }
+        let default = GET_DEFAULT_TIMEZONE
+            .import(py, "django.utils.timezone", "get_default_timezone")?
+            .call0()?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(pyo3::intern!(py, "tzinfo"), default)?;
+        value.call_method(pyo3::intern!(py, "replace"), (), Some(&kwargs))?
+    } else {
+        value.clone()
+    };
+    let timezone = match conversion {
+        TzConversion::Localtime => cache.current_timezone(py)?,
+        TzConversion::Utc => UTC.import(py, "datetime", "UTC")?.clone(),
+        TzConversion::Timezone => {
+            let zone = match argument {
+                Some(Content::String(name)) => zone_info(py, name.as_raw())?,
+                Some(Content::Py(argument)) if argument.is_instance_of::<PyTzInfo>() => {
+                    Some(argument.clone())
+                }
+                Some(Content::Py(argument)) if argument.is_instance_of::<PyString>() => {
+                    zone_info(py, &argument.cast::<PyString>()?.to_cow()?)?
+                }
+                // Absent, None, numbers and other objects: Django returns "".
+                _ => None,
+            };
+            match zone {
+                Some(zone) => zone,
+                None => return Ok(Some(None)),
+            }
+        }
+    };
+    let Ok(local) = aware.call_method1(pyo3::intern!(py, "astimezone"), (timezone,)) else {
+        return Ok(None);
+    };
+    let local = local.cast::<PyDateTime>()?;
+    // A `datetimeobject` without `fold`, as Django builds it.
+    let result = TZ_DATETIME
+        .import(py, "django.templatetags.tz", "datetimeobject")?
+        .call1((
+            local.get_year(),
+            local.get_month(),
+            local.get_day(),
+            local.get_hour(),
+            local.get_minute(),
+            local.get_second(),
+            local.get_microsecond(),
+            local.get_tzinfo(),
+        ))?;
+    result.setattr(pyo3::intern!(py, "convert_to_local_time"), false)?;
+    Ok(Some(Some(result)))
+}
+
+/// `zoneinfo.ZoneInfo(name)`, or `None` for an unknown zone. Other errors,
+/// such as invalid keys, propagate as they do from Django's filter.
+fn zone_info<'py>(py: Python<'py>, name: &str) -> PyResult<Option<Bound<'py, PyAny>>> {
+    match ZONE_INFO.import(py, "zoneinfo", "ZoneInfo")?.call1((name,)) {
+        Ok(zone) => Ok(Some(zone)),
+        Err(error)
+            if error.is_instance(
+                py,
+                ZONE_INFO_NOT_FOUND.import(py, "zoneinfo", "ZoneInfoNotFoundError")?,
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// A date, time or datetime as `render_value_in_context` prints it.

@@ -23,13 +23,13 @@ use crate::filters::{
     MakeListFilter, Phone2numericFilter, PluralizeFilter, PprintFilter, RandomFilter, SafeFilter,
     SafeseqFilter, SliceArgument, SliceFilter, SlugifyFilter, StringformatFilter, StriptagsFilter,
     TimesinceFilter, TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter,
-    TruncateWordsFilter, TruncateWordsHtmlFilter, UnorderedListFilter, UpperFilter,
+    TruncateWordsFilter, TruncateWordsHtmlFilter, TzFilter, UnorderedListFilter, UpperFilter,
     UrlencodeFilter, UrlizeFilter, UrlizetruncFilter, WordcountFilter, WordwrapFilter, YesnoFilter,
     python_int,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
-use crate::render::dateformat::{Formatted, Formatter, template_localtime};
+use crate::render::dateformat::{Formatted, Formatter, convert_timezone, template_localtime};
 use crate::render::l10n::Grouping;
 use crate::render::timesince::{TimeSince, TimeStrings, timesince};
 use crate::render::types::{
@@ -129,6 +129,7 @@ impl ResolveFilter for FilterType {
             Self::Escapejs(filter) => filter.resolve(variable, py, template, context),
             Self::External(filter) => filter.resolve(variable, py, template, context),
             Self::FloatFormat(filter) => filter.resolve(variable, py, template, context),
+            Self::Tz(filter) => filter.resolve(variable, py, template, context),
             Self::First(filter) => filter.resolve(variable, py, template, context),
             Self::ForceEscape(filter) => filter.resolve(variable, py, template, context),
             Self::Join(filter) => filter.resolve(variable, py, template, context),
@@ -793,6 +794,30 @@ fn call_django_filter<'t, 'py>(
         result
     };
     Ok(Some(Content::Py(result)))
+}
+
+impl ResolveFilter for TzFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        let converted = convert_timezone(
+            self.conversion,
+            variable.as_ref(),
+            argument.value(),
+            py,
+            &mut context.date_cache.borrow_mut(),
+        )?;
+        match converted {
+            Some(Some(value)) => Ok(Some(Content::Py(value))),
+            Some(None) => Ok(Some("".as_content())),
+            None => self.django.call(variable, argument, py, context),
+        }
+    }
 }
 
 impl ResolveFilter for DjangoFilter {
