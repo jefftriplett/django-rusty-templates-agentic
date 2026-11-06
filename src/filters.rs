@@ -28,6 +28,7 @@ pub enum FilterType {
     Last(LastFilter),
     Linebreaks(LinebreaksFilter),
     Linebreaksbr(LinebreaksbrFilter),
+    Linenumbers(LinenumbersFilter),
     Lower(LowerFilter),
     Length(LengthFilter),
     Safe(SafeFilter),
@@ -176,6 +177,9 @@ pub struct LinebreaksFilter;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinebreaksbrFilter;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinenumbersFilter;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SafeFilter;
