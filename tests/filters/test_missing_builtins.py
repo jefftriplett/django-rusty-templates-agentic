@@ -825,3 +825,21 @@ def test_linenumbers_replaced_builtin(monkeypatch):
     monkeypatch.setitem(register.filters, "linenumbers", lambda value: "replacement")
     django, rusty = render_both("{{ value|linenumbers }}", {"value": "a\nb"})
     assert rusty == django == "replacement"
+
+
+def test_truncation_text_is_cached_for_the_render(monkeypatch):
+    # Output is the same with or without the cache, so count the lookups.
+    pgettext = translation._trans.pgettext
+    calls = []
+
+    def counting(context, message):
+        if context == "String to return when truncating text":
+            calls.append(message)
+        return pgettext(context, message)
+
+    monkeypatch.setattr(translation._trans, "pgettext", counting)
+    source = "{% for value in values %}{{ value|truncatechars:3 }}{% endfor %}"
+    context = {"values": ["abcdefghij", "héllo wörld"] * 10}
+    with translation.override("en"):
+        engines["rusty"].from_string(source).render(context)
+    assert len(calls) == 1
