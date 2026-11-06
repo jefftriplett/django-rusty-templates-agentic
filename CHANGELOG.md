@@ -22,6 +22,10 @@ Truncate non-ASCII text and well-formed HTML natively in `truncatechars`, `trunc
 
 Render mixed templates with native regions in debug mode, keeping Django's error positions for the full template. ([#275](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/275))
 
+Keep quoted string literals safe under `{% autoescape off %}`, call custom filters with Django's `needs_autoescape`, `is_safe` and `expects_localtime` flags, and list in the README what still runs in Python. ([#283](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/283))
+
+Speed up compiling mixed templates by about 6%, run the `pytz` and `python-dateutil` tests in CI, and restore a test hidden by a duplicate name. ([#280](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/280), [#285](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/285), [#286](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/286))
+
 ## 2026.11.1
 
 Build macOS wheels on `macos-15` after GitHub retired the `macos-14` runner. ([#206](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/206))
