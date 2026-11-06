@@ -6,17 +6,21 @@
 //! unit for the active language, still produced by Django's `TIME_STRINGS`,
 //! so the catalogs stay the source of the text.
 //!
-//! Only exact `date` and `datetime` values with no tzinfo, a
-//! `datetime.timezone` or a `zoneinfo.ZoneInfo` are computed here. Both
-//! tzinfo types always return an offset, so a tzinfo means the value is aware.
-//! Time zone conversion and the current time still come from Python.
+//! Only exact `date` and `datetime` values are computed here. A value is
+//! aware when its `utcoffset()` isn't `None`, as Django's `is_aware` checks.
+//! Python subtracts two datetimes by their wall clocks when they share a
+//! tzinfo object, which Django's conversions usually give; when they don't,
+//! the values are left to Django. Time zone conversion and the current time
+//! still come from Python.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDate, PyDateAccess, PyDateTime, PyDict, PyTimeAccess, PyType, PyTzInfoAccess};
+use pyo3::types::{
+    PyDate, PyDateAccess, PyDateTime, PyDict, PyTimeAccess, PyType, PyTzInfo, PyTzInfoAccess,
+};
 
 use crate::render::common::gettext;
 
@@ -199,13 +203,15 @@ impl<'py> Operand<'py> {
             let aware = match datetime.get_tzinfo() {
                 None => None,
                 Some(tzinfo) => {
+                    // Both built-in tzinfo types always return an offset.
                     let tzinfo_type = tzinfo.get_type();
-                    if !tzinfo_type.is(FIXED_OFFSET.import(py, "datetime", "timezone")?)
-                        && !tzinfo_type.is(ZONE_INFO.import(py, "zoneinfo", "ZoneInfo")?)
-                    {
-                        return Ok(None);
+                    let known = tzinfo_type.is(FIXED_OFFSET.import(py, "datetime", "timezone")?)
+                        || tzinfo_type.is(ZONE_INFO.import(py, "zoneinfo", "ZoneInfo")?);
+                    if known || !datetime.call_method0("utcoffset")?.is_none() {
+                        Some(datetime.clone())
+                    } else {
+                        None
                     }
-                    Some(datetime.clone())
                 }
             };
             return Ok(Some(Self {
@@ -255,8 +261,12 @@ pub fn timesince(
         None => {
             let datetime_now = DATETIME.import(py, "datetime", "datetime")?;
             let tzinfo = d.aware.as_ref().and_then(PyTzInfoAccess::get_tzinfo);
-            let now = datetime_now.call_method1("now", (tzinfo,))?;
-            WallClock::of(now.cast::<PyDateTime>()?)
+            let now = datetime_now.call_method1("now", (&tzinfo,))?;
+            let now = now.cast::<PyDateTime>()?;
+            if !same_tzinfo(tzinfo.as_ref(), now) {
+                return Ok(None);
+            }
+            WallClock::of(now)
         }
         Some(now) => {
             let Some(now) = Operand::of(now)? else {
@@ -266,8 +276,12 @@ pub fn timesince(
                 (None, None) => now.wall_clock,
                 (Some(d), Some(now)) => {
                     let tzinfo = d.get_tzinfo();
-                    let now = now.call_method1("astimezone", (tzinfo,))?;
-                    WallClock::of(now.cast::<PyDateTime>()?)
+                    let now = now.call_method1("astimezone", (&tzinfo,))?;
+                    let now = now.cast::<PyDateTime>()?;
+                    if !same_tzinfo(tzinfo.as_ref(), now) {
+                        return Ok(None);
+                    }
+                    WallClock::of(now)
                 }
                 _ => return Ok(Some(TimeSince::Mismatched)),
             }
@@ -278,6 +292,17 @@ pub fn timesince(
         true => (now, d.wall_clock),
     };
     Ok(Some(TimeSince::Partials(partials(d, now))))
+}
+
+/// Whether `now` has the tzinfo object `tzinfo`, so that Python subtracts
+/// it from a value with that tzinfo by wall clock. A conversion can return
+/// another object, as `pytz` does for a different DST state.
+fn same_tzinfo(tzinfo: Option<&Bound<'_, PyTzInfo>>, now: &Bound<'_, PyDateTime>) -> bool {
+    match (tzinfo, now.get_tzinfo()) {
+        (None, None) => true,
+        (Some(tzinfo), Some(now)) => tzinfo.is(&now),
+        _ => false,
+    }
 }
 
 /// The units between `d` and `now`, which share a time zone. `None` when
