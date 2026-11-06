@@ -126,7 +126,8 @@ Custom filters run in Python and are called as Django calls them: `is_safe`, `ne
 * `json_script`: dates, decimals and lazy strings.
 * `stringformat`, `dictsort`, `unordered_list` and `floatformat`: unusual format specifiers, subclasses and generators.
 * The date formatter: time zones other than `datetime.timezone` and `ZoneInfo`.
-* Printing numbers, and `localize`/`unlocalize`: `Decimal`s written with an exponent or that aren't finite, floats with an exponent, and subclasses of `int`, `float`, `Decimal` and `str`. `unlocalize` of dates also calls Django.
+* Printing values (`{{ value }}`): `Decimal`s written with an exponent or that aren't finite, floats with an exponent, subclasses of `int`, `float`, `Decimal`, `date`, `time` and `datetime`, and dates inside a `{% localize %}` block.
+* `localize` and `unlocalize`: the same numbers, `str` subclasses, and `unlocalize` of dates.
 * `localtime`, `utc` and `timezone`: `datetime` subclasses and tzinfos without an offset.
 * `language_name*` and `language_bidi`: codes that aren't plain strings, and codes `get_language_info` rejects.
 
@@ -154,7 +155,7 @@ For detailed instructions on setting up your development environment and contrib
 
 ### Benchmarks
 
-For an overview of where Rusty is faster, where it isn't, and what that means for request times, see [What to expect](docs/benchmarks/what-to-expect.md). `uv run python scripts/benchmark_summary.py --json-output summary.json` runs its scenarios through both Django backends. The scripts below measure individual mechanisms.
+For an overview of where Rusty is faster, where it isn't, and what that means for request times, see [What to expect](docs/benchmarks/what-to-expect.md). A plain `dict` context is read lazily, so keys a template never reads cost almost nothing. `uv run python scripts/benchmark_summary.py --json-output summary.json` runs its scenarios through both Django backends. The scripts below measure individual mechanisms.
 
 `uv run python scripts/benchmark_loop_values.py --json-output results.json`
 measures integer loops, text-only loops, repeated variables, and mixed component
