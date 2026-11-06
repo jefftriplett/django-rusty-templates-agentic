@@ -188,7 +188,9 @@ def test_truncatechars_follows_language_changes(value, expected):
     assert rusty == django == expected
 
 
-@pytest.mark.parametrize("name", ["truncatechars", "truncatewords"])
+@pytest.mark.parametrize(
+    "name", ["truncatechars", "truncatewords", "truncatechars_html"]
+)
 @pytest.mark.parametrize(
     "length", [None, [5], "", "5.0"], ids=["none", "list", "empty", "float_text"]
 )
@@ -200,7 +202,9 @@ def test_truncate_invalid_length(name, length):
     assert rusty == django
 
 
-@pytest.mark.parametrize("name", ["truncatechars", "truncatewords"])
+@pytest.mark.parametrize(
+    "name", ["truncatechars", "truncatewords", "truncatechars_html"]
+)
 def test_truncate_replaced_builtin(monkeypatch, name):
     monkeypatch.setitem(register.filters, name, lambda value, length: "replacement")
     django, rusty = render_both(
@@ -892,3 +896,90 @@ def test_justify_replaced_builtin(name, monkeypatch):
     monkeypatch.setitem(register.filters, name, lambda value, arg: "replacement")
     django, rusty = render_both("{{ value|" + name + ":4 }}", {"value": "a"})
     assert rusty == django == "replacement"
+
+
+@pytest.mark.parametrize("language", ["en", "ckb", "he"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("abcdefghij", id="ten_ascii"),
+        pytest.param("<p>one <b>two</b> three</p>", id="tags"),
+        pytest.param("<p>a<br>b<img src='x'/>c</p>", id="void_tags"),
+        pytest.param("a &amp; b &lt;c&gt; &#39;d&#39;", id="charrefs"),
+        pytest.param("a & b < c ' \"", id="raw_specials"),
+        pytest.param("<p>héllo <i>wörld</i></p>", id="non_ascii"),
+        pytest.param("e\u0301" * 6, id="combining"),
+        pytest.param("<p>unclosed <b>tags", id="unclosed"),
+        pytest.param("<!-- comment -->text<script>x<y</script>", id="comment_script"),
+        pytest.param(mark_safe("<b>bold</b> text"), id="safe"),
+        pytest.param(translation.gettext_lazy("Goodbye"), id="lazy"),
+        pytest.param(12345678901, id="int"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_truncatechars_html_matches_django(language, value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "{% for n in lengths %}[{{ value|truncatechars_html:n }}]{% endfor %}"
+        '[{{ missing|truncatechars_html:3 }}][{{ value|truncatechars_html:"3" }}]'
+        "{% endautoescape %}"
+    )
+    context = {"value": value, "lengths": TRUNCATECHARS_LENGTHS}
+    with translation.override(language):
+        django, rusty = render_both(source, context)
+    assert rusty == django
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("%(truncated_text)s", id="empty"),
+        pytest.param("%(truncated_text)s [more]", id="long"),
+        pytest.param("[more] %(truncated_text)s", id="prefix"),
+        pytest.param("%(truncated_text)s<i>…</i>", id="html"),
+        pytest.param("\u2026", id="no_placeholder"),
+    ],
+)
+def test_truncatechars_html_translated_text(monkeypatch, text):
+    pgettext = translation._trans.pgettext
+
+    def translate(context, message):
+        if context == "String to return when truncating text":
+            return text
+        return pgettext(context, message)
+
+    monkeypatch.setattr(translation._trans, "pgettext", translate)
+    source = "{% for n in lengths %}[{{ value|truncatechars_html:n }}]{% endfor %}"
+    for value in ["abcdefghij", "<p>abc\u2026</p>", "<b>héllo</b> wörld"]:
+        context = {"value": value, "lengths": TRUNCATECHARS_LENGTHS}
+        django, rusty = render_both(source, context)
+        assert rusty == django
+
+
+def test_truncatechars_html_follows_language_changes():
+    def activate():
+        translation.activate("ckb")
+        return ""
+
+    def deactivate():
+        translation.deactivate_all()
+        return ""
+
+    source = (
+        "{% load i18n %}{{ value|truncatechars_html:5 }}"
+        "{% language 'he' %}{{ value|truncatechars_html:5 }}{% endlanguage %}"
+        "{{ activate }}{{ value|truncatechars_html:5 }}"
+        "{{ deactivate }}{{ value|truncatechars_html:5 }}"
+    )
+    context = {
+        "value": "<p>abcdefghij</p>",
+        "activate": activate,
+        "deactivate": deactivate,
+    }
+    with translation.override("en"):
+        django = engines["django"].from_string(source).render(context)
+    with translation.override("en"):
+        rusty = engines["rusty"].from_string(source).render(context)
+    assert rusty == django

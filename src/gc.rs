@@ -315,6 +315,7 @@ impl Trace for FilterType {
             Self::Django(filter) => filter.filter.trace(visit),
             Self::External(filter) => filter.filter.trace(visit),
             Self::TruncateChars(filter) => filter.django.filter.trace(visit),
+            Self::TruncateCharsHtml(filter) => filter.django.filter.trace(visit),
             Self::TruncateWords(filter) => filter.django.filter.trace(visit),
             Self::Justify(filter) => filter.django.filter.trace(visit),
             Self::FloatFormat(filter) => filter.django.filter.trace(visit),
