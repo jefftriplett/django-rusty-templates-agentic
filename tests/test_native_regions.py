@@ -13,7 +13,7 @@ def test_regions_preserve_variable_inspection_and_debug_nodes(debug):
     assert len(template.nodelist.get_nodes_by_type(VariableNode)) == 2
     assert len(
         template.nodelist.rendering_nodes.get_nodes_by_type(NativeRegionNode)
-    ) == (0 if debug else 1)
+    ) == 1
     assert template.render(Context({"first": "<b>", "second": "Café"})) == (
         "<p>&lt;b&gt; / Café</p>"
     )

@@ -353,6 +353,7 @@ pub mod django_rusty_templates {
                     nodes: Gc::new(Vec::new()),
                     has_inheritance: false,
                     has_python_callbacks: false,
+                    interop_fragment: false,
                     engine: self.engine.clone(),
                     template_name: Some(renderer.getattr("name")?.extract()?),
                     loader_path: loader.path[self.path.len()..].to_vec(),
@@ -852,6 +853,7 @@ pub mod django_rusty_templates {
                 nodes: Gc::new(Vec::new()),
                 has_inheritance: false,
                 has_python_callbacks: false,
+                interop_fragment: false,
                 engine,
             });
         }
@@ -1330,6 +1332,7 @@ pub mod django_rusty_templates {
                 python_renderer: None,
                 has_inheritance: false,
                 has_python_callbacks,
+                interop_fragment: true,
             })
         }
 
@@ -1373,6 +1376,17 @@ pub mod django_rusty_templates {
                 template_code.extract()?,
                 self.engine.clone(),
             )
+        }
+
+        /// A variable fragment of a mixed template; see `Template::interop_fragment`.
+        fn _from_string_fragment(&self, template_code: Bound<'_, PyString>) -> PyResult<Template> {
+            let mut template = Template::new_from_string(
+                template_code.py(),
+                template_code.extract()?,
+                self.engine.clone(),
+            )?;
+            template.interop_fragment = true;
+            Ok(template)
         }
 
         /// Preserve Django's direct Template constructor metadata in conformance tests.
@@ -1679,6 +1693,10 @@ pub mod django_rusty_templates {
         has_inheritance: bool,
         has_python_callbacks: bool,
         python_renderer: Option<Gc<Py<PyAny>>>,
+        /// A fragment of a mixed template. In debug mode its errors keep the
+        /// fragment's span for the interop node to map onto the full template,
+        /// instead of debug data for the fragment's own source.
+        interop_fragment: bool,
     }
 
     impl Trace for Template {
@@ -1842,6 +1860,7 @@ pub mod django_rusty_templates {
                 python_renderer,
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
                 has_python_callbacks,
+                interop_fragment: false,
                 nodes: Gc::new(nodes),
                 engine,
             })
@@ -1990,6 +2009,7 @@ pub mod django_rusty_templates {
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
                 has_python_callbacks: self.has_python_callbacks
                     && Self::nodes_have_callbacks(&nodes),
+                interop_fragment: self.interop_fragment,
                 nodes,
                 caches: TemplateCaches {
                     native_partials: self.caches.native_partials.clone(),
@@ -2237,7 +2257,7 @@ pub mod django_rusty_templates {
                     match node.render_into(py, template, context, output) {
                         Err(PyRenderError::InvalidTagResult(value)) => join.push(index, value),
                         Err(PyRenderError::PyErr(error)) => {
-                            if self.engine.debug.load(Ordering::Relaxed) {
+                            if self.engine.debug.load(Ordering::Relaxed) && !self.interop_fragment {
                                 let _ = (|| -> PyResult<()> {
                                     py.import("django_rusty_templates.diagnostics")?
                                         .getattr("attach_debug")?
@@ -2343,6 +2363,9 @@ pub mod django_rusty_templates {
                 Python::attach(|py| {
                     let _ = (|| -> PyResult<()> {
                         error.value(py).setattr("_rusty_token_span", span)?;
+                        if self.interop_fragment {
+                            return Ok(());
+                        }
                         py.import("django_rusty_templates.diagnostics")?
                             .getattr("attach_debug")?
                             .call1((

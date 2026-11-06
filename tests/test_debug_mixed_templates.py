@@ -3,10 +3,9 @@ from types import ModuleType
 
 import pytest
 from django.template import Context, Engine as DjangoEngine, Library, Node
-from django.template.base import VariableNode
 
 from django_rusty_templates import Engine
-from django_rusty_templates.interop import InteropTemplate, NativeVariableNode
+from django_rusty_templates.interop import NativeRegionNode
 
 
 @pytest.fixture
@@ -35,9 +34,7 @@ def mixed_options(monkeypatch):
 
 
 @pytest.mark.parametrize("cached", [False, True])
-def test_debug_inherited_components_do_not_compile_variable_fragments(
-    monkeypatch, mixed_options, cached
-):
+def test_debug_inherited_components_render_native_regions(mixed_options, cached):
     templates = {
         "base.html": "{% load mixed %}{% marker %}<main>{% block body %}base{% endblock %}</main>",
         "child.html": '{% extends "base.html" %}{% block body %}{% load mixed %}{% marker %}{% for value in values %}{{ value }}{% badge value %}{% card value %}{% include "part.html" %}{% url "home" %}{% endfor %}{% endblock %}',
@@ -53,23 +50,11 @@ def test_debug_inherited_components_do_not_compile_variable_fragments(
     expected = (
         DjangoEngine(**options).get_template("child.html").render(Context(values))
     )
-
-    def unexpected(*args, **kwargs):
-        raise AssertionError(
-            "DEBUG mixed template compiled/rendered native variable fragments"
-        )
-
-    monkeypatch.setattr(InteropTemplate, "compile_native_nodes", unexpected)
-    monkeypatch.setattr(NativeVariableNode, "render", unexpected)
     engine = Engine(**options)
     for _ in range(2):
         template = engine.get_template("child.html")
         assert template.render(Context(values)) == expected
-        assert not template.nodelist.get_nodes_by_type(NativeVariableNode)
-        assert all(
-            type(node) is VariableNode
-            for node in template.nodelist.get_nodes_by_type(VariableNode)
-        )
+        assert template.nodelist.rendering_nodes.get_nodes_by_type(NativeRegionNode)
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -123,3 +108,62 @@ def test_debug_uncached_mixed_template_reads_changed_source(tmp_path, mixed_opti
     path.write_text(source + " updated")
     assert cached.get_template("page.html").render({"value": "new"}) == "new"
     assert uncached.get_template("page.html").render({"value": "new"}) == "new updated"
+
+
+class Noisy:
+    @property
+    def value(self):
+        raise RuntimeError("noisy")
+
+
+@pytest.fixture
+def failing_options(mixed_options):
+    module = sys.modules[mixed_options["mixed"]]
+
+    @module.register.simple_tag
+    def explode():
+        raise ValueError("explode")
+
+    return mixed_options
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["property", "unpack", "custom_tag", "include", "nested_loop", "block"],
+)
+def test_debug_region_errors_match_django(failing_options, name):
+    marker = "{% load mixed %}{% marker %}"
+    templates = {
+        "property": marker
+        + "é\nü {{ ok }}\n{% for v in values %}{{ v }} {{ noisy.value }}{% endfor %}",
+        "unpack": marker + "日本 {{ ok }}\n{% for a, b in values %}{{ a }}{% endfor %} {{ ok }}",
+        "custom_tag": marker + "é {{ ok }} {% explode %} {{ ok }}",
+        "include": marker + "é {{ ok }} {% include 'broken.html' %} {{ ok }}",
+        "broken.html": "ok\n{{ noisy.value }}",
+        "nested_loop": marker
+        + "{% for a in values %}{% for b in values %}{% if b %}{{ a }}{{ noisy.value }}{% endif %}{% endfor %}{% endfor %}",
+        "base.html": "<main>{% block body %}{% endblock %}</main>",
+        "block": '{% extends "base.html" %}{% block body %}'
+        + marker
+        + "é {{ ok }} {{ noisy.value }}{% endblock %}",
+    }
+    loader = ("django.template.loaders.locmem.Loader", templates)
+    options = dict(debug=True, libraries=failing_options, loaders=[loader])
+    context = {"values": [1, 2], "noisy": Noisy(), "ok": "fine"}
+    results = []
+    for engine in (DjangoEngine(**options), Engine(**options)):
+        with pytest.raises(Exception) as caught:
+            engine.get_template(name).render(Context(context))
+        debug = caught.value.template_debug
+        results.append(
+            (
+                type(caught.value),
+                debug["name"],
+                debug["start"],
+                debug["end"],
+                debug["during"],
+                debug["line"],
+            )
+        )
+    django, rusty = results
+    assert rusty == django
