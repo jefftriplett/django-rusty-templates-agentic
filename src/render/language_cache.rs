@@ -119,7 +119,7 @@ impl<T> LanguageCache<T> {
         init: impl FnOnce(&Bound<'py, PyString>) -> PyResult<T>,
     ) -> PyResult<Option<&mut T>> {
         let language = GET_LANGUAGE
-            .import(py, "django.utils.translation.trans_real", "catalog")?
+            .import(py, "django.utils.translation", "get_language")?
             .call0()?;
         let Ok(language) = language.cast_into::<PyString>() else {
             return Ok(None);
