@@ -1063,3 +1063,55 @@ def test_pluralize_replaced_builtin(monkeypatch):
     )
     django, rusty = render_both("{{ value|pluralize }}", {"value": 2})
     assert rusty == django == "replacement"
+
+
+GET_DIGIT_ARGUMENTS = [-1, 0, 1, 2, 3, 5, 6, 30, "1", "2", " 1", "x", 1.5, True, None]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(0, id="zero"),
+        pytest.param(12345, id="int"),
+        pytest.param(10**25, id="big_int"),
+        pytest.param(-123, id="negative"),
+        pytest.param("12345", id="digit_string"),
+        pytest.param("007", id="leading_zeros"),
+        pytest.param(" 12 ", id="spaces"),
+        pytest.param("1_000", id="underscore"),
+        pytest.param("-45", id="negative_string"),
+        pytest.param("abc", id="string"),
+        pytest.param(mark_safe("123"), id="safe"),
+        pytest.param(12.7, id="float"),
+        pytest.param(True, id="bool"),
+        pytest.param(Decimal("12"), id="decimal"),
+        pytest.param([1], id="list"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_get_digit_matches_django(value):
+    literals = "".join(
+        "[{{ value|get_digit:" + repr(argument) + " }}]"
+        for argument in GET_DIGIT_ARGUMENTS
+        if isinstance(argument, (int, str)) and not isinstance(argument, bool)
+    )
+    source = (
+        literals + "{% for argument in arguments %}"
+        "[{{ value|get_digit:argument }}]{% endfor %}"
+        "[{{ missing|get_digit:1 }}][{{ value|get_digit:2|add:1 }}]"
+    )
+    context = {"value": value, "arguments": GET_DIGIT_ARGUMENTS}
+    django, rusty = render_both(source, context)
+    assert rusty == django
+
+
+def test_get_digit_literals():
+    source = "[{{ 123|get_digit:1 }}][{{ '9876'|get_digit:3 }}][{{ 5|get_digit:9 }}]"
+    django, rusty = render_both(source, {})
+    assert rusty == django
+
+
+def test_get_digit_replaced_builtin(monkeypatch):
+    monkeypatch.setitem(register.filters, "get_digit", lambda value, arg: "replacement")
+    django, rusty = render_both("{{ value|get_digit:1 }}", {"value": 123})
+    assert rusty == django == "replacement"

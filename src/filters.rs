@@ -40,6 +40,7 @@ pub enum FilterType {
     TruncateCharsHtml(TruncateCharsHtmlFilter),
     TruncateWords(TruncateWordsFilter),
     Pluralize(PluralizeFilter),
+    GetDigit(GetDigitFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -306,6 +307,13 @@ pub enum Justify {
 /// and dicts with a string suffix argument. Other inputs call Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluralizeFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `get_digit`, computed natively for non-negative integers and
+/// digit strings with an integer argument. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GetDigitFilter {
     pub django: DjangoFilter,
 }
 

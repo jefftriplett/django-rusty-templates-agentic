@@ -14,7 +14,7 @@ use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
     DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
     EscapejsFilter, ExternalFilter, FilterType, FirstFilter, FloatFormatFilter, ForceEscapeFilter,
-    JoinFilter, Justify, JustifyFilter, LastFilter, LengthFilter, LinebreaksFilter,
+    GetDigitFilter, JoinFilter, Justify, JustifyFilter, LastFilter, LengthFilter, LinebreaksFilter,
     LinebreaksbrFilter, LinenumbersFilter, LowerFilter, PluralizeFilter, SafeFilter, SliceArgument,
     SliceFilter, SlugifyFilter, TimesinceFilter, TitleFilter, TruncateCharsFilter,
     TruncateCharsHtmlFilter, TruncateWordsFilter, UpperFilter, WordcountFilter, WordwrapFilter,
@@ -130,6 +130,7 @@ impl ResolveFilter for FilterType {
             Self::Slice(filter) => filter.resolve(variable, py, template, context),
             Self::TruncateWords(filter) => filter.resolve(variable, py, template, context),
             Self::Pluralize(filter) => filter.resolve(variable, py, template, context),
+            Self::GetDigit(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -1953,6 +1954,36 @@ impl ResolveFilter for PluralizeFilter {
                     Cow::Owned(suffix.to_string()),
                 ))));
             }
+        }
+        self.django.call(variable, argument, py, context)
+    }
+}
+
+impl ResolveFilter for GetDigitFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        // Django converts both with `int()`. A negative value can index its
+        // minus sign, which raises, so those stay with Django.
+        if let Some(position) = argument.value().and_then(integer_argument)
+            && let Some(value) = variable.as_ref().and_then(integer_argument)
+            && value >= 0
+        {
+            let digits = value.to_string();
+            let digit = match usize::try_from(position) {
+                // Django returns the converted value for a position below 1.
+                Err(_) | Ok(0) => value,
+                Ok(position) => digits
+                    .len()
+                    .checked_sub(position)
+                    .map_or(0, |index| i64::from(digits.as_bytes()[index] - b'0')),
+            };
+            return Ok(Some(Content::Int(digit.into())));
         }
         self.django.call(variable, argument, py, context)
     }

@@ -40,6 +40,7 @@ use crate::filters::FilterType;
 use crate::filters::FirstFilter;
 use crate::filters::FloatFormatFilter;
 use crate::filters::ForceEscapeFilter;
+use crate::filters::GetDigitFilter;
 use crate::filters::JoinFilter;
 use crate::filters::Justify;
 use crate::filters::JustifyFilter;
@@ -350,6 +351,11 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::Pluralize(PluralizeFilter { django })
+                }
+                BuiltinFilter::GetDigit
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::GetDigit(GetDigitFilter { django })
                 }
                 _ => FilterType::Django(django),
             };
