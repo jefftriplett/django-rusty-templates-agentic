@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Report the tried origins when a loader can't find a template and keep the original error as the cause for invalid context processor results and loader configurations, and deny more Clippy restriction lints. ([#207](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/207))
+
+Build macOS wheels on `macos-15` after GitHub retired the `macos-14` runner. ([#206](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/206))
+
 ## 2026.11.1
 
 Move shared Python imports to module level while retaining deferred imports for Django-version-specific features. ([#188](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/188))
