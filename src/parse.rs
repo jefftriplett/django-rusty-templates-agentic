@@ -35,6 +35,7 @@ use crate::filters::DivisibleByFilter;
 use crate::filters::DjangoFilter;
 use crate::filters::EscapeFilter;
 use crate::filters::EscapejsFilter;
+use crate::filters::EscapeseqFilter;
 use crate::filters::ExternalFilter;
 use crate::filters::FilterType;
 use crate::filters::FirstFilter;
@@ -51,9 +52,11 @@ use crate::filters::LinebreaksFilter;
 use crate::filters::LinebreaksbrFilter;
 use crate::filters::LinenumbersFilter;
 use crate::filters::LowerFilter;
+use crate::filters::MakeListFilter;
 use crate::filters::Phone2numericFilter;
 use crate::filters::PluralizeFilter;
 use crate::filters::SafeFilter;
+use crate::filters::SafeseqFilter;
 use crate::filters::SliceArgument;
 use crate::filters::SliceFilter;
 use crate::filters::SlugifyFilter;
@@ -374,6 +377,21 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::Iriencode(IriencodeFilter { django })
+                }
+                BuiltinFilter::MakeList
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::MakeList(MakeListFilter { django })
+                }
+                BuiltinFilter::Escapeseq
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Escapeseq(EscapeseqFilter { django })
+                }
+                BuiltinFilter::Safeseq
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Safeseq(SafeseqFilter { django })
                 }
                 _ => FilterType::Django(django),
             };

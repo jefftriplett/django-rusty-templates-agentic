@@ -44,6 +44,9 @@ pub enum FilterType {
     Phone2numeric(Phone2numericFilter),
     Urlencode(UrlencodeFilter),
     Iriencode(IriencodeFilter),
+    MakeList(MakeListFilter),
+    Escapeseq(EscapeseqFilter),
+    Safeseq(SafeseqFilter),
     Upper(UpperFilter),
     Wordcount(WordcountFilter),
     Wordwrap(WordwrapFilter),
@@ -338,6 +341,26 @@ pub struct UrlencodeFilter {
 /// Django's filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IriencodeFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `make_list`, building the list of characters natively.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MakeListFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `escapeseq`, walking lists and tuples natively. Other values
+/// call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EscapeseqFilter {
+    pub django: DjangoFilter,
+}
+
+/// Django's `safeseq`, walking lists and tuples natively. Other values call
+/// Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SafeseqFilter {
     pub django: DjangoFilter,
 }
 
