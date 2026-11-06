@@ -4,25 +4,26 @@ use std::collections::hash_map::Entry;
 
 use html_escape::encode_quoted_attribute_to_string;
 use num_traits::{ToPrimitive, Zero};
-use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyAttributeError, PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
-    PyBool, PyDateTime, PyDict, PyFloat, PyInt, PyList, PySlice, PyString, PyTuple, PyType,
+    PyBool, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyRange, PySlice, PyString, PyTuple, PyType,
 };
 
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{
     AddFilter, AddSlashesFilter, CapfirstFilter, CenterFilter, CutFilter, DateFilter,
-    DefaultFilter, DefaultIfNoneFilter, DivisibleByFilter, DjangoFilter, EscapeFilter,
-    EscapejsFilter, EscapeseqFilter, ExternalFilter, FilesizeformatFilter, FilterType, FirstFilter,
-    FloatFormatFilter, ForceEscapeFilter, GetDigitFilter, IriencodeFilter, JoinFilter, Justify,
-    JustifyFilter, LastFilter, LengthFilter, LinebreaksFilter, LinebreaksbrFilter,
-    LinenumbersFilter, LowerFilter, MakeListFilter, Phone2numericFilter, PluralizeFilter,
-    PprintFilter, RandomFilter, SafeFilter, SafeseqFilter, SliceArgument, SliceFilter,
-    SlugifyFilter, StringformatFilter, StriptagsFilter, TimesinceFilter, TitleFilter,
-    TruncateCharsFilter, TruncateCharsHtmlFilter, TruncateWordsFilter, UnorderedListFilter,
-    UpperFilter, UrlencodeFilter, WordcountFilter, WordwrapFilter, YesnoFilter, python_int,
+    DefaultFilter, DefaultIfNoneFilter, DictsortFilter, DictsortreversedFilter, DivisibleByFilter,
+    DjangoFilter, EscapeFilter, EscapejsFilter, EscapeseqFilter, ExternalFilter,
+    FilesizeformatFilter, FilterType, FirstFilter, FloatFormatFilter, ForceEscapeFilter,
+    GetDigitFilter, IriencodeFilter, JoinFilter, Justify, JustifyFilter, LastFilter, LengthFilter,
+    LinebreaksFilter, LinebreaksbrFilter, LinenumbersFilter, LowerFilter, MakeListFilter,
+    Phone2numericFilter, PluralizeFilter, PprintFilter, RandomFilter, SafeFilter, SafeseqFilter,
+    SliceArgument, SliceFilter, SlugifyFilter, StringformatFilter, StriptagsFilter,
+    TimesinceFilter, TitleFilter, TruncateCharsFilter, TruncateCharsHtmlFilter,
+    TruncateWordsFilter, UnorderedListFilter, UpperFilter, UrlencodeFilter, WordcountFilter,
+    WordwrapFilter, YesnoFilter, python_int,
 };
 use crate::parse::Filter;
 use crate::render::common::gettext;
@@ -147,6 +148,8 @@ impl ResolveFilter for FilterType {
             Self::UnorderedList(filter) => filter.resolve(variable, py, template, context),
             Self::Striptags(filter) => filter.resolve(variable, py, template, context),
             Self::Stringformat(filter) => filter.resolve(variable, py, template, context),
+            Self::Dictsort(filter) => filter.resolve(variable, py, template, context),
+            Self::Dictsortreversed(filter) => filter.resolve(variable, py, template, context),
             Self::Upper(filter) => filter.resolve(variable, py, template, context),
             Self::Wordcount(filter) => filter.resolve(variable, py, template, context),
             Self::Wordwrap(filter) => filter.resolve(variable, py, template, context),
@@ -3098,6 +3101,195 @@ impl ResolveFilter for StringformatFilter {
             if let Some(formatted) = formatted {
                 return Ok(Some(formatted));
             }
+        }
+        self.django.call(variable, argument, py, context)
+    }
+}
+
+/// The dotted key path of `dictsort`, or `None` when Django resolves the
+/// argument differently: numbers become `itemgetter`, and private names
+/// and an empty argument raise.
+fn dictsort_path(argument: &str) -> Option<Vec<&str>> {
+    let number = argument.trim().replace('_', "");
+    if argument.is_empty()
+        || argument.starts_with('_')
+        || argument.contains("._")
+        || number.parse::<f64>().is_ok()
+    {
+        return None;
+    }
+    Some(argument.split('.').collect())
+}
+
+/// Whether a `dictsort` error makes Django's filter return `""`.
+fn dictsort_failure(error: &PyErr, py: Python<'_>) -> bool {
+    error.is_instance_of::<PyAttributeError>(py) || error.is_instance_of::<PyTypeError>(py)
+}
+
+/// Django's `_property_resolver`: each part is tried as an item, then as
+/// an attribute. Returns `None` when Django's filter would return `""`.
+fn dictsort_key<'py>(
+    item: &Bound<'py, PyAny>,
+    path: &[&str],
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let py = item.py();
+    let mut value = item.clone();
+    for part in path {
+        if value.is_exact_instance_of::<PyDict>()
+            && let Some(found) = value.cast::<PyDict>()?.get_item(part)?
+        {
+            value = found;
+            continue;
+        }
+        value = match value.get_item(part) {
+            Ok(found) => found,
+            Err(error)
+                if dictsort_failure(&error, py)
+                    || error.is_instance_of::<PyIndexError>(py)
+                    || error.is_instance_of::<PyKeyError>(py)
+                    || error.is_instance_of::<PyValueError>(py) =>
+            {
+                match value.getattr(*part) {
+                    Ok(found) => found,
+                    Err(error) if dictsort_failure(&error, py) => return Ok(None),
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+    }
+    Ok(Some(value))
+}
+
+/// The order of `keys` that a stable sort gives: by Rust comparisons for
+/// strings, integers and floats of one type, and by Python's `sorted`
+/// otherwise. Returns `None` when Django's filter would return `""`.
+fn dictsort_order(
+    keys: &[Bound<'_, PyAny>],
+    reverse: bool,
+    py: Python<'_>,
+) -> PyResult<Option<Vec<usize>>> {
+    fn sort_by<T>(
+        values: &[T],
+        reverse: bool,
+        compare: impl Fn(&T, &T) -> std::cmp::Ordering,
+    ) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..values.len()).collect();
+        if reverse {
+            order.sort_by(|&a, &b| compare(&values[b], &values[a]));
+        } else {
+            order.sort_by(|&a, &b| compare(&values[a], &values[b]));
+        }
+        order
+    }
+    if keys
+        .iter()
+        .all(pyo3::types::PyAnyMethods::is_exact_instance_of::<PyString>)
+        && let Ok(strings) = keys
+            .iter()
+            .map(|key| key.cast::<PyString>()?.to_str())
+            .collect::<PyResult<Vec<_>>>()
+    {
+        return Ok(Some(sort_by(&strings, reverse, std::cmp::Ord::cmp)));
+    }
+    if keys
+        .iter()
+        .all(pyo3::types::PyAnyMethods::is_exact_instance_of::<PyInt>)
+        && let Ok(ints) = keys
+            .iter()
+            .map(pyo3::types::PyAnyMethods::extract::<i64>)
+            .collect::<PyResult<Vec<_>>>()
+    {
+        return Ok(Some(sort_by(&ints, reverse, Ord::cmp)));
+    }
+    if keys
+        .iter()
+        .all(pyo3::types::PyAnyMethods::is_exact_instance_of::<PyFloat>)
+        && let Ok(floats) = keys
+            .iter()
+            .map(pyo3::types::PyAnyMethods::extract::<f64>)
+            .collect::<PyResult<Vec<_>>>()
+        && !floats.iter().any(|value| value.is_nan())
+    {
+        return Ok(Some(sort_by(&floats, reverse, |a, b| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        })));
+    }
+    // Python compares the same keys in the same order as Django's call.
+    let keys = PyList::new(py, keys)?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("key", keys.getattr("__getitem__")?)?;
+    kwargs.set_item("reverse", reverse)?;
+    let sorted = py.import("builtins")?.getattr("sorted")?.call(
+        (PyRange::new(py, 0, isize::try_from(keys.len())?)?,),
+        Some(&kwargs),
+    );
+    match sorted {
+        Ok(order) => Ok(Some(order.extract()?)),
+        Err(error) if dictsort_failure(&error, py) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Django's `dictsort` and `dictsortreversed` for exact lists and tuples
+/// with a key path. Returns `None` to leave the call to Django.
+fn dictsort<'t, 'py>(
+    variable: Option<&Content<'t, 'py>>,
+    argument: Option<&Content<'t, 'py>>,
+    reverse: bool,
+    py: Python<'py>,
+) -> PyResult<Option<Content<'t, 'py>>> {
+    let Some(Content::Py(value)) = variable else {
+        return Ok(None);
+    };
+    let Some(items) = exact_sequence(value) else {
+        return Ok(None);
+    };
+    let Some(path) = argument.and_then(format_spec_text).and_then(dictsort_path) else {
+        return Ok(None);
+    };
+    let failed = || Some(Content::String(ContentString::String(Cow::Borrowed(""))));
+    let mut keys = Vec::with_capacity(items.len());
+    for item in &items {
+        match dictsort_key(item, &path)? {
+            Some(key) => keys.push(key),
+            None => return Ok(failed()),
+        }
+    }
+    let Some(order) = dictsort_order(&keys, reverse, py)? else {
+        return Ok(failed());
+    };
+    let sorted = PyList::new(py, order.into_iter().map(|index| &items[index]))?;
+    Ok(Some(Content::Py(sorted.into_any())))
+}
+
+impl ResolveFilter for DictsortFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        if let Some(sorted) = dictsort(variable.as_ref(), argument.value(), false, py)? {
+            return Ok(Some(sorted));
+        }
+        self.django.call(variable, argument, py, context)
+    }
+}
+
+impl ResolveFilter for DictsortreversedFilter {
+    fn resolve<'t, 'py>(
+        &self,
+        variable: Option<Content<'t, 'py>>,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ResolveResult<'t, 'py> {
+        let argument = self.django.resolve_argument(py, template, context)?;
+        if let Some(sorted) = dictsort(variable.as_ref(), argument.value(), true, py)? {
+            return Ok(Some(sorted));
         }
         self.django.call(variable, argument, py, context)
     }

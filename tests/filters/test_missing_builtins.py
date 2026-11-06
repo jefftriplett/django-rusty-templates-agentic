@@ -2080,3 +2080,118 @@ def test_stringformat_replaced_builtin(monkeypatch):
     )
     django, rusty = render_both("{{ value|stringformat:'d' }}", {"value": 1})
     assert rusty == django == "replacement"
+
+
+class Person:
+    def __init__(self, name, age):
+        self.name = name
+        self.age = age
+
+    def __repr__(self):
+        return f"Person({self.name!r})"
+
+
+class ItemErrors:
+    def __init__(self, error, name):
+        self.error = error
+        self.name = name
+
+    def __getitem__(self, key):
+        raise self.error
+
+    def __repr__(self):
+        return f"ItemErrors({self.name!r})"
+
+
+class Unorderable:
+    def __lt__(self, other):
+        raise ValueError("cannot compare")
+
+
+PEOPLE = [
+    {"name": "Bea", "age": 30, "info": {"city": "Oslo"}, "tags": ["b", "a"]},
+    {"name": "al", "age": 25, "info": {"city": "Lima"}, "tags": ["c"]},
+    {"name": "Cy", "age": 30, "info": {"city": "Ávila"}, "tags": ["a"]},
+    {"name": "Dee", "age": 2.5, "info": {"city": "Oslo"}, "tags": []},
+]
+
+
+@pytest.mark.parametrize("name", ["dictsort", "dictsortreversed"])
+@pytest.mark.parametrize(
+    "value,argument",
+    [
+        (PEOPLE, "name"),
+        (PEOPLE, "age"),
+        (PEOPLE[:3], "age"),
+        (PEOPLE, "info.city"),
+        (PEOPLE, "tags"),
+        (PEOPLE, "missing"),
+        (PEOPLE, "items"),
+        (PEOPLE, "name.upper"),
+        (PEOPLE, "_private"),
+        (PEOPLE, "info._private"),
+        (PEOPLE, "0"),
+        (PEOPLE, "1e3"),
+        (PEOPLE, "nan"),
+        (PEOPLE, " inf "),
+        (PEOPLE, ""),
+        (tuple(PEOPLE), "name"),
+        ([], "name"),
+        ([{"a": 2}, {"a": 1.5}, {"a": True}], "a"),
+        ([{"a": 2**70}, {"a": -1}, {"a": 3}], "a"),
+        ([{"a": 1.0}, {"a": -0.0}, {"a": 0.0}, {"a": float("nan")}], "a"),
+        ([{"a": "b"}, {"a": 1}], "a"),
+        ([{"a": None}, {"a": None}], "a"),
+        ([{"a": (2, 1)}, {"a": (1, 2)}], "a"),
+        ([{"a": "\ud800"}, {"a": "b"}], "a"),
+        ([Person("b", 2), Person("a", 1)], "name"),
+        ([Person("b", 2), {"name": "a"}], "name"),
+        ([["x", "b"], ["y", "a"]], "1"),
+        ([["x", "b"], ["y", "a"]], "a.b"),
+        ([ItemErrors(KeyError, "k"), ItemErrors(IndexError, "i")], "name"),
+        ([ItemErrors(ValueError, "v"), ItemErrors(TypeError, "t")], "name"),
+        ([{"a": {"b": "z"}}, {"a": {"b": "y"}}], "a.b"),
+        ("abc", "a"),
+        ({"a": 1}, "a"),
+        (None, "a"),
+        ([1, 2], "real"),
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_dictsort_matches_django(name, value, argument, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "{{ value|" + name + ":argument }}{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {"value": value, "argument": argument})
+    assert rusty == django
+
+
+@pytest.mark.parametrize("name", ["dictsort", "dictsortreversed"])
+def test_dictsort_errors_match_django(name):
+    source = "{{ value|" + name + ":'a' }}"
+    for value in [
+        [{"a": Unorderable()}, {"a": Unorderable()}],
+        [ItemErrors(RuntimeError, "r")],
+    ]:
+        django, rusty = render_both(source, {"value": value})
+        assert rusty == django
+        assert isinstance(django, tuple)
+
+
+@pytest.mark.parametrize("name", ["dictsort", "dictsortreversed"])
+def test_dictsort_chains_match_django(name):
+    source = (
+        "{% for person in people|" + name + ":'age' %}{{ person.name }},{% endfor %}"
+        "{{ people|" + name + ":'name'|first|safe }}"
+        "{{ people|" + name + ":'info.city'|length }}"
+    )
+    django, rusty = render_both(source, {"people": PEOPLE})
+    assert rusty == django
+
+
+@pytest.mark.parametrize("name", ["dictsort", "dictsortreversed"])
+def test_dictsort_replaced_builtin(monkeypatch, name):
+    monkeypatch.setitem(register.filters, name, lambda value, arg: "replacement")
+    django, rusty = render_both("{{ value|" + name + ":'a' }}", {"value": []})
+    assert rusty == django == "replacement"

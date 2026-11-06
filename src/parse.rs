@@ -31,6 +31,8 @@ use crate::filters::CutFilter;
 use crate::filters::DateFilter;
 use crate::filters::DefaultFilter;
 use crate::filters::DefaultIfNoneFilter;
+use crate::filters::DictsortFilter;
+use crate::filters::DictsortreversedFilter;
 use crate::filters::DivisibleByFilter;
 use crate::filters::DjangoFilter;
 use crate::filters::EscapeFilter;
@@ -428,6 +430,16 @@ impl Filter {
                     if is_django_filter(parser.py, &django.filter, builtin.name()) =>
                 {
                     FilterType::Stringformat(StringformatFilter { django })
+                }
+                BuiltinFilter::Dictsort
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Dictsort(DictsortFilter { django })
+                }
+                BuiltinFilter::Dictsortreversed
+                    if is_django_filter(parser.py, &django.filter, builtin.name()) =>
+                {
+                    FilterType::Dictsortreversed(DictsortreversedFilter { django })
                 }
                 _ => FilterType::Django(django),
             };
