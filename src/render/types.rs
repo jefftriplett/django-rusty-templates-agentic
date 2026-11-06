@@ -38,7 +38,7 @@ static DJANGO_CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static RENDER_VALUE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
-static MARK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static SAFE_STRING: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
 // Django's value formatter reads only these flags. Rendering a number must
 // not materialize the template variables, loop dictionaries or block callbacks.
@@ -1623,12 +1623,14 @@ impl<'t, 'py> Content<'t, 'py> {
                     let string = s
                         .into_pyobject(py)
                         .expect("A string can always be converted to a Python str.");
-                    let mark_safe = MARK_SAFE
-                        .import(py, "django.utils.safestring", "mark_safe")
-                        .expect("Should be able to import `django.utils.safestring.mark_safe`");
-                    mark_safe
+                    // `mark_safe` of a plain `str` is `SafeString(str)`;
+                    // calling the class skips a Python function call.
+                    let safe_string = SAFE_STRING
+                        .import(py, "django.utils.safestring", "SafeString")
+                        .expect("Should be able to import `django.utils.safestring.SafeString`");
+                    safe_string
                         .call1((string,))
-                        .expect("`mark_safe` should not raise if given a string")
+                        .expect("`SafeString` should not raise if given a string")
                 }
             },
             Self::Bool(b) => PyBool::new(py, *b).to_owned().into_any(),
