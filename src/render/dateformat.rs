@@ -1,5 +1,5 @@
-//! Native port of `django.utils.dateformat` for the `date` and `time` filters
-//! and the `{% now %}` tag.
+//! Native port of `django.utils.dateformat` for the `date` and `time` filters,
+//! the `{% now %}` tag, and dates, times and datetimes printed by `{{ }}`.
 //!
 //! Django looks up the active language's format strings, month and weekday
 //! names and the current timezone for every value it formats. Within a render
@@ -7,7 +7,8 @@
 //! [`DateCache`] reads each one once and those tags give their body a fresh
 //! cache.
 //!
-//! Anything else is left to Django. Subclasses of the `datetime` types and
+//! Anything else is left to Django. Subclasses of the `datetime` types (other
+//! than the `tz` filters' `datetimeobject`) and
 //! tzinfo implementations other than `datetime.timezone` and
 //! `zoneinfo.ZoneInfo` go to the filter itself. The timezone specifiers
 //! (`e I O r T U Z`) ask the tzinfo for its offset, name and DST, as Django
@@ -49,6 +50,34 @@ const ZONE_CHARS: &str = "eIOrTUZ";
 static GET_DEFAULT_TIMEZONE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DATETIME_COMBINE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TIME_MIN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static TZ_DATETIME: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+
+/// Whether `value` is `django.templatetags.tz.datetimeobject`, the subclass
+/// the `tz` filters return so later formatting skips local time conversion.
+/// It adds only the `convert_to_local_time` attribute, so it formats as a
+/// `datetime`.
+fn is_tz_datetime(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = value.py();
+    Ok(value.is_instance_of::<PyDateTime>()
+        && value.get_type().is(TZ_DATETIME.import(
+            py,
+            "django.templatetags.tz",
+            "datetimeobject",
+        )?))
+}
+
+/// The value as a `datetime` the formatters can read like the built-in type.
+fn plain_datetime<'a, 'py>(
+    value: &'a Bound<'py, PyAny>,
+) -> PyResult<Option<&'a Bound<'py, PyDateTime>>> {
+    if let Ok(datetime) = value.cast_exact::<PyDateTime>() {
+        return Ok(Some(datetime));
+    }
+    if is_tz_datetime(value)? {
+        return Ok(Some(value.cast::<PyDateTime>()?));
+    }
+    Ok(None)
+}
 
 /// Which of Django's formatter classes to mirror.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -247,7 +276,14 @@ pub fn template_localtime<'py>(
     cache: &mut DateCache,
 ) -> PyResult<Bound<'py, PyAny>> {
     let py = value.py();
-    let Ok(datetime) = value.cast_exact::<PyDateTime>() else {
+    if is_tz_datetime(&value)?
+        && !value
+            .getattr_opt(pyo3::intern!(py, "convert_to_local_time"))?
+            .map_or(Ok(true), |flag| flag.is_truthy())?
+    {
+        return Ok(value);
+    }
+    let Some(datetime) = plain_datetime(&value)? else {
         if value.is_instance_of::<PyDateTime>() {
             // Subclasses may define `convert_to_local_time`.
             return TEMPLATE_LOCALTIME
@@ -277,6 +313,34 @@ pub fn template_localtime<'py>(
         pyo3::intern!(py, "astimezone"),
         (cache.current_timezone(py)?,),
     )
+}
+
+/// A date, time or datetime as `render_value_in_context` prints it.
+///
+/// That is `localize(template_localtime(value))`, which formats it with
+/// `DATETIME_FORMAT`, `DATE_FORMAT` or `TIME_FORMAT`. `None` for other values
+/// and anything left to Django, such as subclasses and other tzinfo types.
+pub fn localize_datetime(
+    value: &Bound<'_, PyAny>,
+    use_tz: Option<bool>,
+    cache: &mut DateCache,
+) -> PyResult<Option<String>> {
+    // `localize` checks `datetime` before `date`, its base class.
+    let (format_name, formatter) = if plain_datetime(value)?.is_some() {
+        ("DATETIME_FORMAT", Formatter::Date)
+    } else if value.is_exact_instance_of::<PyDate>() {
+        ("DATE_FORMAT", Formatter::Date)
+    } else if value.is_exact_instance_of::<PyTime>() {
+        ("TIME_FORMAT", Formatter::Time)
+    } else {
+        return Ok(None);
+    };
+    let value = template_localtime(value.clone(), use_tz, cache)?;
+    Ok(match cache.format(&value, format_name, formatter)? {
+        Some(Formatted::Native(formatted)) => Some(formatted),
+        Some(Formatted::Django(formatted)) => Some(formatted.str()?.to_cow()?.into_owned()),
+        None => None,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -337,7 +401,7 @@ impl Fields {
     /// `None` for anything that might not behave like the built-in types.
     fn of(value: &Bound<'_, PyAny>) -> PyResult<Option<Self>> {
         let py = value.py();
-        if let Ok(datetime) = value.cast_exact::<PyDateTime>() {
+        if let Some(datetime) = plain_datetime(value)? {
             // `TimeFormat.__init__` calls `utcoffset()` on any tzinfo, which other
             // implementations may not support.
             if let Some(tzinfo) = datetime.get_tzinfo() {
