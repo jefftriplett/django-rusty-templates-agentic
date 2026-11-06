@@ -4,6 +4,10 @@
 
 Report the tried origins when a loader can't find a template and keep the original error as the cause for invalid context processor results and loader configurations, and deny more Clippy restriction lints. ([#207](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/207))
 
+Render `first`, `linenumbers`, `ljust`, and `rjust` natively, and pass `truncatechars_html` the cached truncation text. ([#214](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/214), [#215](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/215), [#216](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/216), [#219](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/219))
+
+Fix the per-language cache, which never cached after #197, so `floatformat`, `truncatechars`, `timesince`, and `timeuntil` use their native paths again. ([#218](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/218))
+
 ## 2026.11.1
 
 Build macOS wheels on `macos-15` after GitHub retired the `macos-14` runner. ([#206](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/206))
