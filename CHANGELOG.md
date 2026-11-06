@@ -16,6 +16,12 @@ Read the active translation without asgiref's lock, and render `filesizeformat` 
 
 Render `unordered_list`, `striptags`, `stringformat`, `dictsort`, `dictsortreversed`, and `json_script` natively for common inputs. ([#263](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/263), [#264](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/264), [#265](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/265), [#266](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/266), [#267](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/267))
 
+Format timezone date specifiers natively, compute `timesince` and `timeuntil` for any tzinfo, and correct the README note on `{% now %}` for the development version. ([#269](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/269), [#270](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/270), [#271](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/271))
+
+Truncate non-ASCII text and well-formed HTML natively in `truncatechars`, `truncatechars_html`, and `truncatewords_html`, and handle words that can't become links natively in `urlize` and `urlizetrunc`. ([#272](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/272), [#273](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/273), [#274](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/274))
+
+Render mixed templates with native regions in debug mode, keeping Django's error positions for the full template. ([#275](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/275))
+
 ## 2026.11.1
 
 Build macOS wheels on `macos-15` after GitHub retired the `macos-14` runner. ([#206](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/206))
