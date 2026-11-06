@@ -47,6 +47,11 @@ static TIME_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static PGETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static COMBINING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TRUNCATOR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static NORMALIZE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+/// `unicodedata.combining(character) != 0` for characters already asked.
+/// Python's Unicode database doesn't change while it runs.
+static COMBINING_CHARACTERS: std::sync::Mutex<std::collections::BTreeMap<char, bool>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 static SAFESTRING: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static GET_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -1771,20 +1776,12 @@ fn truncate_chars(
     else {
         return Ok(None);
     };
-    if !text.is_ascii() {
-        // NFC normalization and combining characters follow Python's Unicode
-        // database, so Django truncates. Passing the cached translation saves
-        // its two `pgettext` calls per truncation.
-        let truncated = TRUNCATOR
-            .import(py, "django.utils.text", "Truncator")?
-            .call1((text,))?
-            .call_method1("chars", (length, &truncation.text))?
-            .extract()?;
-        return Ok(Some(truncated));
-    }
     let Some(split) = &truncation.split else {
         return Ok(None);
     };
+    if !text.is_ascii() {
+        return truncate_unicode_chars(text, length, split, py).map(Some);
+    }
     let end = length.saturating_sub(split.width);
     Ok(Some(format!(
         "{}{}{}",
@@ -1792,6 +1789,69 @@ fn truncate_chars(
         &text[..end],
         split.after
     )))
+}
+
+/// Whether Python's `unicodedata.combining` gives `character` a nonzero
+/// class. Nothing below U+0300 combines.
+fn is_combining(character: char, py: Python<'_>) -> PyResult<bool> {
+    use pyo3::sync::MutexExt;
+    if character < '\u{300}' {
+        return Ok(false);
+    }
+    let lock = || {
+        COMBINING_CHARACTERS
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned")
+    };
+    let cached = lock().get(&character).copied();
+    if let Some(combining) = cached {
+        return Ok(combining);
+    }
+    let combining = COMBINING
+        .import(py, "unicodedata", "combining")?
+        .call1((character,))?
+        .is_truthy()?;
+    lock().insert(character, combining);
+    Ok(combining)
+}
+
+/// `Truncator._text_chars` for non-ASCII text, after Django's NFC
+/// normalization. Combining characters don't count towards the length.
+/// Both follow Python's Unicode database.
+fn truncate_unicode_chars(
+    text: &str,
+    length: usize,
+    split: &SplitTruncationText,
+    py: Python<'_>,
+) -> PyResult<String> {
+    // Nothing below U+0300 decomposes or composes.
+    let text: Cow<'_, str> = if text.chars().all(|character| character < '\u{300}') {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(
+            NORMALIZE
+                .import(py, "unicodedata", "normalize")?
+                .call1(("NFC", text))?
+                .extract()?,
+        )
+    };
+    let truncate_length = length.saturating_sub(split.width);
+    let mut count = 0;
+    let mut end = None;
+    for (index, character) in text.char_indices() {
+        if is_combining(character, py)? {
+            continue;
+        }
+        count += 1;
+        if end.is_none() && count > truncate_length {
+            end = Some(index);
+        }
+        if count > length {
+            let kept = &text[..end.unwrap_or(0)];
+            return Ok(format!("{}{kept}{}", split.before, split.after));
+        }
+    }
+    Ok(text.into_owned())
 }
 
 /// The slice Django builds from a resolved argument. `None` leaves unusual

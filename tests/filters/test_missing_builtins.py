@@ -2552,3 +2552,65 @@ def test_timesince_pytz_and_dateutil_match_django(name):
         for other in values:
             django, rusty = render_both(source, {"value": value, "other": other})
             assert rusty == django, (value, other)
+
+
+TRUNCATECHARS_UNICODE_PIECES = [
+    "a",
+    " ",
+    "é",
+    "é",
+    "́",
+    "̧́",
+    "Å",
+    "Ω",
+    "豈",
+    "가",
+    "ᆨ",
+    "가",
+    "কা",
+    "ୋ",
+    "日本",
+    "が",
+    "\U0001f600",
+    "\U0001f469‍\U0001f4bb",
+    "̈",
+    "ǅ",
+    "ﬁ",
+    " ",
+]
+
+
+def test_truncatechars_unicode_matches_django():
+    import random
+
+    generator = random.Random(241)
+    values = [
+        "".join(
+            generator.choice(TRUNCATECHARS_UNICODE_PIECES)
+            for _ in range(generator.randint(1, 12))
+        )
+        for _ in range(1500)
+    ]
+    source = (
+        "{% for value in values %}{% for length in lengths %}"
+        "[{{ value|truncatechars:length }}]{% endfor %}{% endfor %}"
+    )
+    django, rusty = render_both(
+        source, {"values": values, "lengths": [1, 2, 3, 5, 8, 20]}
+    )
+    assert isinstance(django, str)
+    assert rusty == django
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["café au lait", "naïve café", mark_safe("<b>café</b>"), "é" * 10, "́" * 5 + "abc"],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_truncatechars_unicode_safety_matches_django(value, autoescape):
+    source = (
+        "{% autoescape " + autoescape + " %}"
+        "{{ value|truncatechars:4 }}|{{ value|truncatechars:50 }}{% endautoescape %}"
+    )
+    django, rusty = render_both(source, {"value": value})
+    assert rusty == django
