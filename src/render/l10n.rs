@@ -171,7 +171,11 @@ enum Number {
 
 /// `localize(value, use_l10n)` for exact ints, floats and bools. `None` for
 /// other values and for floats Django formats as decimals.
-pub fn localize_number(value: &Bound<'_, PyAny>, context: &Context) -> PyResult<Option<String>> {
+pub fn localize_number(
+    value: &Bound<'_, PyAny>,
+    use_l10n: Option<bool>,
+    context: &Context,
+) -> PyResult<Option<String>> {
     if value.is_exact_instance_of::<PyBool>() {
         let text = if value.is_truthy()? { "True" } else { "False" };
         return Ok(Some(text.to_owned()));
@@ -190,7 +194,7 @@ pub fn localize_number(value: &Bound<'_, PyAny>, context: &Context) -> PyResult<
         },
         Number::Float => value.str()?.extract()?,
     };
-    if context.use_l10n == Some(false) {
+    if use_l10n == Some(false) {
         return Ok(Some(number));
     }
     let Some(format) = context.number_format(value.py())? else {

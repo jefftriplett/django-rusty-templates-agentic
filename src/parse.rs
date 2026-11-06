@@ -50,6 +50,7 @@ use crate::filters::JoinFilter;
 use crate::filters::JsonScriptFilter;
 use crate::filters::Justify;
 use crate::filters::JustifyFilter;
+use crate::filters::L10nFilter;
 use crate::filters::LastFilter;
 use crate::filters::LengthFilter;
 use crate::filters::LinebreaksFilter;
@@ -255,7 +256,29 @@ fn external_filter(py: Python<'_>, filter: Py<PyAny>, argument: Option<Argument>
                 argument,
             },
         }),
-        None => FilterType::External(ExternalFilter::new(filter, argument)),
+        None => {
+            let localize = py
+                .import(intern!(py, "django.templatetags.l10n"))
+                .ok()
+                .and_then(|module| {
+                    [("localize", true), ("unlocalize", false)]
+                        .into_iter()
+                        .find(|(name, _)| {
+                            module.getattr(*name).is_ok_and(|django| django.is(bound))
+                        })
+                        .map(|(_, localize)| localize)
+                });
+            match localize {
+                Some(localize) => FilterType::L10n(L10nFilter {
+                    localize,
+                    django: DjangoFilter {
+                        filter: Gc::new(filter),
+                        argument,
+                    },
+                }),
+                None => FilterType::External(ExternalFilter::new(filter, argument)),
+            }
+        }
     }
 }
 

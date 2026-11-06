@@ -23,6 +23,7 @@ pub enum FilterType {
     First(FirstFilter),
     FloatFormat(FloatFormatFilter),
     Tz(TzFilter),
+    L10n(L10nFilter),
     ForceEscape(ForceEscapeFilter),
     Join(JoinFilter),
     Justify(JustifyFilter),
@@ -549,6 +550,15 @@ pub enum TzConversion {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TzFilter {
     pub conversion: TzConversion,
+    pub django: DjangoFilter,
+}
+
+/// Django's `localize` and `unlocalize` filters, formatted natively for
+/// numbers, dates and strings. Other inputs call Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct L10nFilter {
+    /// `true` for `localize`, `false` for `unlocalize`.
+    pub localize: bool,
     pub django: DjangoFilter,
 }
 
