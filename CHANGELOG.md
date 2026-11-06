@@ -26,6 +26,8 @@ Keep quoted string literals safe under `{% autoescape off %}`, call custom filte
 
 Speed up compiling mixed templates by about 6%, run the `pytz` and `python-dateutil` tests in CI, and restore a test hidden by a duplicate name. ([#280](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/280), [#285](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/285), [#286](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/286))
 
+Compile mixed templates with many variables 2–3× faster by parsing Django's filter expressions for native variables only when something reads them. ([#289](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/289))
+
 ## 2026.11.1
 
 Build macOS wheels on `macos-15` after GitHub retired the `macos-14` runner. ([#206](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/206))
