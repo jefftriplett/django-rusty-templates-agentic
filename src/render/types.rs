@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::iter::zip;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use html_escape::{encode_quoted_attribute, encode_quoted_attribute_to_string};
 use miette::SourceSpan;
@@ -118,36 +118,36 @@ pub enum IncludeTemplateKey {
 
 type BindingMap = HashMap<String, Vec<Py<PyAny>>>;
 
+/// Bindings shared by a parent and its child scopes. The `Arc` lets the
+/// parent take them back without copying once no child or retained snapshot
+/// holds them. It never outlives its `Gc` container, so Python's GC still
+/// sees every reference.
 #[derive(Debug)]
-struct SharedBindings(BindingMap);
+struct SharedBindings(Arc<BindingMap>);
 
 impl Trace for SharedBindings {
     fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-        self.0.trace(visit)
+        self.0.as_ref().trace(visit)
     }
+}
+
+fn clone_bindings(bindings: &BindingMap) -> BindingMap {
+    Python::attach(|py| {
+        bindings
+            .iter()
+            .map(|(key, values)| {
+                (
+                    key.clone(),
+                    values.iter().map(|value| value.clone_ref(py)).collect(),
+                )
+            })
+            .collect()
+    })
 }
 
 impl Trace for ForLoop {
     fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.dictionary.trace(visit)
-    }
-}
-
-impl Clone for SharedBindings {
-    fn clone(&self) -> Self {
-        Python::attach(|py| {
-            Self(
-                self.0
-                    .iter()
-                    .map(|(key, values)| {
-                        (
-                            key.clone(),
-                            values.iter().map(|value| value.clone_ref(py)).collect(),
-                        )
-                    })
-                    .collect(),
-            )
-        })
     }
 }
 
@@ -381,11 +381,12 @@ impl Context {
     }
 
     /// Freeze bindings once per render; child writes copy only the affected stack.
-    /// Parent writes use copy-on-write so retained callback snapshots stay valid.
+    /// Parent writes use copy-on-write so retained callback snapshots stay valid,
+    /// and take the bindings back without copying once nothing else holds them.
     pub(crate) fn clone_scope(&mut self, py: Python<'_>) -> Self {
         if self.scope_bindings.is_none() {
             self.scope_bindings = Some(ScopeBindings {
-                base: Gc::new(SharedBindings(std::mem::take(&mut self.context))),
+                base: Gc::new(SharedBindings(Arc::new(std::mem::take(&mut self.context)))),
                 overlay: false,
             });
         }
@@ -410,8 +411,13 @@ impl Context {
     fn bindings_mut(&mut self) -> &mut BindingMap {
         if let Some(shared) = self.scope_bindings.take_if(|shared| !shared.overlay) {
             // Materialize parent writes while retained child snapshots keep
-            // their immutable GC-visible base.
-            let mut bindings = (*shared.base).clone().0;
+            // their immutable GC-visible base. Dropping this handle frees the
+            // container when nothing else holds it, so the map moves back
+            // instead of being copied on every write after a child scope.
+            let map = Arc::clone(&shared.base.0);
+            drop(shared);
+            let mut bindings =
+                Arc::try_unwrap(map).unwrap_or_else(|shared| clone_bindings(&shared));
             bindings.extend(std::mem::take(&mut self.context));
             self.context = bindings;
         }
@@ -1892,6 +1898,64 @@ mod tests {
                     .unwrap(),
                 "caller"
             );
+        });
+    }
+
+    /// The address of the stored values for `name`, which moves with the map
+    /// but changes when the bindings are copied.
+    fn binding_address(context: &Context, name: &str) -> *const Py<PyAny> {
+        context.context.get(name).expect("binding present").as_ptr()
+    }
+
+    #[test]
+    fn test_parent_write_reclaims_bindings_from_finished_scope() {
+        Python::initialize();
+        Python::attach(|py| {
+            let mut context = Context::new(
+                HashMap::from([(
+                    "kept".to_string(),
+                    1_i64.into_pyobject(py).unwrap().into_any().unbind(),
+                )]),
+                None,
+                false,
+            );
+            let before = binding_address(&context, "kept");
+            let scoped = context.clone_scope(py);
+            context.merge_render_state(py, scoped, &[]).unwrap();
+            context
+                .insert(
+                    "new".to_string(),
+                    2_i64.into_pyobject(py).unwrap().into_any(),
+                )
+                .unwrap();
+            assert_eq!(binding_address(&context, "kept"), before);
+        });
+    }
+
+    #[test]
+    fn test_parent_write_copies_bindings_a_snapshot_still_holds() {
+        Python::initialize();
+        Python::attach(|py| {
+            let mut context = Context::new(
+                HashMap::from([(
+                    "kept".to_string(),
+                    1_i64.into_pyobject(py).unwrap().into_any().unbind(),
+                )]),
+                None,
+                false,
+            );
+            let before = binding_address(&context, "kept");
+            let retained = context.clone_scope(py);
+            context
+                .insert(
+                    "kept".to_string(),
+                    2_i64.into_pyobject(py).unwrap().into_any(),
+                )
+                .unwrap();
+            assert_ne!(binding_address(&context, "kept"), before);
+            // The retained scope still sees the value from before the write.
+            let value: i64 = retained.get(py, "kept").unwrap().extract().unwrap();
+            assert_eq!(value, 1);
         });
     }
 }
