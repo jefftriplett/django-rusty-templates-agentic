@@ -36,3 +36,4 @@ raise tests/test_debug_errors.py::test_*url*  # calls diagnostics.render_url dir
 raise tests/test_isolated_compilers.py::test_syntax_diagnostic_does_not_invoke_opted_in_compiler  # calls Engine._syntax_diagnostic directly
 raise tests/test_syntax_diagnostics.py::test_attaching_native_diagnostic_does_not_validate_again  # calls Engine._syntax_diagnostic directly
 raise tests/test_broken_engine_check.py::*  # tests scripts/check_broken_engine.py
+raise tests/test_mutants_script.py::*  # tests scripts/mutants.py
