@@ -8,6 +8,8 @@ Let custom tags marked `rusty_isolated_compiler = True` keep templates that use 
 
 Pass the live context to inclusion tags registered with `takes_context=True`, so changes their function makes reach later nodes as in Django. ([#321](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/321))
 
+Stop copying every context variable after each `{% with %}` or inherited `{% block %}` scope, which made loops slow down as the context grew. ([#323](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/323))
+
 ## 2026.11.2
 
 Report the tried origins when a loader can't find a template and keep the original error as the cause for invalid context processor results and loader configurations, and deny more Clippy restriction lints. ([#207](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/207))
