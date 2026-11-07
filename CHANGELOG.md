@@ -10,6 +10,8 @@ Pass the live context to inclusion tags registered with `takes_context=True`, so
 
 Stop copying every context variable after each `{% with %}` or inherited `{% block %}` scope, which made loops slow down as the context grew. ([#323](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/323))
 
+Render `{% firstof … as %}`, `{% regroup %}` with a plain key, and `{% querystring %}` with plain keyword values natively. These were slower than Django and are now 7–10× faster. ([#324](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/324), [#325](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/325), [#326](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/326))
+
 ## 2026.11.2
 
 Report the tried origins when a loader can't find a template and keep the original error as the cause for invalid context processor results and loader configurations, and deny more Clippy restriction lints. ([#207](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/207))
