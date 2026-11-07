@@ -14,6 +14,8 @@ Render `{% firstof … as %}`, `{% regroup %}` with a plain key, and `{% queryst
 
 Check that tests actually test Rusty: CI now fails when a test still passes with the Rusty engine broken on purpose, or when a new Django conformance test passes by falling back to Django's parser, and `just mutants` adds mutation testing for the Rust code. ([#332](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/332), [#333](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/333), [#334](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/334), [#335](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/335))
 
+Build `urlize` and `urlizetrunc` links in Rust instead of calling Django for each word, making them about 10× faster than Django on emails and URLs. ([#338](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/338))
+
 ## 2026.11.2
 
 Report the tried origins when a loader can't find a template and keep the original error as the cause for invalid context processor results and loader configurations, and deny more Clippy restriction lints. ([#207](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/207))
