@@ -80,6 +80,11 @@ impl<T: Trace + Any + Send + Sync + Debug> Gc<T> {
         })
     }
 
+    /// Whether this is the only native handle to movable state.
+    pub fn is_sole_native_owner(&self) -> bool {
+        self.shared.get().native_owners.load(Ordering::Acquire) == 1
+    }
+
     pub fn ptr_eq(left: &Self, right: &Self) -> bool {
         left.shared.as_ptr() == right.shared.as_ptr()
     }
