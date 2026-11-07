@@ -24,3 +24,4 @@
 * template_tests.tests.TemplateTests.test_compile_tag_error_27584  # bad_tag compile function raises
 * template_tests.tests.TemplateTests.test_compile_tag_error_27956  # bad_tag compile function raises
 * template_tests.tests.TemplateTests.test_compile_tag_extra_data  # bad_tag compile function raises
+* forms_tests.tests.test_forms.OverrideTests.test_cyclic_context_boundfield_render  # tags.count_render compile function

@@ -149,19 +149,17 @@ Every template that ships with `django.contrib` and `django.forms` compiles nati
 | `sitemaps` | All templates native. | `sitemaps_tests` |
 | `syndication` | Feed title and description templates render with Rusty. | `syndication_tests` |
 | `messages` | No templates or tags; the context processor works. | `messages_tests` |
-| `django.forms` | All form and widget templates native. Deep-copying a form's errors fails ([#344](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/344)). | `forms_tests` |
+| `django.forms` | All form and widget templates native. | `forms_tests` |
 | `gis`, `postgres` | Their widget templates compile natively, but nothing has rendered them yet. Their test suites need GDAL and PostgreSQL. | Not yet |
 | `contenttypes`, `redirects`, `sessions`, `sites`, `staticfiles` | No templates or template tags. `{% static %}` comes from `django.templatetags.static` and is native. | `contenttypes_tests`, `redirects_tests`, `sites_tests`, `staticfiles_tests` |
 
-With Rusty swapped in, these suites pass on Django 5.2, 6.0 and 6.2, apart from the deepcopy bug (#344) and, on 5.2 and 6.0, the Python 3.15 annotation errors ([#59](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/59)). To run them:
+With Rusty swapped in, these suites pass on Django 5.2, 6.0, 6.1 and 6.2, apart from the Python 3.15 annotation errors on 5.2 and 6.0 ([#59](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/59)). To run them along with the template suites:
 
 ```bash
-uv run scripts/run_django_test_suite.py --django-version 5.2 \
-    admin_views admin_changelist admin_docs auth_tests flatpages_tests forms_tests \
-    humanize_tests messages_tests sitemaps_tests syndication_tests
+uv run scripts/run_django_test_suite.py --django-version 5.2
 ```
 
-CI runs only `template_tests` and `template_loader` for now ([#345](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/345)).
+The runner includes these suites by default, so CI runs them on every pull request.
 
 ## WebAssembly for JavaScript clients
 
