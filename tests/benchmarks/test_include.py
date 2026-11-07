@@ -1,3 +1,5 @@
+from django.template import engines
+
 TAGS = [
     "autoescape",
     "block",
@@ -89,8 +91,8 @@ FILTERS = [
 
 
 def test_include_loop(benchmark, template_engine_nocache):
-    template = "{% for template in templates %}{% include template %}{% endfor %}"
-    template = template_engine_nocache.from_string(template)
+    source = "{% for template in templates %}{% include template %}{% endfor %}"
+    template = template_engine_nocache.from_string(source)
 
     templates = [
         "benchmarks/include_1.txt",
@@ -111,12 +113,16 @@ def test_include_loop(benchmark, template_engine_nocache):
         ],
     }
 
+    expected = engines["django_nocache"].from_string(source).render(context)
+    assert template.render(context) == expected
     benchmark(template.render, context)
 
 
 def test_nested_include_loop(benchmark, template_engine_nocache):
-    template = "{% for _ in count %}{% include 'benchmarks/nested.txt' %}{% endfor %}"
-    template = template_engine_nocache.from_string(template)
+    source = "{% for _ in count %}{% include 'benchmarks/nested.txt' %}{% endfor %}"
+    template = template_engine_nocache.from_string(source)
     context = {"count": range(100)}
 
+    expected = engines["django_nocache"].from_string(source).render(context)
+    assert template.render(context) == expected
     benchmark(template.render, context)
