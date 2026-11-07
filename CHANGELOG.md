@@ -22,6 +22,12 @@ Localize integers Rusty computes itself, such as `forloop.counter`, integer lite
 
 Document which Django contrib apps are supported and how each is tested. ([#348](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/348))
 
+Let Rusty's engines and templates be copied and deep-copied, so copying a form's errors works as with Django. ([#350](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/350))
+
+Run Django's contrib and forms test suites (admin, auth, forms, humanize, sitemaps and more) in the conformance checks. ([#351](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/351))
+
+Make `takes_context` simple tags faster by keeping rarely used per-language caches out of the context they move on each call. ([#353](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/353))
+
 ## 2026.11.2
 
 Report the tried origins when a loader can't find a template and keep the original error as the cause for invalid context processor results and loader configurations, and deny more Clippy restriction lints. ([#207](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/207))
