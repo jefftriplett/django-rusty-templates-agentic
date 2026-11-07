@@ -32,9 +32,6 @@ class TestUserFacingTemplateRenderSuccess:
 
         See https://docs.djangoproject.com/en/stable/ref/template-response/#templateresponse-objects
         """
-        if template_engine.name == "rusty":
-            pytest.skip("Rusty engine need to support context processor first")
-
         request = RequestFactory().get("/")
         template = template_engine.from_string(
             "{{ request.method }} {{ request.path }} -> {{ foo }}"

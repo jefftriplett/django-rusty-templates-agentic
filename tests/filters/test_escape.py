@@ -75,4 +75,5 @@ def test_autoescape_on_with_escape_does_nothing(template_engine):
     rendered_with_escape = template_engine.from_string(template_with_escape).render(
         context
     )
-    assert rendered_without_escape == rendered_with_escape
+    assert rendered_without_escape == "&lt;p&gt;Hello World!&lt;/p&gt;"
+    assert rendered_with_escape == rendered_without_escape

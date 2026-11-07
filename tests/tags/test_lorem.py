@@ -1,5 +1,5 @@
 import pytest
-from django.utils.lorem_ipsum import COMMON_P, WORDS, COMMON_WORDS
+from django.utils.lorem_ipsum import COMMON_P, WORDS, COMMON_WORDS, words
 from inline_snapshot import snapshot
 
 
@@ -76,8 +76,12 @@ def test_lorem_single_paragraph_default(assert_render):
 def test_lorem_random_default(render_output):
     template = "{% lorem random %}"
     output = render_output(template=template, context={})
-    assert len(output) > 0
     assert COMMON_P not in output
+    # One plain paragraph of capitalized sentences built from lorem words.
+    assert "\n" not in output and "<p>" not in output
+    assert output[0].isupper() and output[-1] in ".?"
+    for word in output.split(" "):
+        assert word.strip(",.?").lower() in WORDS
 
 
 def test_lorem_blocks(render_output):
@@ -278,10 +282,9 @@ def test_lorem_random_as_variable_before_random(render_output):
         ({"count": 1}, 1),
     ],
 )
-def test_lorem_with_filter(render_output, context, expected_words):
+def test_lorem_with_filter(assert_render, context, expected_words):
     template = "{% lorem count|default:3 w %}"
-    output = render_output(template=template, context=context)
-    assert len(output.split(" ")) == expected_words
+    assert_render(template=template, context=context, expected=words(expected_words))
 
 
 def test_lorem_variable_count_plain(render_output):
@@ -375,11 +378,10 @@ def test_lorem_parser_error_propagation_2(assert_parse_error):
     )
 
 
-def test_lorem_variable_float_coercion(render_output):
+def test_lorem_variable_float_coercion(assert_render):
     template = "{% lorem count w %}"
-    output = render_output(template=template, context={"count": 5.9})
-    words = output.split(" ")
-    assert len(words) in [1, 5]
+    # Django truncates with int(), so 5.9 gives five words.
+    assert_render(template=template, context={"count": 5.9}, expected=words(5))
 
 
 def test_lorem_variable_string_number(render_output):
