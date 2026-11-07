@@ -150,13 +150,14 @@ def test_explain_does_not_invoke_opted_in_compiler(libraries):
     assert calls == []
 
 
-@pytest.mark.parametrize(
-    "suffix", ["{% block x %}x{% endblock %}", "{% cycle 'a' 'b' %}"]
-)
-def test_shared_native_parser_registries_keep_compatibility(
-    libraries, monkeypatch, suffix
-):
-    _, modules, calls = libraries
+SHARED_STATE_TAGS = [
+    "{% block x %}x{% endblock %}",
+    "{% cycle 'a' 'b' %}",
+    "{% cycle 'a' 'b' as row %}{% resetcycle row %}",
+]
+
+
+def record_fallbacks(monkeypatch):
     entries = []
     original = interop.compile_template
 
@@ -165,13 +166,73 @@ def test_shared_native_parser_registries_keep_compatibility(
         return original(*args)
 
     monkeypatch.setattr(interop, "compile_template", record)
+    return entries
+
+
+@pytest.mark.parametrize("before", [False, True])
+@pytest.mark.parametrize("shared", SHARED_STATE_TAGS)
+def test_shared_state_tags_outside_the_body_stay_native(
+    libraries, monkeypatch, shared, before
+):
+    _, modules, calls = libraries
+    entries = record_fallbacks(monkeypatch)
+    body = "{% capture value %}{{ captured }}{% endcapture %}"
+    source = "{% load custom %}" + (shared + body if before else body + shared)
+    template = Engine(libraries=modules).from_string(source)
+    expected = DjangoEngine(libraries=modules).from_string(source)
+    assert entries == []
+    calls.clear()
+    assert template.render(Context({"value": "ok"})) == expected.render(
+        Context({"value": "ok"})
+    )
+
+
+@pytest.mark.parametrize("shared", SHARED_STATE_TAGS)
+def test_shared_state_tags_inside_the_body_use_django(libraries, monkeypatch, shared):
+    _, modules, calls = libraries
+    entries = record_fallbacks(monkeypatch)
     source = (
-        "{% load custom %}{% capture value %}{{ captured }}{% endcapture %}" + suffix
+        "{% load custom %}{% capture value %}"
+        + shared
+        + "{{ captured }}{% endcapture %}"
     )
     template = Engine(libraries=modules).from_string(source)
+    expected = DjangoEngine(libraries=modules).from_string(source)
+    # The native attempt ran the compiler before finding the shared tag.
     assert len(entries) == 1
-    assert len(calls) == 1
-    assert template.render(Context({"value": "ok"})).startswith("1:ok")
+    assert len(calls) == 3
+    assert template.render(Context({"value": "ok"})) == expected.render(
+        Context({"value": "ok"})
+    )
+
+
+def test_child_template_with_opted_in_tag_in_a_block_stays_native(
+    libraries, monkeypatch
+):
+    _, modules, calls = libraries
+    entries = record_fallbacks(monkeypatch)
+    loaders = [
+        (
+            "django.template.loaders.locmem.Loader",
+            {
+                "base.html": "<{% block content %}base{% endblock %}>",
+                "child.html": (
+                    "{% extends 'base.html' %}{% load custom %}"
+                    "{% block content %}{% capture value %}{{ captured }}"
+                    "{% endcapture %}|{{ block.super }}{% endblock %}"
+                ),
+            },
+        )
+    ]
+    template = Engine(libraries=modules, loaders=loaders).get_template("child.html")
+    expected = DjangoEngine(libraries=modules, loaders=loaders).get_template(
+        "child.html"
+    )
+    assert entries == []
+    assert len(calls) == 2
+    context = {"value": "ok"}
+    assert template.render(Context(context)) == expected.render(Context(context))
+    assert template.render(Context(context)) == "<1:ok|base>"
 
 
 def test_load_in_opaque_body_supplies_filters_to_native_suffix(libraries, monkeypatch):
