@@ -257,13 +257,10 @@ def test_lorem_keyword_as_variable(render_output):
     assert len(output.split(" ")) == 5
 
 
-def test_lorem_random_as_variable(render_output):
+def test_lorem_random_as_variable(assert_render):
+    # Here `random` is the count variable, not the random flag.
     template = "{% lorem random w %}"
-    output = render_output(
-        template=template,
-        context={"random": 2},
-    )
-    assert len(output.split(" ")) == 2
+    assert_render(template=template, context={"random": 2}, expected=words(2))
 
 
 def test_lorem_random_as_variable_before_random(render_output):

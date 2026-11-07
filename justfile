@@ -17,6 +17,12 @@ python-test *ARGS:
     maturin develop
     pytest {{ARGS}}
 
+# Fail if tests still pass with the Rusty engine broken on purpose
+[group('test')]
+check-tests *ARGS:
+    maturin develop
+    python scripts/check_broken_engine.py {{ARGS}}
+
 # Run the Python test suite under coverage
 [group('coverage')]
 python-coverage:
