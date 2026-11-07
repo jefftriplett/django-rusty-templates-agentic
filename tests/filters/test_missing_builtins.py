@@ -2789,6 +2789,11 @@ URLIZE_VALUES = [
     "tab\tseparated\nlines\x1cwith spaces",
     "trailing.com/.,:;!",
     "<script>alert('x')</script>",
+    # Native link handling: entities, semicolons and brackets.
+    "(http://a.com/). http://a.com/?a=1&amp;b=2 http://a.com/?a&notify=1;",
+    "www.a.com/&amp;;; www.a.com/&lt;; www.a.com&#59; x@y.com&amp; a&b@c.com",
+    "http://a.com/?q=&eacute; http://a.com/?n=&#91; http://[::1]/ u@[1.2.3.4]",
+    "a.com).) ((a.com)) [a.com]. http://a.com/%ff?x=%2525&y&&z=1+2#f",
 ]
 
 
@@ -2807,6 +2812,67 @@ def test_urlize_matches_django(settings, assume_https, autoescape):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         django, rusty = render_both(source, {"values": values, "limit": 0})
+    assert isinstance(django, str)
+    assert rusty == django
+
+
+URLIZE_PIECES = {
+    "lead": ["", "", "(", "[", "(("],
+    "scheme": ["", "", "http://", "HTTPS://", "ftp://", "mailto:"],
+    "host": [
+        "www.example.com",
+        "example.org",
+        "a.b.NET",
+        "a_b.com",
+        "-a.com",
+        "a..com",
+        "x.co",
+        "localhost",
+        "u@b.com",
+        "a@b.xn--p1ai",
+        "a.b+c@d.edu",
+        "x@y",
+    ],
+    "rest": [
+        "",
+        "/",
+        "/a b",
+        "/%41%ff",
+        "?a=1&b=2",
+        "?a=1&amp;b=2",
+        "?a&notify=1",
+        "?a+b=c",
+        "?x=&lt;",
+        "#f g",
+        "/(x)",
+        "/[x]",
+    ],
+    "trail": ["", "", ".", ")", ").", ".)", "]", ";", ";;", "&amp;;", "&lt;;", "!,"],
+}
+
+
+@pytest.mark.parametrize("assume_https", [False, True])
+def test_urlize_generated_words_match_django(settings, assume_https):
+    """Compare a seeded sample of link-like words, as a quick check in CI."""
+    import random
+    import warnings
+
+    settings.URLIZE_ASSUME_HTTPS = assume_https
+    generator = random.Random(337)
+    words = sorted(
+        {
+            "".join(generator.choice(URLIZE_PIECES[part]) for part in URLIZE_PIECES)
+            for _ in range(1500)
+        }
+    )
+    values = words + [mark_safe(word) for word in words]
+    source = (
+        "{% for value in values %}[{{ value|urlize }}][{{ value|urlizetrunc:8 }}]"
+        "{% autoescape off %}[{{ value|urlize }}]{% endautoescape %}{% endfor %}"
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        django, rusty = render_both(source, {"values": values})
     assert isinstance(django, str)
     assert rusty == django
 
@@ -2854,6 +2920,15 @@ def test_urlize_non_strings_match_django(value):
             "{{ value|urlize }}|{{ value|urlizetrunc:5 }}", {"value": value}
         )
     assert rusty == django
+
+
+def test_urlize_customized_urlizer_is_used(monkeypatch):
+    from django.utils import html
+
+    monkeypatch.setattr(html.Urlizer, "trailing_punctuation_chars", ".,:;!?")
+    django, rusty = render_both("{{ value|urlize }}", {"value": "http://a.com/x?"})
+    assert rusty == django
+    assert "</a>?" in django
 
 
 @pytest.mark.parametrize("name", ["urlize", "urlizetrunc"])

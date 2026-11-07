@@ -40,6 +40,7 @@ use crate::render::types::{
     AsBorrowedContent, Content, ContentString, Context, IntoOwnedContent, append_escaped,
     append_python_string,
 };
+use crate::render::urlize::{UrlizeRules, handle_word};
 use crate::render::{Resolve, ResolveFailures, ResolveResult};
 use dtl_lexer::types::TemplateString;
 use unicode_normalization::UnicodeNormalization;
@@ -4084,6 +4085,7 @@ impl ResolveFilter for JsonScriptFilter {
 }
 
 static HTML_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+static HTML_UNESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 /// Whether `word` might become a link in Django's `Urlizer.handle_word`.
 /// A link needs `http`, `www.`, `@` or one of the seven gTLDs after a dot,
@@ -4106,14 +4108,58 @@ fn may_urlize(word: &str) -> bool {
             .any(|tld| lower.contains(tld))
 }
 
+/// The `urlize` rules for this Django series, or `None` to leave every link
+/// to Django: for a series that isn't ported, or when `django.utils.html`'s
+/// `urlizer` has been replaced or customized.
+fn urlize_rules(py: Python<'_>, series: (u8, u8)) -> PyResult<Option<UrlizeRules>> {
+    let html = HTML_MODULE.import(py, "django.utils", "html")?;
+    let urlizer = html.getattr("urlizer")?;
+    if !urlizer.get_type().is(&html.getattr("Urlizer")?) {
+        return Ok(None);
+    }
+    let stock = [
+        ("trailing_punctuation_chars", ".,:;!"),
+        ("mailto_template", "mailto:{local}@{domain}"),
+        ("url_template", "<a href=\"{href}\"{attrs}>{url}</a>"),
+    ];
+    for (name, value) in stock {
+        if urlizer.getattr(name)?.extract::<String>().ok().as_deref() != Some(value) {
+            return Ok(None);
+        }
+    }
+    let wrapping: Option<Vec<(String, String)>> =
+        urlizer.getattr("wrapping_punctuation")?.extract().ok();
+    let expected = [("(", ")"), ("[", "]")];
+    if wrapping.is_none_or(|pairs| {
+        pairs.len() != expected.len()
+            || pairs
+                .iter()
+                .zip(expected)
+                .any(|((open, close), (o, c))| open != o || close != c)
+    }) {
+        return Ok(None);
+    }
+    let assume_https = if series >= (6, 0) {
+        py.import("django.conf")?
+            .getattr("settings")?
+            .getattr("URLIZE_ASSUME_HTTPS")
+            .map_or(Ok(false), |value| value.is_truthy())?
+    } else {
+        false
+    };
+    Ok(UrlizeRules::for_series(series, assume_https))
+}
+
 /// Django's `urlize(text, trim_url_limit, nofollow=True, autoescape)`.
-/// Words that can't become links are escaped as `handle_word` does; the
-/// rest go through Django's `urlizer`, once per distinct word.
+/// Words that can't become links are escaped as `handle_word` does, and
+/// most links are built by `urlize::handle_word`. The rest go through
+/// Django's `urlizer`, once per distinct word.
 fn urlize_text(
     text: &str,
     safe: bool,
     limit: Option<i64>,
     autoescape: bool,
+    series: (u8, u8),
     py: Python<'_>,
 ) -> PyResult<String> {
     // `word_split_re`: runs of whitespace, `<`, `>`, `"` and `'` separate words.
@@ -4122,6 +4168,7 @@ fn urlize_text(
     let mut output = String::with_capacity(text.len());
     let mut links: HashMap<&str, String> = HashMap::new();
     let mut urlizer = None;
+    let mut rules: Option<Option<UrlizeRules>> = None;
     let mut rest = text;
     while !rest.is_empty() {
         let separator = rest.starts_with(is_separator);
@@ -4140,6 +4187,23 @@ fn urlize_text(
         }
         if let Some(link) = links.get(piece) {
             output.push_str(link);
+            continue;
+        }
+        let rules = match rules {
+            Some(rules) => rules,
+            None => *rules.insert(urlize_rules(py, series)?),
+        };
+        let mut unescape = |text: &str| -> PyResult<String> {
+            HTML_UNESCAPE
+                .import(py, "html", "unescape")?
+                .call1((text,))?
+                .extract()
+        };
+        if let Some(rules) = rules
+            && let Some(link) = handle_word(piece, safe, limit, autoescape, rules, &mut unescape)?
+        {
+            output.push_str(&link);
+            links.insert(piece, link);
             continue;
         }
         let urlizer = match &urlizer {
@@ -4178,7 +4242,14 @@ impl ResolveFilter for UrlizeFilter {
     ) -> ResolveResult<'t, 'py> {
         if let Some(text) = Text::from_variable(variable.as_ref(), py)? {
             let safe = matches!(text, Text::Safe(_));
-            let output = urlize_text(text.as_str(), safe, None, context.autoescape, py)?;
+            let output = urlize_text(
+                text.as_str(),
+                safe,
+                None,
+                context.autoescape,
+                context.django_series(py)?,
+                py,
+            )?;
             return Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
                 output,
             )))));
@@ -4200,7 +4271,14 @@ impl ResolveFilter for UrlizetruncFilter {
             && let Some(text) = Text::from_variable(variable.as_ref(), py)?
         {
             let safe = matches!(text, Text::Safe(_));
-            let output = urlize_text(text.as_str(), safe, Some(limit), context.autoescape, py)?;
+            let output = urlize_text(
+                text.as_str(),
+                safe,
+                Some(limit),
+                context.autoescape,
+                context.django_series(py)?,
+                py,
+            )?;
             return Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
                 output,
             )))));

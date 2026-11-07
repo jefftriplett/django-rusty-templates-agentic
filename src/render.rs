@@ -11,6 +11,7 @@ mod stock;
 pub mod tags;
 mod timesince;
 pub mod types;
+pub mod urlize;
 
 use std::borrow::Cow;
 
