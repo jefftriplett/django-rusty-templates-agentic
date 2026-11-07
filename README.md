@@ -122,7 +122,7 @@ Custom filters run in Python and are called as Django calls them: `is_safe`, `ne
 
 **Ported, with fallbacks for unusual input.** Some built-in filters hand only that input to Django, where Python or Django behave differently between versions:
 
-* `urlize` and `urlizetrunc`: words that might be links.
+* `urlize` and `urlizetrunc`: non-ASCII words, links with `[` or `]`, links whose HTML entities decode to non-ASCII text, and on Django 6.0+, `www.` and bare-domain links while `URLIZE_ASSUME_HTTPS` is off (so Django can warn).
 * `striptags`, `truncatechars_html` and `truncatewords_html`: HTML with entities, comments or loosely formed tags.
 * `json_script`: dates, decimals and lazy strings.
 * `stringformat`, `dictsort`, `unordered_list` and `floatformat`: unusual format specifiers, subclasses and generators.

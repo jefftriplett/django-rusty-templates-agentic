@@ -475,15 +475,15 @@ pub struct TruncateWordsHtmlFilter {
     pub django: DjangoFilter,
 }
 
-/// Django's `urlize`, with words that can't become links handled natively.
-/// Possible links call Django's `Urlizer`.
+/// Django's `urlize`. Links are built by `render::urlize`, which leaves a
+/// few kinds of word to Django's `Urlizer`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UrlizeFilter {
     pub django: DjangoFilter,
 }
 
-/// Django's `urlizetrunc`, with words that can't become links handled
-/// natively. Possible links call Django's `Urlizer`.
+/// Django's `urlizetrunc`. Links are built by `render::urlize`, which leaves
+/// a few kinds of word to Django's `Urlizer`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UrlizetruncFilter {
     pub django: DjangoFilter,

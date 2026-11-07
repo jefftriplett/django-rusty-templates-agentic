@@ -14,13 +14,14 @@ Warm renders with the cached loader, which both backends use by default when you
 | Table, 200 rows: `title`, `lower`, `date`, `floatformat`, `default`, `truncatechars`, `cycle`, `if` | 5,564 µs | 429 µs | 13.0× |
 | Inheritance: `extends`, `block.super`, 20 includes | 190 µs | 29 µs | 6.5× |
 | 200 model-style objects: properties, methods, related attributes | 1,612 µs | 263 µs | 6.1× |
+| `urlize` on 200 email addresses | 2,519 µs | 245 µs | 10.3× |
 | Custom filter on each of 200 rows | 331 µs | 63 µs | 5.3× |
 | Mixed template: one custom `Node` tag, rest native | 1,922 µs | 516 µs | 3.7× |
 | Tiny template, two variables | 5.0 µs | 1.8 µs | 2.7× |
 | Tiny template, 100 context keys | 4.6 µs | 1.8 µs | 2.5× |
 | Tiny template, 500 context keys | 4.6 µs | 2.7 µs | 1.7× |
 
-Built-in filters in a loop gain the most. Each filter is 7–17× faster than Django's, apart from `urlize` (below). This includes the `{% load l10n %}`, `{% load tz %}` and `{% load i18n %}` filters, and printing dates, times and `Decimal`s. Keys the template never reads cost almost nothing, because a context `dict` is read lazily. Python attribute access and method calls still run in Python, which is why model-heavy templates gain less than plain data.
+Built-in filters in a loop gain the most. Each filter is 7–17× faster than Django's. This includes the `{% load l10n %}`, `{% load tz %}` and `{% load i18n %}` filters, and printing dates, times and `Decimal`s. Keys the template never reads cost almost nothing, because a context `dict` is read lazily. Python attribute access and method calls still run in Python, which is why model-heavy templates gain less than plain data.
 
 Compiling is also much faster, which matters for the first request after a deploy and for development without the cached loader:
 
@@ -37,11 +38,10 @@ Compiling is also much faster, which matters for the first request after a deplo
 | Scenario | Django | Rusty | Speedup |
 |---|---|---|---|
 | Compile a mixed template (custom `Node` tag) | 46 µs | 69 µs | 0.66× |
-| `urlize` on 200 email addresses | 2,651 µs | 2,276 µs | 1.16× |
 | Custom `simple_tag` on each of 200 rows | 332 µs | 189 µs | 1.8× |
 
 - **Mixed templates compile slower.** A custom tag with its own compile function makes the template "mixed". Django's parser then builds that template, and Rust compiles the native regions on top. Warm renders are still several times faster, so this only matters without the cached loader.
-- **Inputs handed to Django.** `urlize` sends any word that might be a link to Django's `urlizer`, which keeps validators and IDNA handling exact. Text full of email addresses or URLs therefore runs at about Django's speed. The README lists the other fallbacks under "What is ported".
+- **Inputs handed to Django.** A few filters hand unusual input to Django, which then runs at Django's speed. For example, `urlize` leaves non-ASCII words to Django's `urlizer`, and on Django 6.0+ also `www.` links while `URLIZE_ASSUME_HTTPS` is off. The README lists these fallbacks under "What is ported".
 - **Python callbacks.** Custom tags and filters run in Python. Simple tags gain least, because each call goes from Rust into Python and back.
 
 ## What to expect in production

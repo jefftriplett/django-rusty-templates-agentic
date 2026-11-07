@@ -79,7 +79,7 @@ SCENARIOS = [
     ("tiny template, 30 context keys", "tiny.html", "context conversion"),
     ("tiny template, 100 context keys", "tiny.html", "context conversion"),
     ("tiny template, 500 context keys", "tiny.html", "context conversion"),
-    ("urlize on email addresses", "urlize.html", "words handed to Django's urlizer"),
+    ("urlize on email addresses", "urlize.html", "links built natively"),
     ("custom simple_tag per row", "simple_tags.html", "Python tag calls"),
     ("custom filter per row", "custom_filters.html", "Python filter calls"),
     ("mixed template", "mixed.html", "one custom Node tag, rest native"),
