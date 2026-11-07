@@ -185,6 +185,41 @@ fn lookup_part<'py>(
     }
 }
 
+/// Resolve `object.part.part` like Django's `Variable` resolving
+/// `{asvar}.{path}` with `ignore_failures=True`, as `regroup` does for each
+/// item. A missing part gives `None`.
+pub(crate) fn resolve_lookup_path<'py>(
+    object: Bound<'py, PyAny>,
+    path: &[String],
+    context: &mut Context,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = object.py();
+    let mut value = match resolve_callable(object, context) {
+        Ok(Some(value)) => value,
+        Ok(None) => return context.invalid_value(py, None),
+        Err(error) if silent_failure(&error, py) => return context.invalid_value(py, None),
+        Err(error) => return Err(error),
+    };
+    for part in path {
+        let found = match lookup_part(value, part) {
+            Ok(Some(found)) => found,
+            // A missing part is VariableDoesNotExist, which regroup ignores.
+            Ok(None) => return Ok(py.None().into_bound(py)),
+            Err(error) if silent_failure(&error, py) => return context.invalid_value(py, None),
+            Err(error) => return Err(error),
+        };
+        value = match resolve_callable(found, context) {
+            Ok(Some(value)) => value,
+            // Django substitutes string_if_invalid for a callable it won't
+            // call, then keeps looking up the remaining parts on it.
+            Ok(None) => context.invalid_value(py, None)?,
+            Err(error) if silent_failure(&error, py) => return context.invalid_value(py, None),
+            Err(error) => return Err(error),
+        };
+    }
+    Ok(value)
+}
+
 fn silent_failure(error: &PyErr, py: Python<'_>) -> bool {
     error
         .value(py)

@@ -1,4 +1,10 @@
+from datetime import date
+from decimal import Decimal
+
 import pytest
+from django.template import engines
+from django.test import override_settings
+from django.utils import translation
 from inline_snapshot import snapshot
 
 
@@ -161,3 +167,38 @@ def test_firstof_asvar_stores_rendered_string(template_engine, value, expected):
     assert template.render(context) == expected
     assert context["chosen"] == expected
     assert isinstance(context["chosen"], str)
+
+
+class Shouty:
+    def __str__(self):
+        return "<b>&</b>"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [1234567, 1234.5, "<script>", "plain", Shouty(), [1, "<"]],
+    ids=["int", "float", "unsafe str", "str", "object", "list"],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_firstof_asvar_stores_what_django_stores(template_engine, value, autoescape):
+    # Printing the variable again with autoescape on shows whether it was
+    # stored as safe: an unsafe value would be escaped twice.
+    source = (
+        f"{{% autoescape {autoescape} %}}{{% firstof a as x %}}"
+        "{{ x }}|{{ x|length }}{% endautoescape %}"
+        "{% autoescape on %}|{{ x }}{% endautoescape %}"
+    )
+    expected = engines["django"].from_string(source).render({"a": value})
+    assert template_engine.from_string(source).render({"a": value}) == expected
+
+
+@pytest.mark.parametrize("language", ["en", "de"])
+def test_firstof_asvar_localizes_like_django(template_engine, language):
+    source = (
+        "{% firstof a as x %}{{ x }} {% firstof b as y %}{{ y }} "
+        "{% firstof c as z %}{{ z }}"
+    )
+    context = {"a": 1234.5, "b": Decimal("9876.25"), "c": date(2026, 11, 6)}
+    with override_settings(USE_THOUSAND_SEPARATOR=True), translation.override(language):
+        expected = engines["django"].from_string(source).render(context)
+        assert template_engine.from_string(source).render(context) == expected

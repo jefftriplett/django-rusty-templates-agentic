@@ -199,12 +199,16 @@ pub struct Regroup {
     pub target: TagElement,
     pub expression: Gc<Py<PyAny>>,
     pub asvar: String,
+    /// The attribute path of a plain `by` key, such as `["country", "name"]`.
+    /// Keys with filters or literals resolve through `expression`.
+    pub lookup: Option<Vec<String>>,
 }
 
 impl PartialEq for Regroup {
     fn eq(&self, other: &Self) -> bool {
         self.target == other.target
             && self.asvar == other.asvar
+            && self.lookup == other.lookup
             && Gc::ptr_eq(&self.expression, &other.expression)
     }
 }
@@ -2433,7 +2437,13 @@ impl<'t, 'py> Parser<'t, 'py> {
         }
         let target = tokens[0].parse(self)?;
         let asvar = self.template.content(tokens[4].at).to_string();
-        let expression = format!("{asvar}.{}", self.template.content(tokens[2].at));
+        let key = self.template.content(tokens[2].at);
+        let lookup = (!key.is_empty()
+            && key.split('.').all(|part| {
+                !part.is_empty() && part.chars().all(|c| c.is_alphanumeric() || c == '_')
+            }))
+        .then(|| key.split('.').map(str::to_string).collect());
+        let expression = format!("{asvar}.{key}");
         let builtins = pyo3::types::PyList::empty(self.py);
         for module in [
             "django.template.defaulttags",
@@ -2464,6 +2474,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             target,
             expression,
             asvar,
+            lookup,
         })))
     }
 

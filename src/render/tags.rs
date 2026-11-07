@@ -37,6 +37,7 @@ use crate::template::django_rusty_templates::{
 use crate::utils::PyResultMethods;
 
 static RENDER_FIRSTOF_VALUE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static FIRSTOF_SAFE_STRING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static QUERY_DICT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static QUERY_SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static STRIP_SPACES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -950,7 +951,31 @@ impl Render for Tag {
                     ResolveFailures::IgnoreVariableDoesNotExist,
                 )? {
                     let target = target.to_py(py);
-                    if !target.is_none() {
+                    if !target.is_none()
+                        && let Some(lookup) = &group.lookup
+                        && context.formatting_context.is_none()
+                    {
+                        let grouped_result = py
+                            .import("django.template.defaulttags")?
+                            .getattr("GroupedResult")?;
+                        let mut previous: Option<Bound<'_, PyAny>> = None;
+                        let mut items = PyList::empty(py);
+                        for item in target.try_iter()? {
+                            let item = item?;
+                            let key =
+                                super::common::resolve_lookup_path(item.clone(), lookup, context)?;
+                            let same = match &previous {
+                                Some(previous) => key.is(previous) || key.eq(previous)?,
+                                None => false,
+                            };
+                            if !same {
+                                items = PyList::empty(py);
+                                results.append(grouped_result.call1((&key, &items))?)?;
+                                previous = Some(key);
+                            }
+                            items.append(item)?;
+                        }
+                    } else if !target.is_none() {
                         let python_context = context.django_context(py)?;
                         let kwargs = PyDict::new(py);
                         kwargs.set_item("ignore_failures", true)?;
@@ -2326,9 +2351,19 @@ impl Render for FirstOf {
             )? && content.to_bool().unwrap_or(false)
             {
                 if let Some(asvar) = &self.asvar {
-                    let rendered = RENDER_FIRSTOF_VALUE
-                        .import(py, "django.template.base", "render_value_in_context")?
-                        .call1((content.to_py(py), context.django_context(py)?))?;
+                    // Django stores `render_value_in_context(value)`. With
+                    // autoescape on, that is the escaped output marked safe,
+                    // which the native output path already produces.
+                    let rendered = if context.autoescape && context.formatting_context.is_none() {
+                        let output = content.render(context)?;
+                        FIRSTOF_SAFE_STRING
+                            .import(py, "django.utils.safestring", "SafeString")?
+                            .call1((output.as_ref(),))?
+                    } else {
+                        RENDER_FIRSTOF_VALUE
+                            .import(py, "django.template.base", "render_value_in_context")?
+                            .call1((content.to_py(py), context.django_context(py)?))?
+                    };
                     context.insert(asvar.clone(), rendered)?;
                     return Ok(Cow::Borrowed(""));
                 }
