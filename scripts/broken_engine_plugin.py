@@ -48,6 +48,14 @@ class TemplateProxy:
     def __init__(self, template):
         object.__setattr__(self, "_template", template)
 
+    # Rusty's objects copy to themselves; forwarding these would hand the
+    # copy the unwrapped object and hide it from the check.
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
     def __getattr__(self, name):
         attr = getattr(self._template, name)
         if name not in RENDER_METHODS:
@@ -71,6 +79,14 @@ class TemplateProxy:
 class EngineProxy:
     def __init__(self, engine):
         object.__setattr__(self, "_engine", engine)
+
+    # Rusty's objects copy to themselves; forwarding these would hand the
+    # copy the unwrapped object and hide it from the check.
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
 
     def __getattr__(self, name):
         attr = getattr(self._engine, name)
