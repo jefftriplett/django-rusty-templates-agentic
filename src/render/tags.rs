@@ -10,6 +10,7 @@ use pyo3::exceptions::{
 };
 use pyo3::intern;
 use pyo3::prelude::*;
+use pyo3::sync::MutexExt;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyNone, PyString, PyTuple};
 
@@ -1682,12 +1683,61 @@ fn call_tag<'py>(
     }
 }
 
+/// Spare `PyContext` wrappers, reused so each `takes_context` call doesn't
+/// allocate and free one. A spare holds an empty placeholder `Context`.
+///
+/// Reuse needs proof that Python kept no reference to the wrapper. With the
+/// GIL, a reference count of one is that proof; free-threaded Python can't
+/// give it, so those builds always allocate.
+#[cfg(not(Py_GIL_DISABLED))]
+mod spare_contexts {
+    use std::cell::RefCell;
+
+    use pyo3::prelude::*;
+
+    use super::PyContext;
+
+    /// Enough for nested callbacks; more would only hold memory.
+    const LIMIT: usize = 4;
+
+    thread_local! {
+        static SPARES: RefCell<Vec<Py<PyContext>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub fn take() -> Option<Py<PyContext>> {
+        SPARES.with(|spares| spares.borrow_mut().pop())
+    }
+
+    pub fn give_back(wrapper: Py<PyContext>) {
+        SPARES.with(|spares| {
+            let mut spares = spares.borrow_mut();
+            if spares.len() < LIMIT {
+                spares.push(wrapper);
+            }
+        });
+    }
+}
+
 pub(super) fn build_pycontext<'py>(
     py: Python<'py>,
     context: &mut Context,
 ) -> PyResult<Bound<'py, PyAny>> {
     if let Some(live) = &context.formatting_context {
         return Ok(live.bind(py).clone());
+    }
+    #[cfg(not(Py_GIL_DISABLED))]
+    if let Some(wrapper) = spare_contexts::take() {
+        let wrapper = wrapper.into_bound(py);
+        // The spare's placeholder takes the render's place until the call returns.
+        std::mem::swap(
+            &mut *wrapper
+                .borrow()
+                .context
+                .lock_py_attached(py)
+                .expect("Mutex should not be poisoned"),
+            context,
+        );
+        return Ok(wrapper.into_any());
     }
     // Take ownership of `context` so we can pass it to Python.
     // The `context` variable now points to an empty `Context` instance which will not be
@@ -1705,6 +1755,29 @@ pub(super) fn retrieve_context<'py>(
 ) {
     if context.formatting_context.is_some() {
         return;
+    }
+    #[cfg(not(Py_GIL_DISABLED))]
+    {
+        let wrapper = py_context
+            .cast::<PyContext>()
+            .expect("The type of py_context should not have changed");
+        // Only this function holds the wrapper, and no block callback holds
+        // its state: swap the render back and keep the wrapper for next time.
+        // SAFETY: `wrapper` is a live object, and reading a reference count is
+        // only a load.
+        let refcount = unsafe { pyo3::ffi::Py_REFCNT(wrapper.as_ptr()) };
+        if refcount == 1 && wrapper.borrow().context.is_sole_native_owner() {
+            std::mem::swap(
+                &mut *wrapper
+                    .borrow()
+                    .context
+                    .lock_py_attached(py)
+                    .expect("Mutex should not be poisoned"),
+                context,
+            );
+            spare_contexts::give_back(wrapper.clone().unbind());
+            return;
+        }
     }
     // Retrieve the PyContext wrapper from Python
     let extracted_context: PyContext = py_context
