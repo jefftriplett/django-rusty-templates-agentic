@@ -590,6 +590,8 @@ pub struct LanguageInfoFilter {
 pub enum HumanizeKind {
     Apnumber,
     Intcomma,
+    Intword,
+    Naturalday,
     Naturaltime,
     Ordinal,
 }
