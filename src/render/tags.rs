@@ -37,6 +37,7 @@ use crate::template::django_rusty_templates::{
 use crate::utils::PyResultMethods;
 
 static RENDER_FIRSTOF_VALUE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static FIRSTOF_SAFE_STRING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static STRIP_SPACES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DEBUG_NODE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static MARK_BLOCK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -2168,9 +2169,19 @@ impl Render for FirstOf {
             )? && content.to_bool().unwrap_or(false)
             {
                 if let Some(asvar) = &self.asvar {
-                    let rendered = RENDER_FIRSTOF_VALUE
-                        .import(py, "django.template.base", "render_value_in_context")?
-                        .call1((content.to_py(py), context.django_context(py)?))?;
+                    // Django stores `render_value_in_context(value)`. With
+                    // autoescape on, that is the escaped output marked safe,
+                    // which the native output path already produces.
+                    let rendered = if context.autoescape && context.formatting_context.is_none() {
+                        let output = content.render(context)?;
+                        FIRSTOF_SAFE_STRING
+                            .import(py, "django.utils.safestring", "SafeString")?
+                            .call1((output.as_ref(),))?
+                    } else {
+                        RENDER_FIRSTOF_VALUE
+                            .import(py, "django.template.base", "render_value_in_context")?
+                            .call1((content.to_py(py), context.django_context(py)?))?
+                    };
                     context.insert(asvar.clone(), rendered)?;
                     return Ok(Cow::Borrowed(""));
                 }
