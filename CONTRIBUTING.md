@@ -133,6 +133,23 @@ $ just rust-coverage
 $ just rust-coverage-browser
 ```
 
+## Mutation testing
+
+Coverage shows which code runs. Mutation testing shows whether a test notices when that code is wrong. `scripts/mutants.py` asks [cargo-mutants](https://mutants.rs/) for small changes to the Rust code, such as `==` to `!=` or a function returning `Default::default()`. For each one, it applies the change in a separate worktree, rebuilds with `maturin develop`, and runs pytest, then the Rust tests if pytest passes. A mutant that survives is a change no test catches.
+
+```bash
+$ cargo install --locked cargo-mutants
+$ just mutants -f src/render/lorem.rs          # one file
+$ just mutants -f 'src/render/*.rs' --shard 1/4
+$ git diff main -- '*.rs' > /tmp/changes.diff && just mutants --in-diff /tmp/changes.diff
+```
+
+Each mutant takes about 30 seconds, and the workspace has about 6,000, so test a file or your diff, not everything. The worktree is built from `HEAD`, so commit first. Results go to `target/mutants/`: `results.jsonl`, plus `survivors.md` and `survivors.diff`. Re-running at the same commit skips mutants already tested. `.cargo/mutants.toml` excludes the benchmark crate and `Debug` impls.
+
+To fix a survivor, add a test that fails with the mutant applied, preferably one comparing with Django. If the mutant doesn't change behavior (an equivalent mutant), leave it.
+
+The `Mutants` workflow runs weekly in 4 shards over the Rust code changed in the last 7 days, and can be dispatched for a file glob. It is never part of PR checks.
+
 
 ### CI controls
 
