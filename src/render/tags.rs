@@ -11,7 +11,7 @@ use pyo3::exceptions::{
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyBool, PyDict, PyList, PyNone, PyString, PyTuple};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyNone, PyString, PyTuple};
 
 use crate::parse::Now;
 use crate::render::dateformat::Formatter;
@@ -37,6 +37,8 @@ use crate::template::django_rusty_templates::{
 use crate::utils::PyResultMethods;
 
 static RENDER_FIRSTOF_VALUE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static QUERY_DICT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static QUERY_SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static STRIP_SPACES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DEBUG_NODE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static MARK_BLOCK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -1114,6 +1116,19 @@ impl Render for Tag {
             Self::QueryString(tag) => {
                 let mut args = build_args(py, template, context, &tag.args)?;
                 let kwargs = build_kwargs(py, template, context, &tag.kwargs)?;
+                if args.is_empty()
+                    && let Some(output) = native_querystring(py, context, kwargs.as_ref())?
+                {
+                    return Ok(if let Some(target) = &tag.target_var {
+                        context.insert(target.clone(), PyString::new(py, &output).into_any())?;
+                        Cow::Borrowed("")
+                    } else if context.autoescape {
+                        // Only `&` in an encoded query string needs escaping.
+                        Cow::Owned(output.replace('&', "&amp;"))
+                    } else {
+                        Cow::Owned(output)
+                    });
+                }
                 let python_context = context.django_context(py)?;
                 if let Some(request) = &context.request {
                     python_context.setattr("request", request.bind(py))?;
@@ -1768,6 +1783,149 @@ fn inclusion_values<'py>(
         .import(py, "django_rusty_templates.stock", "inclusion_values")?
         .call1((result,))?
         .extract()
+}
+
+/// One value for a query string key, or `None` when only Django's
+/// function knows how to handle it.
+fn query_value(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if value.is_instance_of::<PyString>()
+        || value.is_exact_instance_of::<PyInt>()
+        || value.is_exact_instance_of::<PyFloat>()
+        || value.is_exact_instance_of::<PyBool>()
+    {
+        Ok(Some(value.str()?.to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Like `urllib.parse.quote_plus` with UTF-8.
+fn quote_plus(text: &str, output: &mut String) {
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-' | b'~' => {
+                output.push(char::from(byte));
+            }
+            b' ' => output.push('+'),
+            _ => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                output.push('%');
+                output.push(char::from(HEX[usize::from(byte >> 4)]));
+                output.push(char::from(HEX[usize::from(byte & 0xF)]));
+            }
+        }
+    }
+}
+
+fn is_utf8(encoding: &Bound<'_, PyAny>) -> bool {
+    encoding
+        .extract::<String>()
+        .is_ok_and(|name| matches!(name.to_ascii_lowercase().as_str(), "utf-8" | "utf8"))
+}
+
+/// Django's `{% querystring %}` without positional mappings: the request's
+/// `GET` updated with plain keyword values. `None` means Django's function
+/// must handle the call, which it then does with identical semantics.
+fn native_querystring(
+    py: Python<'_>,
+    context: &Context,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<String>> {
+    if context.formatting_context.is_some() {
+        return Ok(None);
+    }
+    let Some(request) = &context.request else {
+        return Ok(None);
+    };
+    let Ok(get) = request.bind(py).getattr(intern!(py, "GET")) else {
+        return Ok(None);
+    };
+    let query_dict = QUERY_DICT.import(py, "django.http", "QueryDict")?;
+    if !get.get_type().is(query_dict) || !is_utf8(&get.getattr(intern!(py, "encoding"))?) {
+        return Ok(None);
+    }
+    // Django 6.0 builds a fresh QueryDict, which uses DEFAULT_CHARSET and
+    // drops None from lists. Django 5.2 copies `GET` and keeps them.
+    let modern = context.django_series(py)? >= (6, 0);
+    if modern
+        && !is_utf8(
+            &QUERY_SETTINGS
+                .import(py, "django.conf", "settings")?
+                .getattr(intern!(py, "DEFAULT_CHARSET"))?,
+        )
+    {
+        return Ok(None);
+    }
+    let set = |params: &mut Vec<(String, Vec<String>)>, key: String, values: Vec<String>| {
+        if let Some(entry) = params.iter_mut().find(|(name, _)| *name == key) {
+            entry.1 = values;
+        } else {
+            params.push((key, values));
+        }
+    };
+    let list = |value: &Bound<'_, PyAny>| -> PyResult<Option<Vec<String>>> {
+        let mut values = Vec::new();
+        for item in value.try_iter()? {
+            let item = item?;
+            if item.is_none() && modern {
+                continue;
+            }
+            let item = if item.is_none() {
+                "None".to_string()
+            } else if let Some(item) = query_value(&item)? {
+                item
+            } else {
+                return Ok(None);
+            };
+            values.push(item);
+        }
+        Ok(Some(values))
+    };
+    let mut params: Vec<(String, Vec<String>)> = Vec::new();
+    let get_dict = get.cast::<PyDict>()?;
+    for (key, values) in get_dict.iter() {
+        let Ok(key) = key.extract::<String>() else {
+            return Ok(None);
+        };
+        let Some(values) = list(&values)? else {
+            return Ok(None);
+        };
+        set(&mut params, key, values);
+    }
+    let get_empty = params.is_empty();
+    for (key, value) in kwargs.into_iter().flat_map(PyDictMethods::iter) {
+        let key: String = key.extract()?;
+        if value.is_none() {
+            params.retain(|(name, _)| *name != key);
+        } else if value.is_exact_instance_of::<PyList>() || value.is_exact_instance_of::<PyTuple>()
+        {
+            let Some(values) = list(&value)? else {
+                return Ok(None);
+            };
+            set(&mut params, key, values);
+        } else if let Some(value) = query_value(&value)? {
+            set(&mut params, key, vec![value]);
+        } else {
+            return Ok(None);
+        }
+    }
+    if !modern && params.is_empty() && get_empty {
+        return Ok(Some(String::new()));
+    }
+    let mut output = String::from("?");
+    let mut first = true;
+    for (key, values) in &params {
+        for value in values {
+            if !first {
+                output.push('&');
+            }
+            first = false;
+            quote_plus(key, &mut output);
+            output.push('=');
+            quote_plus(value, &mut output);
+        }
+    }
+    Ok(Some(output))
 }
 
 impl InclusionTag {

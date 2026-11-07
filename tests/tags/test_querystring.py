@@ -53,3 +53,70 @@ def test_querystring_requires_request_or_mapping():
             AttributeError, match="'Context' object has no attribute 'request'"
         ):
             engine.from_string("{% querystring %}").render(Context())
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["", "a=1", "a=1&a=2&b=x", "q=caf%C3%A9+au+lait&x=%26%3D%3F%2B", "e=&f=%7E._-"],
+)
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "",
+        "page=2",
+        "a=None",
+        "a=None b=None",
+        "a=values",
+        "c=values",
+        "a=empty",
+        "a=nones",
+        "z=3 a=4",
+        "text='a b&c=d'",
+        "flag=True number=1.5",
+        "safe=safe",
+    ],
+)
+@pytest.mark.parametrize("autoescape", ["on", "off"])
+def test_querystring_matches_django(query, arguments, autoescape):
+    from django.utils.safestring import mark_safe
+
+    source = (
+        f"{{% autoescape {autoescape} %}}{{% querystring {arguments} %}}|"
+        f"{{% querystring {arguments} as qs %}}{{{{ qs }}}}{{% endautoescape %}}"
+    )
+    context = {
+        "values": ["x", 2, "é"],
+        "empty": [],
+        "nones": [None, "kept"],
+        "safe": mark_safe("<b>"),
+    }
+    request = RequestFactory().get("/", QueryDict(query))
+    outputs = [
+        engine_class().from_string(source).render(RequestContext(request, context))
+        for engine_class in (Engine, DjangoEngine)
+    ]
+    assert outputs[0] == outputs[1]
+
+
+@pytest.mark.parametrize("value", ["object", "mapping", "lazy"])
+def test_querystring_other_values_use_django(value):
+    from django.utils.translation import gettext_lazy
+
+    class Thing:
+        def __str__(self):
+            return "thing"
+
+    values = {
+        "object": Thing(),
+        "mapping": {"k": "v"},
+        "lazy": gettext_lazy("Hello"),
+    }
+    source = "{% querystring a=value %}"
+    request = RequestFactory().get("/?a=1")
+    outputs = [
+        engine_class()
+        .from_string(source)
+        .render(RequestContext(request, {"value": values[value]}))
+        for engine_class in (Engine, DjangoEngine)
+    ]
+    assert outputs[0] == outputs[1]
