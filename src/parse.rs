@@ -311,6 +311,8 @@ fn external_filter(py: Python<'_>, filter: Py<PyAny>, argument: Option<Argument>
             &[
                 ("apnumber", HumanizeKind::Apnumber),
                 ("intcomma", HumanizeKind::Intcomma),
+                ("intword", HumanizeKind::Intword),
+                ("naturalday", HumanizeKind::Naturalday),
                 ("naturaltime", HumanizeKind::Naturaltime),
                 ("ordinal", HumanizeKind::Ordinal),
             ],

@@ -681,7 +681,7 @@ impl ResolveFilter for ExternalFilter {
 
 /// A filter argument resolved once, so a native port and Django's filter see
 /// the same value.
-enum ResolvedArgument<'t, 'py> {
+pub(crate) enum ResolvedArgument<'t, 'py> {
     /// The filter was used without an argument.
     Absent,
     /// The argument's value, `None` when it resolved to nothing. Django's
@@ -690,14 +690,14 @@ enum ResolvedArgument<'t, 'py> {
 }
 
 impl<'t, 'py> ResolvedArgument<'t, 'py> {
-    fn value(&self) -> Option<&Content<'t, 'py>> {
+    pub(crate) fn value(&self) -> Option<&Content<'t, 'py>> {
         match self {
             Self::Absent => None,
             Self::Present(value) => value.as_ref(),
         }
     }
 
-    fn into_value(self) -> Option<Content<'t, 'py>> {
+    pub(crate) fn into_value(self) -> Option<Content<'t, 'py>> {
         match self {
             Self::Absent => None,
             Self::Present(value) => value,
@@ -706,7 +706,7 @@ impl<'t, 'py> ResolvedArgument<'t, 'py> {
 }
 
 impl DjangoFilter {
-    fn resolve_argument<'t, 'py>(
+    pub(crate) fn resolve_argument<'t, 'py>(
         &self,
         py: Python<'py>,
         template: TemplateString<'t>,
@@ -715,7 +715,7 @@ impl DjangoFilter {
         resolve_django_argument(self.argument.as_ref(), py, template, context)
     }
 
-    fn call<'t, 'py>(
+    pub(crate) fn call<'t, 'py>(
         &self,
         variable: Option<Content<'t, 'py>>,
         argument: ResolvedArgument<'t, 'py>,
@@ -1322,7 +1322,7 @@ fn floatformat_argument(argument: &ResolvedArgument<'_, '_>) -> Option<(i64, Num
     Some((precision, options))
 }
 
-fn floatformat(
+pub(crate) fn floatformat(
     value: &Content<'_, '_>,
     precision: i64,
     options: NumberOptions,

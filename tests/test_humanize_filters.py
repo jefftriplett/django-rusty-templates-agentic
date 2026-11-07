@@ -1,7 +1,8 @@
 """The humanize filters match django.contrib.humanize.
 
-Rusty renders `intcomma`, `ordinal`, `apnumber` and `naturaltime` natively
-for plain values, and calls Django's filter for anything else.
+Rusty renders `intcomma`, `intword`, `ordinal`, `apnumber`, `naturalday` and
+`naturaltime` natively for plain values, and calls Django's filter for
+anything else.
 """
 
 import datetime
@@ -101,6 +102,17 @@ NUMBERS = {
     "subclass_text": Text("1234"),
     "subclass_int": Number(1234),
     "list": [1, 2],
+    "million": 1000000,
+    "almost_million": 999999,
+    "million_and_half": 1500000,
+    "near_billion": 999999999,
+    "rounds_to_billion": 999950000,
+    "billion": 1200000000,
+    "negative_million": -1250000,
+    "trillion": 31415926535897,
+    "quadrillion": 4503599627370495,
+    "past_exact": 2**53 + 1,
+    "text_million": "2500000",
 }
 
 TIMES = {
@@ -122,6 +134,12 @@ TIMES = {
     "naive_ahead": NAIVE_NOW + datetime.timedelta(hours=2),
     "chicago": (NOW - datetime.timedelta(minutes=7)).astimezone(CHICAGO),
     "date": NOW.date(),
+    "tomorrow_date": NOW.date() + datetime.timedelta(days=1),
+    "yesterday_date": NOW.date() - datetime.timedelta(days=1),
+    "late_tonight": NOW.replace(hour=23, minute=30),
+    "early_today": NOW.replace(hour=0, minute=10),
+    "tokyo": NOW.astimezone(zoneinfo.ZoneInfo("Asia/Tokyo")),
+    "far_date": datetime.date(2020, 2, 29),
     "text": "2026-11-07",
 }
 
@@ -158,7 +176,15 @@ SETTINGS = [
 @pytest.mark.parametrize("language", ["en", "de", "fr", "hi"])
 @pytest.mark.parametrize("name", list(NUMBERS) + ["missing", "1234", '"<b>&</b>"'])
 @pytest.mark.parametrize(
-    "filters", ["intcomma", "ordinal", "apnumber", "apnumber|add:1", "ordinal|length"]
+    "filters",
+    [
+        "intcomma",
+        "intword",
+        "ordinal",
+        "apnumber",
+        "apnumber|add:1",
+        "ordinal|length",
+    ],
 )
 def test_number_filters(settings, language, name, filters):
     source = "{% load humanize %}{{ " + name + "|" + filters + " }}"
@@ -178,6 +204,22 @@ def test_naturaltime(use_tz, language, name):
         translation.override(language),
     ):
         django, rusty = render_both(source)
+    assert rusty == django
+
+
+@pytest.mark.parametrize("use_tz", [True, False])
+@pytest.mark.parametrize("language", ["en", "de", "ja"])
+@pytest.mark.parametrize("name", list(TIMES) + ["missing", "int"])
+@pytest.mark.parametrize("argument", ["", ":'Y-m-d'", ":'SHORT_DATE_FORMAT'", ":fmt"])
+def test_naturalday(use_tz, language, name, argument):
+    source = "{% load humanize %}{{ " + name + "|naturalday" + argument + " }}"
+    values = VALUES | {"fmt": "j N Y"}
+    with (
+        time_machine.travel(NOW, tick=False),
+        override_settings(USE_TZ=use_tz, TIME_ZONE="America/Chicago"),
+        translation.override(language),
+    ):
+        django, rusty = render_both(source, values)
     assert rusty == django
 
 
