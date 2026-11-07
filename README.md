@@ -110,7 +110,7 @@ Checked against Django 5.2 and the development version with `engine.explain_temp
 
 | Library | Filters and tags | Notes |
 |---|---|---|
-| `django.contrib` | The other `humanize` filters (`intword`, `naturalday`), the admin's simple tags, and other contrib libraries | Run as custom libraries. |
+| `django.contrib` | The other `humanize` filters (`intword`, `naturalday`) and the admin's simple tags and filters | Run as custom libraries. See [Django contrib apps](#django-contrib-apps). |
 | Your project | Custom filters and tags | See below. |
 
 Custom filters run in Python and are called as Django calls them: `is_safe`, `needs_autoescape` and `expects_localtime` are honoured, and quoted string arguments arrive as `SafeString`. `simple_tag` and `inclusion_tag` tags are called from Rust. Tags with their own compile function use Django's parser for that tag, and the rest of the template stays native.
@@ -134,6 +134,34 @@ Custom filters run in Python and are called as Django calls them: `is_safe`, `ne
 * `language_name*` and `language_bidi`: codes that aren't plain strings, and codes `get_language_info` rejects.
 
 The WebAssembly engine supports a smaller subset; see [its documentation](dtl-browser/README.md).
+
+### Django contrib apps
+
+Every template that ships with `django.contrib` and `django.forms` compiles natively, without falling back to Django's parser. Some of their tags and filters still call Python.
+
+| App | Rusty support | Checked with Django's tests |
+|---|---|---|
+| `admin` | All templates native. The inclusion tags (`submit_row`, `result_list`, `pagination`, …) and `get_admin_log` are native. `add_preserved_filters`, `paginator_number`, `admin_urlname`, `admin_urlquote` and `cell_count` call Python ([#346](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/346)). | `admin_views`, `admin_changelist`, `admin_inlines`, `admin_widgets`, `admin_filters`, `admin_utils` |
+| `admindocs` | All templates native. | `admin_docs` |
+| `auth` | All templates native. | `auth_tests` |
+| `flatpages` | `get_flatpages` native; its query runs in Python. | `flatpages_tests` |
+| `humanize` | `intcomma`, `ordinal`, `apnumber` and `naturaltime` native. `intword` and `naturalday` call Python ([#340](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/340)). | `humanize_tests` |
+| `sitemaps` | All templates native. | `sitemaps_tests` |
+| `syndication` | Feed title and description templates render with Rusty. | `syndication_tests` |
+| `messages` | No templates or tags; the context processor works. | `messages_tests` |
+| `django.forms` | All form and widget templates native. Deep-copying a form's errors fails ([#344](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/344)). | `forms_tests` |
+| `gis`, `postgres` | Their widget templates compile natively, but nothing has rendered them yet. Their test suites need GDAL and PostgreSQL. | Not yet |
+| `contenttypes`, `redirects`, `sessions`, `sites`, `staticfiles` | No templates or template tags. `{% static %}` comes from `django.templatetags.static` and is native. | `contenttypes_tests`, `redirects_tests`, `sites_tests`, `staticfiles_tests` |
+
+With Rusty swapped in, these suites pass on Django 5.2, 6.0 and 6.2, apart from the deepcopy bug (#344) and, on 5.2 and 6.0, the Python 3.15 annotation errors ([#59](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/59)). To run them:
+
+```bash
+uv run scripts/run_django_test_suite.py --django-version 5.2 \
+    admin_views admin_changelist admin_docs auth_tests flatpages_tests forms_tests \
+    humanize_tests messages_tests sitemaps_tests syndication_tests
+```
+
+CI runs only `template_tests` and `template_loader` for now ([#345](https://github.com/jefftriplett/django-rusty-templates-agentic/issues/345)).
 
 ## WebAssembly for JavaScript clients
 
