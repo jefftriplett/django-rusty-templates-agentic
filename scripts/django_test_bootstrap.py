@@ -17,6 +17,8 @@ from scripts.django_test_adapter import install
 
 install()
 
+from django_rusty_templates import interop  # noqa: E402
+
 results = {
     "django_version": django.get_version(),
     "django_series": list(django.VERSION[:2]),
@@ -27,7 +29,22 @@ results = {
     "skipped": [],
     "subtests": [],
     "details": [],
+    # Templates compiled by Django's parser instead of Rusty's, per test.
+    "fallbacks": {},
 }
+current_test = [None]
+OUTSIDE_TESTS = "(outside a test)"
+compile_template = interop.compile_template
+
+
+def record_fallback(*args, **kwargs):
+    test = current_test[0] or OUTSIDE_TESTS
+    results["fallbacks"][test] = results["fallbacks"].get(test, 0) + 1
+    return compile_template(*args, **kwargs)
+
+
+# Rusty looks this up on the module for every fallback.
+interop.compile_template = record_fallback
 
 
 @atexit.register
@@ -60,6 +77,23 @@ for method, key in [
         return original(self, test, *args)
 
     setattr(unittest.TextTestResult, method, record)
+
+original_start = unittest.TextTestResult.startTest
+original_stop = unittest.TextTestResult.stopTest
+
+
+def start_test(self, test):
+    current_test[0] = test.id()
+    return original_start(self, test)
+
+
+def stop_test(self, test):
+    current_test[0] = None
+    return original_stop(self, test)
+
+
+unittest.TextTestResult.startTest = start_test
+unittest.TextTestResult.stopTest = stop_test
 
 original_subtest = unittest.TextTestResult.addSubTest
 

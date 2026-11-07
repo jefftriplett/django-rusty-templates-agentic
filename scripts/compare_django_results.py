@@ -13,8 +13,8 @@ def compare_results(base, branch):
     lines = [
         f"### Django {series}",
         "",
-        "| Revision | Passed / runnable | Failures | Errors | Skips | Pass % |",
-        "|---|---|---|---|---|---|",
+        "| Revision | Passed / runnable | Failures | Errors | Skips | Pass % | Fallbacks |",
+        "|---|---|---|---|---|---|---|",
     ]
     for revision, results in (("Base", base), ("PR", branch)):
         summary = results["summary"]
@@ -28,8 +28,10 @@ def compare_results(base, branch):
         if passed + failures + errors != runnable or not runnable:
             raise ValueError("Inconsistent or empty runnable results")
         percentage = 100 * passed / runnable
+        # Results recorded before fallback tracking have no count.
+        fallbacks = summary.get("fallback_tests", "–")
         lines.append(
-            f"| {revision} | {passed}/{runnable} | {failures} | {errors} | {skipped} | {percentage:.2f}% |"
+            f"| {revision} | {passed}/{runnable} | {failures} | {errors} | {skipped} | {percentage:.2f}% | {fallbacks} |"
         )
     commit = branch["reference_commit"]
     if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
@@ -37,7 +39,8 @@ def compare_results(base, branch):
     lines.extend(
         [
             "",
-            f"Identical Django reference: `{commit}`. Skips are excluded from the denominator.",
+            f"Identical Django reference: `{commit}`. Skips are excluded from the denominator. "
+            "Fallbacks count tests that compiled a template with Django's parser instead of Rusty's.",
             "",
         ]
     )
