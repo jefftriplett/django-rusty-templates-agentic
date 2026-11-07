@@ -248,9 +248,10 @@ Leave the compiler unannotated when it inspects prior native nodes, depends on
 `command_stack` outside its own body, reads `parser.origin.loader`, rewrites
 future tokens, returns inheritance
 or `must_be_first` nodes, or changes how native built-in tags compile. The full
-Django parser remains the default for such compilers. Templates sharing
-inheritance, named-cycle, or partial registries also retain the compatibility
-path, even with an opted-in compiler. Mixed opted-in and unannotated custom tags
+Django parser remains the default for such compilers. An opted-in tag works in
+templates that use `extends`, `block`, `cycle` or partials, as long as its body
+contains none of those tags. If its body does contain one, Django's parser
+compiles the whole template instead, and the compiler runs a second time. Mixed opted-in and unannotated custom tags
 are checked before compilation so the opted-in compiler isn't called twice.
 `Engine.explain_template()` reports custom compiler boundaries without executing
 compilers. Explicit `.nodelist` inspection of a complex template still parses a

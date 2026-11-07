@@ -3297,21 +3297,6 @@ impl<'t, 'py> Parser<'t, 'py> {
         name: &str,
         compiler: &Bound<'py, PyAny>,
     ) -> Result<(), PyParseError> {
-        // These tags share parse-time registries with arbitrary compilers. Keep
-        // that entire template on the compatibility path before invoking one.
-        let shared_state = Lexer::new(self.template).any(|token| {
-            token.token_type == TokenType::Tag
-                && token
-                    .content(self.template)
-                    .split_whitespace()
-                    .next()
-                    .is_some_and(|name| {
-                        matches!(
-                            name,
-                            "extends" | "block" | "cycle" | "resetcycle" | "partialdef" | "partial"
-                        )
-                    })
-        });
         let mixed_compilers = self
             .engine
             .libraries
@@ -3373,7 +3358,6 @@ impl<'t, 'py> Parser<'t, 'py> {
             || !compiler
                 .getattr("rusty_isolated_compiler")
                 .is_ok_and(|value| value.is_truthy().unwrap_or(false))
-            || shared_state
             || compiler
                 .getattr("rusty_requires_full_parser")
                 .is_ok_and(|value| value.is_truthy().unwrap_or(true))
@@ -3428,6 +3412,13 @@ impl<'t, 'py> Parser<'t, 'py> {
         let (node, end): (Py<PyAny>, usize) = parser
             .call_method1("compile", (at.0, compiler))?
             .extract()?;
+        if self.shares_parser_state(at.0 + at.1, end) {
+            // Django's parser compiled these tags inside the opaque body, out
+            // of reach of the native inheritance, cycle and partial
+            // registries. Compile the whole template with Django instead,
+            // which runs this compiler a second time.
+            return Err(Unimplemented::FullyCustomTag.into());
+        }
         let filters = self.get_filters(parser)?;
         let tags = self.get_tags(parser)?;
         self.external_filters.extend(filters);
@@ -3443,6 +3434,32 @@ impl<'t, 'py> Parser<'t, 'py> {
         }
         self.skip_until = end;
         Ok(TokenTree::Tag(Tag::PythonNode(PythonNode(Gc::new(node)))))
+    }
+
+    /// Whether a tag between `start` and `end` shares parse-time state that
+    /// native and Django parsers can't see across an opaque boundary.
+    fn shares_parser_state(&self, start: usize, end: usize) -> bool {
+        Lexer::new(self.template)
+            .skip_while(|token| token.at.0 < start)
+            .take_while(|token| token.at.0 < end)
+            .any(|token| {
+                token.token_type == TokenType::Tag
+                    && token
+                        .content(self.template)
+                        .split_whitespace()
+                        .next()
+                        .is_some_and(|name| {
+                            matches!(
+                                name,
+                                "extends"
+                                    | "block"
+                                    | "cycle"
+                                    | "resetcycle"
+                                    | "partialdef"
+                                    | "partial"
+                            )
+                        })
+            })
     }
 
     fn register_tag(&mut self, name: &str, tag: Bound<'py, PyAny>) -> PyResult<()> {
