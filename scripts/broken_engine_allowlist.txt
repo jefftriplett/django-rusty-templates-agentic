@@ -1,0 +1,36 @@
+# Tests that may pass while the Rusty engine is broken on purpose.
+# Checked by scripts/check_broken_engine.py. Format: <mode> <fnmatch pattern>  # reason
+# Keep a reason on every line, and prefer fixing the test to adding it here.
+
+# output: Rusty rendered junk and the test still passed.
+output tests/filters/test_missing_builtins.py::test_truncation_text_is_cached_for_the_render  # counts gettext calls
+output tests/filters/test_missing_builtins.py::test_urlize_warns_like_django  # checks the warning, not the output
+output tests/tags/test_context_assignments.py::test_scoped_assignments_do_not_leak[[]Engine0[]]  # checks the context after rendering
+output tests/test_callback_bindings.py::test_callback_preserves_object_identity_without_equality[[]*[]]  # checks objects passed to callbacks
+output tests/test_lazy_context.py::test_caller_dict_is_not_changed_by_native_scopes  # checks the caller's dict
+output tests/test_template_signals.py::test_client_template_and_context_introspection[[]*RustyTemplates[]]  # checks template_rendered signal payloads
+
+# raise: never reaches the Rusty engine through Engine, PortableEngine or the backend.
+raise tests/test_autoreload.py::test_empty_template_directory_is_not_watched  # autoreload directory scan
+raise tests/test_benchmark_pairs.py::*  # tests scripts/benchmark_pairs.py
+raise tests/test_output_benchmark_isolation.py::*  # tests the benchmark harness
+raise tests/test_django_result_comparison.py::*  # tests scripts/compare_django_results.py
+raise tests/test_django_suite_runner.py::test_conformance_summary_*  # tests the conformance runner
+raise tests/test_django_suite_runner.py::test_default_suites_include_admin_and_supported_csp_tests[[]*[]]  # tests the conformance runner
+raise tests/test_django_suite_runner.py::test_bootstrap_preserves_native_and_fallback_render_signals  # runs the bootstrap in a subprocess
+raise tests/test_simple_tag_escape_dispatch.py::test_repeated_tag_results_reuse_escape_callable  # renders in a subprocess
+raise tests/test_engine.py::test_import_libraries_*  # library import errors raise while building the engine
+raise tests/test_engine.py::test_invalid_loader_configurations[[]*[]]  # loader errors raise while building the engine
+raise tests/test_engine.py::test_invalid_loader_name_keeps_cause  # loader errors raise while building the engine
+raise tests/test_engine.py::test_valid_file_charset  # checks the backend builds
+raise tests/test_context_processors.py::test_missing_context_processor[[]RustyTemplates[]]  # raises while building the backend
+raise tests/test_multiline_tags.py::test_default_engine_allows_multiline_tags  # engine attribute
+raise tests/test_multiline_tags.py::test_allow_multiline_tags_rejected_before_django_6_2  # engine constructor error
+raise tests/test_template_attributes.py::test_explicit_dirs_remain_fixed[[]*[]]  # engine and loader attributes
+raise tests/test_template_attributes.py::test_cached_missing[[]Engine1-*[]]  # Django variant; a missing template builds no Template
+raise tests/test_loader_errors.py::test_loader_get_template_reports_tried[[]*[]]  # calls the loader directly
+raise tests/test_loader_errors.py::test_directory_read_error[[]Engine1[]]  # Django variant; a missing template builds no Template
+raise tests/test_debug_errors.py::test_*url*  # calls diagnostics.render_url directly
+raise tests/test_isolated_compilers.py::test_syntax_diagnostic_does_not_invoke_opted_in_compiler  # calls Engine._syntax_diagnostic directly
+raise tests/test_syntax_diagnostics.py::test_attaching_native_diagnostic_does_not_validate_again  # calls Engine._syntax_diagnostic directly
+raise tests/test_broken_engine_check.py::*  # tests scripts/check_broken_engine.py

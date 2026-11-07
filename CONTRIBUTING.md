@@ -58,6 +58,19 @@ $ pytest
 
 Running `just python-test` combines these two commands for you.
 
+### Checking that tests test Rusty
+A test that passes while the Rusty engine is broken isn't testing Rusty. `scripts/check_broken_engine.py` runs pytest twice with `scripts/broken_engine_plugin.py`:
+
+- `output`: Rusty renders return junk. A test that still passes after a successful render doesn't check the output.
+- `raise`: every Rusty compile and render raises. A test that still passes never reaches Rusty. Django variants (`[django]` ids, or tests that only compile Django templates) are expected to pass.
+
+```bash
+$ just check-tests                                            # both modes, about 90 seconds
+$ uv run scripts/check_broken_engine.py --mode output -- tests/tags
+```
+
+CI runs it in the sanity job. If it reports your test, make the test assert on Rusty's output or error. If the test is right as it is (for example, it checks a signal or a callback argument), add it to `scripts/broken_engine_allowlist.txt` with a reason. Patterns that stop matching fail the check too, so the list only shrinks. An unparametrized test that only uses Django's engine looks like a Django variant and isn't reported.
+
 ### Django template and admin conformance
 
 Build the extension with `uv run maturin develop`, then run a Django version locally:

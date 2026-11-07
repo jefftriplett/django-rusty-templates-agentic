@@ -22,7 +22,7 @@ jobs:
   sanity:
     name: Ubuntu / Python 3.13 sanity
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       RUST_TEST_THREADS: "1"
     steps:
@@ -54,6 +54,8 @@ jobs:
           uv run pytest -q
           uv run ruff check
           uv run ruff format --check
+      - name: Tests fail with the Rusty engine broken
+        run: uv run scripts/check_broken_engine.py
       - name: Rust tests and lint
         run: |
           export PYO3_PYTHON="$PWD/.venv/bin/python"

@@ -1,5 +1,5 @@
 from django import VERSION
-from django.template import TemplateSyntaxError
+from django.template import TemplateSyntaxError, engines
 import pytest
 import time_machine
 from datetime import datetime, timezone as dt_timezone
@@ -584,15 +584,12 @@ def test_now_invalid_variable_name_error(assert_render):
     VERSION >= (6, 2),
     reason="Django 6.2 validates now arguments as expressions; covered by expression-error tests",
 )
-def test_now_incomplete_translated_string(template_engine, assert_render):
+def test_now_incomplete_translated_string():
     template = '{% now _("j n Y %}'
-    if template_engine.name != "django":
-        # Ensure Rusty handles partial junk gracefully without crashing
-        assert_render(
-            template=template,
-            context={},
-            expected="8 1 ",
-        )
+    # Django's parser crashes on the unterminated string; Rusty renders it.
+    with pytest.raises(StopIteration):
+        engines["django"].from_string(template)
+    assert engines["rusty"].from_string(template).render({}) == "8 1 "
 
 
 @time_machine.travel(FIXED_TIME)
