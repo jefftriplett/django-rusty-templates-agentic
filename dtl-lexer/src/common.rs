@@ -52,6 +52,8 @@ pub enum LexerError {
 
 pub fn lex_variable(byte: usize, rest: &str) -> (At, usize, &str) {
     let mut in_text = None;
+    // Inside a translated filter argument, such as `default:_("text")`.
+    let mut in_translation = false;
     let mut end = 0;
     for c in rest.chars() {
         match c {
@@ -66,6 +68,8 @@ pub fn lex_variable(byte: usize, rest: &str) -> (At, usize, &str) {
                 _ => {}
             },
             _ if in_text.is_some() => {}
+            '(' if !in_translation && rest[..end].ends_with(":_") => in_translation = true,
+            ')' if in_translation => in_translation = false,
             c if !c.is_xid_continue()
                 && c != '.'
                 && c != '|'
@@ -304,6 +308,31 @@ mod tests {
         assert_eq!(at, (0, 32));
         assert_eq!(byte, 32);
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_lex_translated_argument() {
+        let template = "x|default:_(\"Not started\") as y";
+        let (at, byte, rest) = lex_variable(0, template);
+        assert_eq!(at, (0, 26));
+        assert_eq!(byte, 26);
+        assert_eq!(rest, " as y");
+    }
+
+    #[test]
+    fn test_lex_translated_argument_parenthesis_in_text() {
+        let template = "x|default:_(')') y";
+        let (at, _, rest) = lex_variable(0, template);
+        assert_eq!(at, (0, 16));
+        assert_eq!(rest, " y");
+    }
+
+    #[test]
+    fn test_lex_parenthesis_outside_translation() {
+        let template = "x(1)";
+        let (at, _, rest) = lex_variable(0, template);
+        assert_eq!(at, (0, 1));
+        assert_eq!(rest, "(1)");
     }
 
     #[test]
