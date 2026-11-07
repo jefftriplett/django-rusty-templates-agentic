@@ -180,11 +180,15 @@ pub struct InclusionTag {
     pub call: SimpleTag,
     pub filename: Gc<Py<PyAny>>,
     pub engine: Gc<Engine>,
+    /// Django admin's `InclusionAdminNode` template name. Its template is
+    /// chosen per render from `opts`, and its function sees the live context.
+    pub admin_template: Option<&'static str>,
 }
 
 impl PartialEq for InclusionTag {
     fn eq(&self, other: &Self) -> bool {
         self.call == other.call
+            && self.admin_template == other.admin_template
             && Gc::ptr_eq(&self.filename, &other.filename)
             && Gc::ptr_eq(&self.engine, &other.engine)
     }
@@ -1775,6 +1779,10 @@ enum TagContext<'py> {
         context: SimpleTagContext<'py>,
         filename: Bound<'py, PyAny>,
     },
+    AdminInclusion {
+        context: SimpleTagContext<'py>,
+        template_name: &'static str,
+    },
     SimpleBlock {
         end_tag_name: String,
         context: SimpleTagContext<'py>,
@@ -2928,6 +2936,30 @@ impl<'t, 'py> Parser<'t, 'py> {
                             call,
                             filename: Gc::new(filename.clone().unbind()),
                             engine: self.engine.clone(),
+                            admin_template: None,
+                        })))
+                    }
+                    Some(TagContext::AdminInclusion {
+                        context,
+                        template_name,
+                    }) => {
+                        let template_name = *template_name;
+                        let TokenTree::Tag(Tag::SimpleTag(call)) =
+                            self.parse_simple_tag(context, at, tag.parts)?
+                        else {
+                            unreachable!("helper parser returns a simple tag")
+                        };
+                        // Django's `parse_bits` has no `as` form, so the
+                        // target counts as extra positional arguments.
+                        if call.target_var.is_some() {
+                            return Err(crate::template::django_rusty_templates::TemplateSyntaxError::new_err(format!("'{tag_name}' received too many positional arguments")).into());
+                        }
+                        Either::Left(TokenTree::Tag(Tag::InclusionTag(InclusionTag {
+                            id: CycleId(NEXT_CYCLE_ID.fetch_add(1, Ordering::Relaxed)),
+                            call,
+                            filename: Gc::new(self.py.None()),
+                            engine: self.engine.clone(),
+                            admin_template: Some(template_name),
                         })))
                     }
                     Some(TagContext::SimpleBlock {
@@ -3275,7 +3307,10 @@ impl<'t, 'py> Parser<'t, 'py> {
                     return true;
                 };
                 tags.iter().any(|(name, candidate)| {
-                    if stock::compiler(self.py, candidate).is_ok_and(|kind| kind.is_some()) {
+                    if stock::compiler(self.py, candidate).is_ok_and(|kind| kind.is_some())
+                        || stock::admin_inclusion(self.py, candidate)
+                            .is_ok_and(|kind| kind.is_some())
+                    {
                         return false;
                     }
                     let generated = candidate
@@ -3465,6 +3500,17 @@ impl<'t, 'py> Parser<'t, 'py> {
                 .insert(name.to_string(), TagContext::Stock(kind));
             return Ok(());
         }
+        if let Some(admin) = stock::admin_inclusion(self.py, tag)? {
+            let context = self.admin_inclusion_context(name, admin)?;
+            self.external_tags.insert(
+                name.to_string(),
+                TagContext::AdminInclusion {
+                    context,
+                    template_name: admin.template_name,
+                },
+            );
+            return Ok(());
+        }
         let Ok(closure) = tag.getattr("__closure__") else {
             return self.register_opaque(name, tag);
         };
@@ -3643,6 +3689,42 @@ impl<'t, 'py> Parser<'t, 'py> {
         };
         self.external_tags.insert(name.to_string(), tag);
         Ok(())
+    }
+
+    /// The call signature `InclusionAdminNode` reads from its function.
+    fn admin_inclusion_context(
+        &self,
+        name: &str,
+        admin: stock::AdminInclusion,
+    ) -> PyResult<SimpleTagContext<'py>> {
+        let func = match admin.func {
+            Some(func) => self.py.import(admin.module)?.getattr(func)?,
+            None => self
+                .py
+                .import("django_rusty_templates.stock")?
+                .getattr("admin_context")?,
+        };
+        let spec = self
+            .py
+            .import("inspect")?
+            .getattr("getfullargspec")?
+            .call1((&func,))?;
+        let mut params: Vec<String> = spec.getattr("args")?.extract()?;
+        // Every admin function that takes the context names it first.
+        if admin.takes_context {
+            params.remove(0);
+        }
+        Ok(SimpleTagContext {
+            function_name: name.to_string(),
+            takes_context: admin.takes_context,
+            params,
+            defaults_count: get_defaults_count(&spec.getattr("defaults")?)?,
+            varargs: !spec.getattr("varargs")?.is_none(),
+            kwonly: spec.getattr("kwonlyargs")?.extract()?,
+            kwonly_defaults: get_kwonly_defaults(&spec.getattr("kwonlydefaults")?)?,
+            varkw: !spec.getattr("varkw")?.is_none(),
+            func,
+        })
     }
 
     fn get_tags(

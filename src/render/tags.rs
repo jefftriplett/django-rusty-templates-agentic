@@ -6,7 +6,7 @@ use either::Either;
 use num_bigint::{BigInt, Sign};
 use num_traits::cast::ToPrimitive;
 use pyo3::exceptions::{
-    PyAttributeError, PyOverflowError, PyTypeError, PyValueError, PyZeroDivisionError,
+    PyAttributeError, PyKeyError, PyOverflowError, PyTypeError, PyValueError, PyZeroDivisionError,
 };
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -41,6 +41,7 @@ static STRIP_SPACES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DEBUG_NODE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static MARK_BLOCK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static ADMIN_VALUES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static BUILTINS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -1641,7 +1642,10 @@ fn call_tag<'py>(
     }
 }
 
-fn build_pycontext<'py>(py: Python<'py>, context: &mut Context) -> PyResult<Bound<'py, PyAny>> {
+pub(super) fn build_pycontext<'py>(
+    py: Python<'py>,
+    context: &mut Context,
+) -> PyResult<Bound<'py, PyAny>> {
     if let Some(live) = &context.formatting_context {
         return Ok(live.bind(py).clone());
     }
@@ -1654,7 +1658,11 @@ fn build_pycontext<'py>(py: Python<'py>, context: &mut Context) -> PyResult<Boun
     Ok(Bound::new(py, PyContext::new(swapped_context))?.into_any())
 }
 
-fn retrieve_context<'py>(py: Python<'py>, py_context: Bound<'py, PyAny>, context: &mut Context) {
+pub(super) fn retrieve_context<'py>(
+    py: Python<'py>,
+    py_context: Bound<'py, PyAny>,
+    context: &mut Context,
+) {
     if context.formatting_context.is_some() {
         return;
     }
@@ -1759,19 +1767,38 @@ impl InclusionTag {
     ) -> Result<T, PyRenderError> {
         let mut args = build_args(py, template, context, &self.call.args)?;
         let kwargs = build_kwargs(py, template, context, &self.call.kwargs)?;
-        if self.call.takes_context {
-            let python_context = context.django_context(py)?;
-            if let Some(request) = &context.request {
-                python_context.setattr("request", request.bind(py))?;
+        let func = self.call.func.bind(py);
+        let mut values: HashMap<String, Py<PyAny>> = if self.admin_template.is_some() {
+            // Admin functions may change the context they are given, and
+            // later nodes see the change, so they get the live context.
+            let admin_values = |result: Bound<'py, PyAny>| {
+                ADMIN_VALUES
+                    .import(py, "django_rusty_templates.stock", "admin_values")?
+                    .call1((result,))?
+                    .extract()
+            };
+            if self.call.takes_context {
+                let py_context = build_pycontext(py, context)?;
+                args.push_front(py_context.clone());
+                let values = PyTuple::new(py, args)
+                    .and_then(|args| func.call(args, kwargs.as_ref()))
+                    .and_then(admin_values);
+                retrieve_context(py, py_context, context);
+                values?
+            } else {
+                admin_values(func.call(PyTuple::new(py, args)?, kwargs.as_ref())?)?
             }
-            args.push_front(python_context);
-        }
-        let values = self
-            .call
-            .func
-            .bind(py)
-            .call(PyTuple::new(py, args)?, kwargs.as_ref())?;
-        let mut values: HashMap<String, Py<PyAny>> = values.extract()?;
+        } else {
+            if self.call.takes_context {
+                let python_context = context.django_context(py)?;
+                if let Some(request) = &context.request {
+                    python_context.setattr("request", request.bind(py))?;
+                }
+                args.push_front(python_context);
+            }
+            func.call(PyTuple::new(py, args)?, kwargs.as_ref())?
+                .extract()?
+        };
         if let Some(csrf) = context.resolve_root(py, "csrf_token")?
             && !csrf.is_none()
         {
@@ -1800,6 +1827,21 @@ impl InclusionTag {
         child.use_tz = context.use_tz;
         child.format_values = context.format_values;
         child.number_format = context.number_format.clone();
+        if let Some(template_name) = self.admin_template {
+            // `InclusionAdminNode` lets each model or app override the template.
+            let opts = context
+                .resolve_root(py, "opts")?
+                .ok_or_else(|| PyKeyError::new_err("opts"))?;
+            let app_label = opts.getattr("app_label")?.call_method0("lower")?.str()?;
+            let object_name = opts.getattr("model_name")?.str()?;
+            let key = IncludeTemplateKey::Vec(vec![
+                format!("admin/{app_label}/{object_name}/{template_name}"),
+                format!("admin/{app_label}/{template_name}"),
+                format!("admin/{template_name}"),
+            ]);
+            let loaded = context.get_or_insert_include(py, &self.engine, &key, self.id)?;
+            return native(&loaded, &mut child, output);
+        }
         let filename = self.filename.bind(py);
         let filename = filename
             .getattr("template")

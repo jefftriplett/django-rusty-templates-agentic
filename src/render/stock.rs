@@ -43,6 +43,15 @@ impl Render for StockNode {
     ) -> RenderResult<'t> {
         let service = services(py)?;
         Ok(match self {
+            Self::Node(node) => {
+                let py_context = super::tags::build_pycontext(py, context)?;
+                let output = node
+                    .0
+                    .bind(py)
+                    .call_method1("render", (py_context.clone(),));
+                super::tags::retrieve_context(py, py_context, context);
+                Cow::Owned(output?.extract()?)
+            }
             Self::Static { path, target } => {
                 let path = value(path, py, template, context)?;
                 let output = service
