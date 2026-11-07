@@ -16,7 +16,7 @@ Check that tests actually test Rusty: CI now fails when a test still passes with
 
 Build `urlize` and `urlizetrunc` links in Rust instead of calling Django for each word, making them about 10× faster than Django on emails and URLs. ([#338](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/338))
 
-Render `humanize`'s `intcomma`, `ordinal`, `apnumber` and `naturaltime` in Rust when they are Django's own filters, making them 4–39× faster than Django. ([#342](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/342))
+Render all six `humanize` filters (`intcomma`, `intword`, `ordinal`, `apnumber`, `naturalday` and `naturaltime`) in Rust when they are Django's own, making them 4–39× faster than Django. ([#342](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/342), [#355](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/355))
 
 Localize integers Rusty computes itself, such as `forloop.counter`, integer literals and `add` results, so `USE_THOUSAND_SEPARATOR` and locale separators apply as in Django; `forloop.length` no longer renders on Django 5.2. ([#343](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/343))
 
@@ -26,7 +26,7 @@ Let Rusty's engines and templates be copied and deep-copied, so copying a form's
 
 Run Django's contrib and forms test suites (admin, auth, forms, humanize, sitemaps and more) in the conformance checks. ([#351](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/351))
 
-Make `takes_context` simple tags faster by keeping rarely used per-language caches out of the context they move on each call. ([#353](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/353))
+Make `takes_context` simple tags about 1.6× faster than Django, close to plain simple tags, by moving less state on each call and reusing the Python context wrapper. ([#353](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/353), [#356](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/356))
 
 ## 2026.11.2
 
