@@ -160,16 +160,16 @@ def admin_context(context):
     return context
 
 
-def admin_values(values):
-    """The variables ``Context.new(values)`` exposes to an admin tag's template.
+def inclusion_values(values):
+    """The variables ``Context.new(values)`` exposes to an inclusion template.
 
-    Admin functions return a dict, the context they were given, or a Django
-    ``Context`` wrapping it.
+    Inclusion functions return a dict, the context they were given, or a
+    Django ``Context`` wrapping it.
     """
     if isinstance(values, BaseContext):
         flat = {}
         for layer in values.dicts:
-            flat.update(admin_values(layer))
+            flat.update(inclusion_values(layer))
         return flat
     flatten = getattr(values, "flatten", None)
     if flatten is not None:

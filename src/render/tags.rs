@@ -41,7 +41,7 @@ static STRIP_SPACES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DEBUG_NODE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static MARK_BLOCK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-static ADMIN_VALUES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static INCLUSION_VALUES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static BUILTINS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -1755,6 +1755,21 @@ fn store_target_var_into(
     }
 }
 
+/// The variables `Context.new(values)` gives an inclusion tag's template.
+/// Functions usually return a dict, but may return a context.
+fn inclusion_values<'py>(
+    py: Python<'py>,
+    result: Bound<'py, PyAny>,
+) -> PyResult<HashMap<String, Py<PyAny>>> {
+    if let Ok(values) = result.extract() {
+        return Ok(values);
+    }
+    INCLUSION_VALUES
+        .import(py, "django_rusty_templates.stock", "inclusion_values")?
+        .call1((result,))?
+        .extract()
+}
+
 impl InclusionTag {
     fn render_child<'py, T, O>(
         &self,
@@ -1768,36 +1783,19 @@ impl InclusionTag {
         let mut args = build_args(py, template, context, &self.call.args)?;
         let kwargs = build_kwargs(py, template, context, &self.call.kwargs)?;
         let func = self.call.func.bind(py);
-        let mut values: HashMap<String, Py<PyAny>> = if self.admin_template.is_some() {
-            // Admin functions may change the context they are given, and
-            // later nodes see the change, so they get the live context.
-            let admin_values = |result: Bound<'py, PyAny>| {
-                ADMIN_VALUES
-                    .import(py, "django_rusty_templates.stock", "admin_values")?
-                    .call1((result,))?
-                    .extract()
-            };
-            if self.call.takes_context {
-                let py_context = build_pycontext(py, context)?;
-                args.push_front(py_context.clone());
-                let values = PyTuple::new(py, args)
-                    .and_then(|args| func.call(args, kwargs.as_ref()))
-                    .and_then(admin_values);
-                retrieve_context(py, py_context, context);
-                values?
-            } else {
-                admin_values(func.call(PyTuple::new(py, args)?, kwargs.as_ref())?)?
-            }
+        // Django passes the live context, so changes the function makes
+        // reach later nodes.
+        let mut values = if self.call.takes_context {
+            let py_context = build_pycontext(py, context)?;
+            args.push_front(py_context.clone());
+            let result = PyTuple::new(py, args).and_then(|args| func.call(args, kwargs.as_ref()));
+            // Read the values before the context moves back to Rust, in case
+            // the function returned the context itself.
+            let values = result.and_then(|result| inclusion_values(py, result));
+            retrieve_context(py, py_context, context);
+            values?
         } else {
-            if self.call.takes_context {
-                let python_context = context.django_context(py)?;
-                if let Some(request) = &context.request {
-                    python_context.setattr("request", request.bind(py))?;
-                }
-                args.push_front(python_context);
-            }
-            func.call(PyTuple::new(py, args)?, kwargs.as_ref())?
-                .extract()?
+            inclusion_values(py, func.call(PyTuple::new(py, args)?, kwargs.as_ref())?)?
         };
         if let Some(csrf) = context.resolve_root(py, "csrf_token")?
             && !csrf.is_none()

@@ -6,6 +6,8 @@ Compile Django admin's inclusion tags, `get_admin_log` and `get_flatpages` nativ
 
 Let custom tags marked `rusty_isolated_compiler = True` keep templates that use `extends`, `block`, `cycle` or partials native, unless those tags appear inside the custom tag's body. ([#319](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/319))
 
+Pass the live context to inclusion tags registered with `takes_context=True`, so changes their function makes reach later nodes as in Django. ([#321](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/321))
+
 ## 2026.11.2
 
 Report the tried origins when a loader can't find a template and keep the original error as the cause for invalid context processor results and loader configurations, and deny more Clippy restriction lints. ([#207](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/207))

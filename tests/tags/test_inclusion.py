@@ -1,4 +1,5 @@
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from django.template import (
@@ -126,3 +127,49 @@ def test_inclusion_caches_within_render(engine_class, tmp_path, monkeypatch):
     assert template.render(Context({"values": [1, 2]})) == "firstfirst"
     assert len(calls) == 2
     assert template.render(Context({"values": [1]})) == "second"
+
+
+def counting_engine(engine_class, module, monkeypatch):
+    module.register = Library()
+
+    @module.register.inclusion_tag("count.html", takes_context=True)
+    def bump(context):
+        context["count"] = context.get("count", 0) + 1
+        return {"count": context["count"], "request": context.request}
+
+    @module.register.inclusion_tag("count.html", takes_context=True)
+    def same(context):
+        return context
+
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    return engine_class(
+        loaders=[
+            (
+                "django.template.loaders.locmem.Loader",
+                {"count.html": "[{{ count }}{{ request.path }}]"},
+            )
+        ],
+        libraries={"counting": module.__name__},
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("{% bump %}{% bump %}|{{ count }}", "[1/p][2/p]|2"),
+        # The loop's scope ends with the loop, as in Django.
+        ("{% for i in '12' %}{% bump %}{% endfor %}|{{ count }}", "[1/p][2/p]|"),
+        # Without a request processor, `request` is not a template variable.
+        ("{% bump %}{% same %}", "[1/p][1]"),
+    ],
+)
+def test_inclusion_function_changes_the_live_context(
+    engine_class, monkeypatch, source, expected
+):
+    from django.template import RequestContext
+    from django.test import RequestFactory
+
+    engine = counting_engine(engine_class, ModuleType("counting_tags"), monkeypatch)
+    template = engine.from_string("{% load counting %}" + source)
+    request = RequestFactory().get("/p")
+    assert template.render(RequestContext(request)) == expected
