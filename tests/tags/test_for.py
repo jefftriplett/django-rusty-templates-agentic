@@ -1287,7 +1287,9 @@ def test_native_forloop_length(values, reverse):
     template = Engine().from_string(
         "{% for item in values" + reverse + " %}{{ forloop.length }}{% endfor %}"
     )
-    assert template.render({"values": values}) == str(len(values)) * len(values)
+    # `forloop.length` is new in Django 6.0; earlier versions print nothing.
+    expected = str(len(values)) * len(values) if VERSION >= (6, 0) else ""
+    assert template.render({"values": values}) == expected
 
 
 @pytest.mark.parametrize("text", ["", "ASCII", "aé🙂𐍈", "é" * 128])

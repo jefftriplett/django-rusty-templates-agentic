@@ -4,6 +4,9 @@
 //! for every number it renders. They only change between renders or inside
 //! `{% language %}`, so a render reads them once, on its first number.
 
+use html_escape::encode_quoted_attribute;
+use num_bigint::BigInt;
+use num_traits::ToPrimitive;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString, PyTuple, PyType};
@@ -160,6 +163,37 @@ impl Context {
         let format = NumberFormat::load(py)?;
         Ok(self.number_format.get_or_init(|| format).as_ref())
     }
+}
+
+/// `localize(value)` for an integer Rusty computed itself, such as
+/// `forloop.counter`, an integer literal or the result of `add`, escaped for
+/// output when autoescaping. `None` when the active formats need Django.
+pub fn localize_int(number: &BigInt, context: &Context) -> PyResult<Option<String>> {
+    // `i64`'s formatting is much cheaper than `BigInt`'s.
+    let digits = number
+        .to_i64()
+        .map_or_else(|| number.to_string(), |number| number.to_string());
+    if context.use_l10n == Some(false) {
+        return Ok(Some(digits));
+    }
+    // The formats are read once per render; only that first read needs Python.
+    let format = match context.number_format.get() {
+        Some(format) => format.as_ref(),
+        None => Python::attach(|py| context.number_format(py))?,
+    };
+    Ok(format.map(|format| match format.grouping {
+        // Plain digits never need escaping.
+        Grouping::Off => digits,
+        Grouping::Sizes(_) => {
+            let number = format.format(&digits);
+            // Separators such as `'` are escaped like Django's output.
+            if context.autoescape && number.contains(['&', '<', '>', '"', '\'']) {
+                encode_quoted_attribute(&number).into_owned()
+            } else {
+                number
+            }
+        }
+    }))
 }
 
 /// The number types `localize_number` formats natively.

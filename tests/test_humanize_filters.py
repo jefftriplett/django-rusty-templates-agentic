@@ -158,7 +158,7 @@ SETTINGS = [
 @pytest.mark.parametrize("language", ["en", "de", "fr", "hi"])
 @pytest.mark.parametrize("name", list(NUMBERS) + ["missing", "1234", '"<b>&</b>"'])
 @pytest.mark.parametrize(
-    "filters", ["intcomma", "ordinal", "apnumber", "ordinal|length"]
+    "filters", ["intcomma", "ordinal", "apnumber", "apnumber|add:1", "ordinal|length"]
 )
 def test_number_filters(settings, language, name, filters):
     source = "{% load humanize %}{{ " + name + "|" + filters + " }}"
