@@ -16,6 +16,12 @@ Check that tests actually test Rusty: CI now fails when a test still passes with
 
 Build `urlize` and `urlizetrunc` links in Rust instead of calling Django for each word, making them about 10× faster than Django on emails and URLs. ([#338](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/338))
 
+Render `humanize`'s `intcomma`, `ordinal`, `apnumber` and `naturaltime` in Rust when they are Django's own filters, making them 4–39× faster than Django. ([#342](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/342))
+
+Localize integers Rusty computes itself, such as `forloop.counter`, integer literals and `add` results, so `USE_THOUSAND_SEPARATOR` and locale separators apply as in Django; `forloop.length` no longer renders on Django 5.2. ([#343](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/343))
+
+Document which Django contrib apps are supported and how each is tested. ([#348](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/348))
+
 ## 2026.11.2
 
 Report the tried origins when a loader can't find a template and keep the original error as the cause for invalid context processor results and loader configurations, and deny more Clippy restriction lints. ([#207](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/207))
