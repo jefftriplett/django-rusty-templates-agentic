@@ -170,7 +170,6 @@ pub struct Context {
     pub request: Option<Py<PyAny>>,
     pub autoescape: bool,
     pub use_l10n: Option<bool>,
-    pub(crate) float_number_format: LanguageCache<FloatNumberFormats>,
     pub use_tz: Option<bool>,
     // Borrowed mutably while formatting; read through `render_into`'s `&self`.
     pub(crate) date_cache: RefCell<DateCache>,
@@ -199,6 +198,15 @@ pub struct Context {
     changed_states: Vec<HashMap<CycleId, Py<PyAny>>>,
     assigned: HashSet<String>,
     cycle_variables: HashSet<String>,
+    // Created on first use: most renders never need them, and a smaller
+    // `Context` is cheaper to move into and out of Python callbacks.
+    caches: Option<Box<LanguageCaches>>,
+}
+
+/// Translated strings and formats a render keeps for its active language.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LanguageCaches {
+    pub(crate) float_number_format: LanguageCache<FloatNumberFormats>,
     pub(crate) truncation_text: LanguageCache<TruncationText>,
     pub(crate) time_strings: LanguageCache<TimeStrings>,
     pub(crate) file_size_strings: LanguageCache<FileSizeStrings>,
@@ -207,6 +215,13 @@ pub struct Context {
     pub(crate) language_info: HashMap<String, LanguageInfo>,
     // `language_name_translated` results for the active language, by code.
     pub(crate) translated_language_names: LanguageCache<HashMap<String, String>>,
+}
+
+impl Context {
+    /// This render's language caches, created on first use.
+    pub(crate) fn caches(&mut self) -> &mut LanguageCaches {
+        self.caches.get_or_insert_with(Box::default)
+    }
 }
 
 impl Trace for Context {
@@ -281,7 +296,6 @@ impl Context {
             scope_bindings: None,
             autoescape,
             use_l10n: None,
-            float_number_format: LanguageCache::default(),
             use_tz: None,
             date_cache: RefCell::default(),
             format_values: false,
@@ -304,12 +318,7 @@ impl Context {
             changed_states: vec![HashMap::new()],
             assigned: HashSet::new(),
             cycle_variables: HashSet::new(),
-            truncation_text: LanguageCache::default(),
-            time_strings: LanguageCache::default(),
-            file_size_strings: LanguageCache::default(),
-            humanize_strings: LanguageCache::default(),
-            language_info: HashMap::new(),
-            translated_language_names: LanguageCache::default(),
+            caches: None,
         }
     }
 
@@ -343,7 +352,6 @@ impl Context {
             scope_bindings: self.scope_bindings.clone(),
             autoescape: self.autoescape,
             use_l10n: self.use_l10n,
-            float_number_format: self.float_number_format.clone(),
             use_tz: self.use_tz,
             date_cache: RefCell::default(),
             format_values: self.format_values,
@@ -375,12 +383,7 @@ impl Context {
                         .collect()
                 })
                 .collect(),
-            truncation_text: self.truncation_text.clone(),
-            time_strings: self.time_strings.clone(),
-            file_size_strings: self.file_size_strings.clone(),
-            humanize_strings: self.humanize_strings.clone(),
-            language_info: self.language_info.clone(),
-            translated_language_names: self.translated_language_names.clone(),
+            caches: self.caches.clone(),
         }
     }
 

@@ -395,6 +395,7 @@ fn ordinal<'t, 'py>(
         (ORDINAL_CONTEXTS[digit], message)
     };
     let Some(strings) = context
+        .caches()
         .humanize_strings
         .get_or_try_init(py, |_| Ok(HumanizeStrings::default()))?
     else {
@@ -428,6 +429,7 @@ fn apnumber<'t, 'py>(
         }));
     }
     let Some(strings) = context
+        .caches()
         .humanize_strings
         .get_or_try_init(py, |_| Ok(HumanizeStrings::default()))?
     else {
@@ -489,6 +491,7 @@ fn naturaltime<'t, 'py>(
         (false, _) => (NaturalTime::FutureHour, seconds / 3600),
     };
     let Some(strings) = context
+        .caches()
         .humanize_strings
         .get_or_try_init(py, |_| Ok(HumanizeStrings::default()))?
     else {

@@ -813,10 +813,14 @@ impl LanguageInfoFilter {
         py: Python<'py>,
         context: &mut Context,
     ) -> PyResult<Option<Content<'t, 'py>>> {
-        let info = match context.language_info.get(code) {
+        let info = match context.caches().language_info.get(code) {
             Some(info) => info,
             None => match LanguageInfo::load(py, code)? {
-                Some(info) => context.language_info.entry(code.to_owned()).or_insert(info),
+                Some(info) => context
+                    .caches()
+                    .language_info
+                    .entry(code.to_owned())
+                    .or_insert(info),
                 None => return Ok(None),
             },
         };
@@ -827,6 +831,7 @@ impl LanguageInfoFilter {
             LanguageField::NameTranslated => {
                 let name = info.name.clone();
                 let Some(names) = context
+                    .caches()
                     .translated_language_names
                     .get_or_try_init(py, |_| Ok(HashMap::new()))?
                 else {
@@ -1140,6 +1145,7 @@ pub(crate) fn number_format<'c>(
     options: NumberOptions,
 ) -> PyResult<Option<&'c FloatNumberFormat>> {
     match context
+        .caches()
         .float_number_format
         .get_or_try_init(py, FloatNumberFormats::new)?
     {
@@ -1603,6 +1609,7 @@ fn time_since_text(
     };
     let py = value.py();
     let text = match context
+        .caches()
         .time_strings
         .get_or_try_init(py, |_| Ok(TimeStrings::default()))?
     {
@@ -1949,6 +1956,7 @@ fn truncate_chars(
         return Ok(Some(text.to_string()));
     }
     let Some(truncation) = context
+        .caches()
         .truncation_text
         .get_or_try_init(py, |_| TruncationText::new(py))?
     else {
@@ -2225,6 +2233,7 @@ fn truncate_chars_html(
         return Ok(Some(String::new()));
     };
     let Some(truncation) = context
+        .caches()
         .truncation_text
         .get_or_try_init(py, |_| TruncationText::new(py))?
     else {
@@ -3174,6 +3183,7 @@ impl ResolveFilter for FilesizeformatFilter {
         };
         let text = if size < 1 << 10 {
             let Some(strings) = context
+                .caches()
                 .file_size_strings
                 .get_or_try_init(py, |_| Ok(FileSizeStrings::default()))?
             else {
@@ -3194,6 +3204,7 @@ impl ResolveFilter for FilesizeformatFilter {
                 fraction: tenth.to_string(),
             });
             let Some(strings) = context
+                .caches()
                 .file_size_strings
                 .get_or_try_init(py, |_| Ok(FileSizeStrings::default()))?
             else {
