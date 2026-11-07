@@ -1,0 +1,99 @@
+# Mutation testing: does any test notice when the Rust engine is changed?
+# Too slow for PRs (about 30 seconds per mutant, about 6,000 mutants), so it
+# runs weekly over the Rust code changed in the last 7 days, or by dispatch.
+name: Mutants
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      file:
+        description: "File glob to mutate, e.g. src/render/tags.rs (empty: changed code)"
+        required: false
+        default: ""
+      days:
+        description: "With no file glob, mutate Rust code changed in this many days"
+        required: false
+        default: "7"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutants:
+    name: Mutants shard ${{ matrix.shard }}/4
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      UV_PYTHON: "3.13"
+      FILE_GLOB: ${{ inputs.file }}
+      DAYS: ${{ inputs.days || '7' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+          cache-suffix: mutants-py313
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: mutants-py313
+          workspaces: |
+            . -> target
+            target/mutants/worktree -> target
+      - name: Install gettext
+        run: sudo apt-get install -y gettext
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@3be4ad2b146f3302f92e5956c54fedbb6ae8cccc # v1.25.3
+      - name: Install cargo-mutants
+        run: cargo binstall --no-confirm cargo-mutants
+      - name: Choose mutants
+        id: select
+        run: |
+          if [[ -n "$FILE_GLOB" ]]; then
+            echo "args=--file $FILE_GLOB" >> "$GITHUB_OUTPUT"
+          else
+            since=$(git rev-list -1 --before="$DAYS days ago" HEAD)
+            if [[ -z "$since" ]]; then since=$(git rev-list --max-parents=0 HEAD); fi
+            git diff "$since" HEAD -- '*.rs' > "$RUNNER_TEMP/changes.diff"
+            echo "Rust changes since $since: $(grep -c '^+++' "$RUNNER_TEMP/changes.diff" || true) files"
+            echo "args=--in-diff $RUNNER_TEMP/changes.diff" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run mutants
+        env:
+          SELECT: ${{ steps.select.outputs.args }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          uv sync
+          # shellcheck disable=SC2086
+          uv run scripts/mutants.py $SELECT --shard "$SHARD/4" --output target/mutants
+      - name: Summarize survivors
+        if: always()
+        run: |
+          if [[ -f target/mutants/survivors.md ]]; then
+            cat target/mutants/survivors.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Save results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: |
+            target/mutants/results.jsonl
+            target/mutants/survivors.md
+            target/mutants/survivors.diff
+          retention-days: 30

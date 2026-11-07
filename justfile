@@ -23,6 +23,11 @@ check-tests *ARGS:
     maturin develop
     python scripts/check_broken_engine.py {{ARGS}}
 
+# Mutation-test the Rust engine against pytest (args forwarded, e.g. -f src/render/lorem.rs)
+[group('test')]
+mutants *ARGS:
+    python scripts/mutants.py {{ARGS}}
+
 # Run the Python test suite under coverage
 [group('coverage')]
 python-coverage:

@@ -1,0 +1,5 @@
+# cargo-mutants settings, used by scripts/mutants.py.
+# The benchmark crate isn't engine code.
+exclude_globs = ["dtl-benchmark/**"]
+# Debug output isn't user facing. (Display is: it formats error messages.)
+exclude_re = ["impl Debug"]
