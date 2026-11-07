@@ -1,4 +1,4 @@
-"""Run unmodified Django template and admin tests through Rusty."""
+"""Run unmodified Django template, admin and contrib tests through Rusty."""
 
 import argparse
 import json
@@ -17,8 +17,30 @@ def log(message):
     print(f"==> {message}", flush=True)
 
 
+# Django's suites for contrib apps and forms, which render many templates.
+CONTRIB_LABELS = [
+    "admin_changelist",
+    "admin_docs",
+    "admin_filters",
+    "admin_inlines",
+    "admin_utils",
+    "admin_widgets",
+    "auth_tests",
+    "contenttypes_tests",
+    "flatpages_tests",
+    "forms_tests",
+    "humanize_tests",
+    "messages_tests",
+    "redirects_tests",
+    "sitemaps_tests",
+    "sites_tests",
+    "staticfiles_tests",
+    "syndication_tests",
+]
+
+
 def default_test_labels(django_version):
-    labels = ["template_tests", "template_loader", "admin_views"]
+    labels = ["template_tests", "template_loader", "admin_views", *CONTRIB_LABELS]
     if tuple(map(int, django_version.split("."))) >= (6, 0):
         labels.extend(
             [

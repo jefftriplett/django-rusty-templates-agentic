@@ -21,6 +21,7 @@ from scripts.django_test_adapter import Template
 def test_default_suites_include_admin_and_supported_csp_tests(version):
     labels = default_test_labels(version)
     assert labels[:3] == ["template_tests", "template_loader", "admin_views"]
+    assert {"forms_tests", "humanize_tests", "admin_changelist"}.issubset(labels)
     csp_labels = {
         "context_processors.tests.CSPContextProcessorTests",
         "middleware.test_csp",
