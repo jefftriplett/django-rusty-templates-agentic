@@ -948,7 +948,31 @@ impl Render for Tag {
                     ResolveFailures::IgnoreVariableDoesNotExist,
                 )? {
                     let target = target.to_py(py);
-                    if !target.is_none() {
+                    if !target.is_none()
+                        && let Some(lookup) = &group.lookup
+                        && context.formatting_context.is_none()
+                    {
+                        let grouped_result = py
+                            .import("django.template.defaulttags")?
+                            .getattr("GroupedResult")?;
+                        let mut previous: Option<Bound<'_, PyAny>> = None;
+                        let mut items = PyList::empty(py);
+                        for item in target.try_iter()? {
+                            let item = item?;
+                            let key =
+                                super::common::resolve_lookup_path(item.clone(), lookup, context)?;
+                            let same = match &previous {
+                                Some(previous) => key.is(previous) || key.eq(previous)?,
+                                None => false,
+                            };
+                            if !same {
+                                items = PyList::empty(py);
+                                results.append(grouped_result.call1((&key, &items))?)?;
+                                previous = Some(key);
+                            }
+                            items.append(item)?;
+                        }
+                    } else if !target.is_none() {
                         let python_context = context.django_context(py)?;
                         let kwargs = PyDict::new(py);
                         kwargs.set_item("ignore_failures", true)?;
