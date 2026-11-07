@@ -55,6 +55,15 @@ pub mod django_rusty_templates {
 
     #[pymethods]
     impl PortableEngine {
+        /// A copy shares the original, like `Engine`.
+        fn __copy__(slf: Py<Self>) -> Py<Self> {
+            slf
+        }
+
+        fn __deepcopy__(slf: Py<Self>, _memo: &Bound<'_, PyAny>) -> Py<Self> {
+            slf
+        }
+
         #[new]
         fn new() -> Self {
             Self {
@@ -497,6 +506,16 @@ pub mod django_rusty_templates {
 
     #[pymethods]
     impl Origin {
+        /// Compiled engines and templates don't change, so a copy shares
+        /// the original, as code that copies Django's objects expects.
+        fn __copy__(slf: Py<Self>) -> Py<Self> {
+            slf
+        }
+
+        fn __deepcopy__(slf: Py<Self>, _memo: &Bound<'_, PyAny>) -> Py<Self> {
+            slf
+        }
+
         fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
             if let Some(loader) = &self.loader {
                 loader.engine.trace(&visit)?;
@@ -952,6 +971,16 @@ pub mod django_rusty_templates {
 
     #[pymethods]
     impl PyEngine {
+        /// Compiled engines and templates don't change, so a copy shares
+        /// the original, as code that copies Django's objects expects.
+        fn __copy__(slf: Py<Self>) -> Py<Self> {
+            slf
+        }
+
+        fn __deepcopy__(slf: Py<Self>, _memo: &Bound<'_, PyAny>) -> Py<Self> {
+            slf
+        }
+
         fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
             self.engine.trace(&visit)
         }
@@ -2418,6 +2447,16 @@ pub mod django_rusty_templates {
 
     #[pymethods]
     impl Template {
+        /// Compiled engines and templates don't change, so a copy shares
+        /// the original, as code that copies Django's objects expects.
+        fn __copy__(slf: Py<Self>) -> Py<Self> {
+            slf
+        }
+
+        fn __deepcopy__(slf: Py<Self>, _memo: &Bound<'_, PyAny>) -> Py<Self> {
+            slf
+        }
+
         fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
             self.trace(&visit)
         }
