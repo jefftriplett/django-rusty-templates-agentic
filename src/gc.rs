@@ -342,6 +342,7 @@ impl Trace for FilterType {
             Self::Tz(filter) => filter.django.filter.trace(visit),
             Self::L10n(filter) => filter.django.filter.trace(visit),
             Self::LanguageInfo(filter) => filter.django.filter.trace(visit),
+            Self::Humanize(filter) => filter.django.filter.trace(visit),
             Self::Slice(filter) => filter.django.filter.trace(visit),
             Self::Join(filter) => filter.django.filter.trace(visit),
             Self::Timesince(filter) => filter.django.filter.trace(visit),

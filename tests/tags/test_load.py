@@ -15,6 +15,7 @@ def test_load_missing(assert_parse_error):
 cache
 custom_filters
 custom_tags
+humanize
 i18n
 invalid_tags
 l10n
@@ -34,6 +35,7 @@ tz""")
         cache
         custom_filters
         custom_tags
+        humanize
         i18n
         invalid_tags
         l10n

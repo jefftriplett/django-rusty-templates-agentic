@@ -47,7 +47,7 @@ use unicode_normalization::UnicodeNormalization;
 
 static MARK_FILTER_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
-static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+pub(crate) static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 pub static DATE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static TIME_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -138,6 +138,7 @@ impl ResolveFilter for FilterType {
             Self::Tz(filter) => filter.resolve(variable, py, template, context),
             Self::L10n(filter) => filter.resolve(variable, py, template, context),
             Self::LanguageInfo(filter) => filter.resolve(variable, py, template, context),
+            Self::Humanize(filter) => filter.resolve(variable, py, template, context),
             Self::First(filter) => filter.resolve(variable, py, template, context),
             Self::ForceEscape(filter) => filter.resolve(variable, py, template, context),
             Self::Join(filter) => filter.resolve(variable, py, template, context),
@@ -958,7 +959,7 @@ impl ResolveFilter for DjangoFilter {
 
 /// The integer Django's `int(arg)` produces, for arguments that convert
 /// unambiguously. Anything else returns `None` and is left to Django.
-fn integer_argument(argument: &Content<'_, '_>) -> Option<i64> {
+pub(crate) fn integer_argument(argument: &Content<'_, '_>) -> Option<i64> {
     match argument {
         Content::Int(n) => n.to_i64(),
         // `int()` truncates floats; infinities and NaN raise.
@@ -1050,7 +1051,7 @@ impl FloatNumberFormat {
 
     /// `django.utils.numberformat.format()` for a number already rounded to
     /// its decimal places.
-    fn format(&self, number: &Rounded) -> String {
+    pub(crate) fn format(&self, number: &Rounded) -> String {
         let Rounded {
             sign,
             integer,
@@ -1069,7 +1070,7 @@ impl FloatNumberFormat {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Sign {
+pub(crate) enum Sign {
     Plus,
     Minus,
 }
@@ -1086,8 +1087,8 @@ impl Sign {
 /// `number_format()`'s `use_l10n` and `force_grouping`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NumberOptions {
-    localize: bool,
-    force_grouping: bool,
+    pub(crate) localize: bool,
+    pub(crate) force_grouping: bool,
 }
 
 impl Default for NumberOptions {
@@ -1133,7 +1134,7 @@ impl FloatNumberFormats {
 }
 
 /// The number formatting for the active language and `options`.
-fn number_format<'c>(
+pub(crate) fn number_format<'c>(
     py: Python<'_>,
     context: &'c mut Context,
     options: NumberOptions,
@@ -1148,23 +1149,23 @@ fn number_format<'c>(
 }
 
 /// A number rounded to its decimal places, ready to localize.
-struct Rounded {
-    sign: Sign,
-    integer: String,
-    fraction: String,
+pub(crate) struct Rounded {
+    pub(crate) sign: Sign,
+    pub(crate) integer: String,
+    pub(crate) fraction: String,
 }
 
 /// A finite decimal number, `digits × 10^exponent`, as `Decimal(str(value))`
 /// sees an `int`, `float` or `Decimal`.
-struct DecimalNumber {
-    sign: Sign,
-    digits: Vec<u8>,
-    exponent: i64,
+pub(crate) struct DecimalNumber {
+    pub(crate) sign: Sign,
+    pub(crate) digits: Vec<u8>,
+    pub(crate) exponent: i64,
 }
 
 impl DecimalNumber {
     /// Parses Python's `str()` of a number. Infinities and NaNs return `None`.
-    fn parse(text: &str) -> Option<Self> {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
         let (sign, text) = match text.strip_prefix('-') {
             Some(text) => (Sign::Minus, text),
             None => (Sign::Plus, text),
@@ -1251,7 +1252,7 @@ const FLOATFORMAT_MAX_DIGITS: usize = 200;
 /// `text` without a leading `+` when it is a plain decimal `Decimal()`
 /// reads the same way as `DecimalNumber::parse`: an optional sign, ASCII
 /// digits with an optional point, and an optional exponent.
-fn decimal_text(text: &str) -> Option<&str> {
+pub(crate) fn decimal_text(text: &str) -> Option<&str> {
     let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
     let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
         Some((mantissa, exponent)) => (mantissa, Some(exponent)),
@@ -1418,7 +1419,7 @@ enum Joined {
 
 /// Whether `object` is exactly a `SafeString`, so `conditional_escape`
 /// returns it as it is.
-fn is_exact_safe_string(object: &Bound<'_, PyAny>) -> PyResult<bool> {
+pub(crate) fn is_exact_safe_string(object: &Bound<'_, PyAny>) -> PyResult<bool> {
     let py = object.py();
     Ok(object
         .get_type()
@@ -3868,7 +3869,7 @@ const MAX_JSON_DEPTH: usize = 100;
 
 /// Python's `repr()` of a finite float, as `json.dumps` writes it: the
 /// shortest round-trip digits, in exponent form below 1e-4 and from 1e16.
-fn python_float_repr(value: f64) -> String {
+pub(crate) fn python_float_repr(value: f64) -> String {
     // Rust's shortest digits break exact ties upward; Python rounds them to
     // even, as Rust does when formatting to that many digits.
     let shortest = format!("{value:e}");

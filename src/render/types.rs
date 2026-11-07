@@ -23,6 +23,7 @@ use super::dateformat::localize_datetime;
 use super::filters::FileSizeStrings;
 use super::filters::FloatNumberFormats;
 use super::filters::TruncationText;
+use super::humanize::HumanizeStrings;
 use super::inheritance::{BlockEntry, BlockMarker};
 use super::l10n::{NumberFormat, localize_number};
 use super::language_cache::{LanguageCache, LanguageInfo};
@@ -201,6 +202,7 @@ pub struct Context {
     pub(crate) truncation_text: LanguageCache<TruncationText>,
     pub(crate) time_strings: LanguageCache<TimeStrings>,
     pub(crate) file_size_strings: LanguageCache<FileSizeStrings>,
+    pub(crate) humanize_strings: LanguageCache<HumanizeStrings>,
     // `get_language_info(code)` results, which don't depend on the language.
     pub(crate) language_info: HashMap<String, LanguageInfo>,
     // `language_name_translated` results for the active language, by code.
@@ -305,6 +307,7 @@ impl Context {
             truncation_text: LanguageCache::default(),
             time_strings: LanguageCache::default(),
             file_size_strings: LanguageCache::default(),
+            humanize_strings: LanguageCache::default(),
             language_info: HashMap::new(),
             translated_language_names: LanguageCache::default(),
         }
@@ -375,6 +378,7 @@ impl Context {
             truncation_text: self.truncation_text.clone(),
             time_strings: self.time_strings.clone(),
             file_size_strings: self.file_size_strings.clone(),
+            humanize_strings: self.humanize_strings.clone(),
             language_info: self.language_info.clone(),
             translated_language_names: self.translated_language_names.clone(),
         }
