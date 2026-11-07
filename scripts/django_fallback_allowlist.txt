@@ -1,0 +1,26 @@
+# Django conformance tests allowed to compile with Django's parser (hybrid
+# mode) instead of Rusty's. scripts/run_django_test_suite.py fails when any
+# other test falls back, or when a listed test that ran no longer does.
+# Format: <series or *> <test id>  # reason
+#
+# All of these load register.tag compile functions from Django's own test
+# tag libraries. Unknown compile functions use the hybrid path by default.
+
+* template_tests.syntax_tests.test_extends.InheritanceTests.test_inheritance18  # testtags.echo
+* template_tests.syntax_tests.test_extends.InheritanceTests.test_inheritance19  # testtags.echo inside a block
+* template_tests.syntax_tests.test_include.IncludeTagTests.test_include_error07  # bad_tag compile function raises
+* template_tests.syntax_tests.test_include.IncludeTagTests.test_include_error09  # bad_tag compile function raises
+* template_tests.syntax_tests.test_include.IncludeTagTests.test_include_fail1  # bad_tag compile function raises
+* template_tests.syntax_tests.test_include.IncludeTests.test_include_cache  # custom counter tag
+* template_tests.syntax_tests.test_load.LoadTagTests.test_load01  # testtags.echo
+* template_tests.syntax_tests.test_load.LoadTagTests.test_load03  # testtags.echo
+* template_tests.syntax_tests.test_load.LoadTagTests.test_load04  # testtags.echo via {% load ... from %}
+* template_tests.syntax_tests.test_load.LoadTagTests.test_load05  # testtags.echo via {% load ... from %}
+* template_tests.tests.DebugTemplateTests.test_compile_tag_error  # bad_tag compile function raises
+* template_tests.tests.DebugTemplateTests.test_compile_tag_error_27584  # bad_tag compile function raises
+* template_tests.tests.DebugTemplateTests.test_compile_tag_error_27956  # bad_tag compile function raises
+* template_tests.tests.DebugTemplateTests.test_compile_tag_extra_data  # bad_tag compile function raises
+* template_tests.tests.TemplateTests.test_compile_tag_error  # bad_tag compile function raises
+* template_tests.tests.TemplateTests.test_compile_tag_error_27584  # bad_tag compile function raises
+* template_tests.tests.TemplateTests.test_compile_tag_error_27956  # bad_tag compile function raises
+* template_tests.tests.TemplateTests.test_compile_tag_extra_data  # bad_tag compile function raises

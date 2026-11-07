@@ -10,6 +10,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
+FALLBACK_ALLOWLIST = SCRIPT_DIR / "django_fallback_allowlist.txt"
 
 
 def log(message):
@@ -49,10 +50,12 @@ def summarize_results(results):
         "runnable": runnable,
         "total": runnable + len(skipped),
         "pass_percentage": 100 * len(passed) / runnable if runnable else 0,
+        "fallback_tests": len(results.get("fallbacks", {})),
     }
     lines = [
         f"Django test suite passing: {summary['pass_percentage']:.2f}%",
         f"{len(passed)} OK / {len(failures)} FAIL / {len(errors)} ERROR / {len(skipped)} SKIP",
+        f"Tests that fell back to Django's parser: {summary['fallback_tests']}",
     ]
     outcomes = {"OK": passed, "FAIL": failures, "ERROR": errors, "SKIP": skipped}
     lines.extend(
@@ -63,6 +66,38 @@ def summarize_results(results):
         )
     )
     return summary, "\n".join(lines) + "\n"
+
+
+def load_fallback_allowlist(path, django_version):
+    """Read `<series or *> <test id>  # reason` lines for this series."""
+    allowed = set()
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        series, _, test = line.partition(" ")
+        if not test.strip():
+            raise ValueError(f"{path.name}:{number}: expected '<series> <test id>'")
+        if series in ("*", django_version):
+            allowed.add(test.strip())
+    return allowed
+
+
+def check_fallbacks(results, allowed):
+    """Return tests that newly fall back, and allowlisted tests that no longer do.
+
+    Passing through Django's parser isn't passing on Rusty, so a new
+    fallback fails the run even when the test passes.
+    """
+    fallbacks = set(results.get("fallbacks", {}))
+    ran = {
+        test
+        for key in ("passed", "failures", "errors", "skipped")
+        for test in results[key]
+    }
+    unexpected = sorted(fallbacks - allowed)
+    stale = sorted((allowed & ran) - fallbacks)
+    return unexpected, stale
 
 
 def prepare_checkout(args):
@@ -155,6 +190,12 @@ def main():
         help="Save outcomes, tracebacks, skips, versions, and reference commit",
     )
     parser.add_argument("--raw-output", type=Path)
+    parser.add_argument(
+        "--fallback-allowlist",
+        type=Path,
+        default=FALLBACK_ALLOWLIST,
+        help="Tests allowed to compile with Django's parser instead of Rusty's",
+    )
     parser.add_argument("tests", nargs="*")
     args = parser.parse_args()
     args.tests = args.tests or default_test_labels(args.django_version)
@@ -205,8 +246,8 @@ def main():
         args.json_output.write_text(json.dumps(results, indent=2) + "\n")
     if args.parsed_output:
         args.parsed_output.write_text(formatted)
-    log(formatted.splitlines()[0])
-    log(formatted.splitlines()[1])
+    for line in formatted.splitlines()[:3]:
+        log(line)
     expected_series = [int(value) for value in args.django_version.split(".")]
     if results["django_series"] != expected_series:
         log(f"Unexpected Django series: {results['django_series']}")
@@ -214,7 +255,16 @@ def main():
     if not summary["runnable"]:
         log("No runnable tests recorded")
         return result.returncode or 1
-    return result.returncode or (1 if summary["errors"] or summary["failures"] else 0)
+    unexpected, stale = check_fallbacks(
+        results, load_fallback_allowlist(args.fallback_allowlist, args.django_version)
+    )
+    for test in unexpected:
+        log(f"Falls back to Django's parser (not in allowlist): {test}")
+    for test in stale:
+        log(f"No longer falls back; remove from allowlist: {test}")
+    if result.returncode:
+        return result.returncode
+    return 1 if summary["errors"] or summary["failures"] or unexpected or stale else 0
 
 
 if __name__ == "__main__":

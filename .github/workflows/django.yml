@@ -102,7 +102,7 @@ jobs:
         run: |
           uv run scripts/compare_django_results.py             "$GITHUB_WORKSPACE/results/base-$DJANGO_SERIES.json"             "$GITHUB_WORKSPACE/results/branch-$DJANGO_SERIES.json"             --output "$GITHUB_WORKSPACE/results/comment-$DJANGO_SERIES.md"
           printf '\nExpanded PR suite (templates, admin, and applicable CSP tests):\n\n' >> "$GITHUB_WORKSPACE/results/comment-$DJANGO_SERIES.md"
-          sed -n '1,2p' "$GITHUB_WORKSPACE/results/full-branch-$DJANGO_SERIES.txt" >> "$GITHUB_WORKSPACE/results/comment-$DJANGO_SERIES.md"
+          sed -n '1,3p' "$GITHUB_WORKSPACE/results/full-branch-$DJANGO_SERIES.txt" >> "$GITHUB_WORKSPACE/results/comment-$DJANGO_SERIES.md"
           cat "$GITHUB_WORKSPACE/results/comment-$DJANGO_SERIES.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Save audit results
         if: always()

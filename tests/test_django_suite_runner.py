@@ -2,7 +2,12 @@ import subprocess
 import sys
 import textwrap
 
-from scripts.run_django_test_suite import default_test_labels, summarize_results
+from scripts.run_django_test_suite import (
+    check_fallbacks,
+    default_test_labels,
+    load_fallback_allowlist,
+    summarize_results,
+)
 
 import pytest
 from django.template import Context, Origin
@@ -161,6 +166,7 @@ def test_conformance_summary_counts_failing_subtest_parents_once():
         "runnable": 3,
         "total": 4,
         "pass_percentage": 100 / 3,
+        "fallback_tests": 0,
     }
     assert formatted.count("failed ... FAIL") == 1
     assert "mixed ... ERROR" in formatted
@@ -179,3 +185,32 @@ def test_conformance_summary_with_no_runnable_tests():
     )
     assert summary["runnable"] == 0
     assert summary["pass_percentage"] == 0
+
+
+def test_fallback_allowlist_reads_series_and_wildcards(tmp_path):
+    path = tmp_path / "allow.txt"
+    path.write_text(
+        "# comment\n* a.Test.test_all  # reason\n6.1 a.Test.test_61\n5.2 a.Test.test_52\n"
+    )
+    assert load_fallback_allowlist(path, "6.1") == {"a.Test.test_all", "a.Test.test_61"}
+    path.write_text("6.1\n")
+    with pytest.raises(ValueError, match="allow.txt:1"):
+        load_fallback_allowlist(path, "6.1")
+
+
+def test_new_fallbacks_fail_and_stale_entries_are_reported():
+    results = {
+        "passed": ["new", "allowed", "fixed"],
+        "failures": [],
+        "errors": [],
+        "skipped": [],
+        "subtests": [],
+        "fallbacks": {"new": 1, "allowed": 2},
+    }
+    # "not_run" was allowlisted but not part of this run, so it isn't stale.
+    unexpected, stale = check_fallbacks(results, {"allowed", "fixed", "not_run"})
+    assert unexpected == ["new"]
+    assert stale == ["fixed"]
+    summary, formatted = summarize_results(results)
+    assert summary["fallback_tests"] == 2
+    assert "Tests that fell back to Django's parser: 2" in formatted
