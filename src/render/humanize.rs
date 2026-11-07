@@ -1,5 +1,5 @@
-//! Native ports of `django.contrib.humanize`'s `intcomma`, `ordinal`,
-//! `apnumber` and `naturaltime` filters.
+//! Native ports of `django.contrib.humanize`'s filters: `intcomma`,
+//! `intword`, `ordinal`, `apnumber`, `naturalday` and `naturaltime`.
 //!
 //! Most of Django's cost here is translation: `ordinal` looks up ten
 //! `pgettext` strings for every value, and `naturaltime` formats lazy
@@ -21,16 +21,18 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
-    PyDateTime, PyDelta, PyDeltaAccess, PyDict, PyFloat, PyInt, PyModule, PyString, PyType,
-    PyTzInfoAccess,
+    PyDate, PyDateAccess, PyDateTime, PyDelta, PyDeltaAccess, PyDict, PyFloat, PyInt, PyModule,
+    PyString, PyType, PyTzInfoAccess,
 };
 
 use crate::filters::python_int;
 use crate::filters::{HumanizeFilter, HumanizeKind};
 use crate::render::ResolveResult;
+use crate::render::dateformat::{Formatter, template_localtime};
 use crate::render::filters::{
     DecimalNumber, NumberOptions, ResolveFilter, Rounded, SAFEDATA, Sign, decimal_text,
-    integer_argument, is_exact_safe_string, number_format, python_float_repr,
+    floatformat, format_localtime, integer_argument, is_exact_safe_string, number_format,
+    python_float_repr,
 };
 use crate::render::types::{Content, ContentString, Context};
 use dtl_lexer::types::TemplateString;
@@ -43,6 +45,7 @@ static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static UTC: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static PGETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static GETTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static DATE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 /// Django's largest `Decimal` size, digits plus exponent, before
 /// `numberformat.format()` switches to scientific notation.
@@ -98,6 +101,37 @@ impl FormatTemplate {
     }
 }
 
+/// A translated `"%(value)s million"`-style template.
+#[derive(Clone, Debug)]
+enum ValueTemplate {
+    /// Split around its only `%(value)s`.
+    Split(String, String),
+    /// Any other template, %-formatted by Python.
+    Python(String),
+}
+
+impl ValueTemplate {
+    fn new(text: String) -> Self {
+        match text.split_once("%(value)s") {
+            Some((before, after)) if !before.contains('%') && !after.contains('%') => {
+                Self::Split(before.to_string(), after.to_string())
+            }
+            _ => Self::Python(text),
+        }
+    }
+
+    fn format(&self, py: Python<'_>, value: &str) -> PyResult<String> {
+        match self {
+            Self::Split(before, after) => Ok(format!("{before}{value}{after}")),
+            Self::Python(text) => {
+                let arguments = PyDict::new(py);
+                arguments.set_item("value", value)?;
+                PyString::new(py, text).rem(arguments)?.extract()
+            }
+        }
+    }
+}
+
 /// `naturaltime`'s `time_strings` keys handled natively.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum NaturalTime {
@@ -133,9 +167,47 @@ pub struct HumanizeStrings {
     ap_numbers: [Option<String>; 9],
     /// `NaturalTimeFormatter.time_strings[key] % {"count": count}`.
     natural_times: HashMap<(NaturalTime, i32), String>,
+    /// `intword_converters[index][1](count)`, by converter and count.
+    intwords: HashMap<(usize, i64), ValueTemplate>,
+    /// `gettext("today")`, `gettext("tomorrow")` and `gettext("yesterday")`.
+    natural_days: [Option<String>; 3],
 }
 
 impl HumanizeStrings {
+    fn intword(
+        &mut self,
+        module: &Bound<'_, PyModule>,
+        index: usize,
+        count: i64,
+    ) -> PyResult<&ValueTemplate> {
+        let py = module.py();
+        Ok(match self.intwords.entry((index, count)) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let text = module
+                    .getattr(intern!(py, "intword_converters"))?
+                    .get_item(index)?
+                    .get_item(1)?
+                    .call1((count,))?
+                    .extract()?;
+                entry.insert(ValueTemplate::new(text))
+            }
+        })
+    }
+
+    fn natural_day(&mut self, py: Python<'_>, index: usize) -> PyResult<&str> {
+        let slot = &mut self.natural_days[index];
+        if slot.is_none() {
+            let message = ["today", "tomorrow", "yesterday"][index];
+            let text = GETTEXT
+                .import(py, "django.utils.translation", "gettext")?
+                .call1((message,))?
+                .extract()?;
+            *slot = Some(text);
+        }
+        Ok(slot.as_deref().unwrap_or_default())
+    }
+
     fn ordinal(
         &mut self,
         py: Python<'_>,
@@ -502,6 +574,173 @@ fn naturaltime<'t, 'py>(
     Ok(Some(text(formatted, false)))
 }
 
+fn humanize_module(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    Ok(HUMANIZE_MODULE
+        .get_or_try_init(py, || py.import(HUMANIZE).map(Bound::unbind))?
+        .bind(py))
+}
+
+/// `round_away_from_one(value)`: `int(Decimal(value - 1).quantize(
+/// Decimal("0"), rounding=ROUND_UP)) + 1`.
+fn round_away_from_one(value: f64) -> i64 {
+    let shifted = value - 1.0;
+    // `ROUND_UP` rounds away from zero.
+    let rounded = if shifted >= 0.0 {
+        shifted.ceil()
+    } else {
+        shifted.floor()
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "callers pass values below 1,000 in magnitude"
+    )]
+    let rounded = rounded as i64;
+    rounded + 1
+}
+
+/// Integers up to 2⁵³ convert to `f64` exactly, so `value / 10**exponent`
+/// rounds once, as Python's `int / int` does.
+const EXACT_FLOAT_LIMIT: i64 = 1 << 53;
+
+fn intword<'t, 'py>(
+    value: &Content<'t, 'py>,
+    py: Python<'py>,
+    context: &mut Context,
+) -> PyResult<Option<Content<'t, 'py>>> {
+    let Some(number) = integer_argument(value) else {
+        return Ok(None);
+    };
+    let magnitude = number.unsigned_abs();
+    if magnitude < 1_000_000 {
+        // Django returns `int(value)`, which prints localized.
+        return Ok(Some(Content::Py(number.into_pyobject(py)?.into_any())));
+    }
+    if number.unsigned_abs() >= EXACT_FLOAT_LIMIT.unsigned_abs() {
+        return Ok(None);
+    }
+    // `intword_converters` from a million to a quadrillion; larger values
+    // are past the exact float range.
+    let Some((index, exponent)) = [6, 9, 12, 15]
+        .into_iter()
+        .enumerate()
+        .find(|&(_, exponent)| magnitude < 10_u64.pow(exponent) * 1000)
+    else {
+        return Ok(None);
+    };
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "values below 2⁵³ convert exactly"
+    )]
+    let new_value = number as f64 / 10_f64.powi(i32::try_from(exponent).unwrap_or_default());
+    let rounded = round_away_from_one(new_value);
+    let options = NumberOptions {
+        localize: true,
+        force_grouping: false,
+    };
+    let Some(formatted) = floatformat(&Content::Float(new_value), 1, options, py, context)? else {
+        return Ok(None);
+    };
+    let module = humanize_module(py)?;
+    let Some(strings) = context
+        .caches()
+        .humanize_strings
+        .get_or_try_init(py, |_| Ok(HumanizeStrings::default()))?
+    else {
+        return Ok(None);
+    };
+    let words = strings
+        .intword(module, index, rounded.abs())?
+        .format(py, &formatted)?;
+    // `intword` isn't `is_safe`, so its text is escaped.
+    Ok(Some(text(words, false)))
+}
+
+/// Days from 0001-01-01 in the proleptic Gregorian calendar.
+fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
+    let year = i64::from(year) - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era
+}
+
+fn naturalday<'t, 'py>(
+    value: &Content<'t, 'py>,
+    argument: Option<Content<'t, 'py>>,
+    py: Python<'py>,
+    context: &mut Context,
+) -> PyResult<Option<Content<'t, 'py>>> {
+    let Content::Py(value) = value else {
+        return Ok(None);
+    };
+    let is_datetime = value.is_exact_instance_of::<PyDateTime>();
+    if !is_datetime && !value.is_exact_instance_of::<PyDate>() {
+        return Ok(None);
+    }
+    let module = humanize_module(py)?;
+    // Tests and tools such as freezegun replace the module's `datetime`;
+    // leave those to Django, which reads it on every call.
+    let datetime = DATETIME.import(py, "datetime", "datetime")?;
+    if !module.getattr(intern!(py, "datetime"))?.is(datetime) {
+        return Ok(None);
+    }
+    // `expects_localtime=True`.
+    let value = if is_datetime {
+        template_localtime(
+            value.clone(),
+            context.use_tz,
+            &mut context.date_cache.borrow_mut(),
+        )?
+    } else {
+        value.clone()
+    };
+    let tzinfo = if is_datetime {
+        value
+            .cast::<PyDateTime>()?
+            .get_tzinfo()
+            .map_or_else(|| py.None().into_bound(py), Bound::into_any)
+    } else {
+        py.None().into_bound(py)
+    };
+    let date = value.cast::<PyDate>()?;
+    let (year, month, day) = (date.get_year(), date.get_month(), date.get_day());
+    let today = datetime
+        .call_method1(intern!(py, "now"), (tzinfo,))?
+        .call_method0(intern!(py, "date"))?;
+    let today = today.cast::<PyDate>()?;
+    let delta = days_from_civil(year, month, day)
+        - days_from_civil(today.get_year(), today.get_month(), today.get_day());
+    let index = match delta {
+        0 => Some(0),
+        1 => Some(1),
+        -1 => Some(2),
+        _ => None,
+    };
+    if let Some(index) = index {
+        let Some(strings) = context
+            .caches()
+            .humanize_strings
+            .get_or_try_init(py, |_| Ok(HumanizeStrings::default()))?
+        else {
+            return Ok(None);
+        };
+        let day = strings.natural_day(py, index)?.to_string();
+        return Ok(Some(text(day, false)));
+    }
+    // `defaultfilters.date(date(value.year, value.month, value.day), arg)`.
+    let plain_date = PyDate::new(py, year, month, day)?.into_any();
+    let date_filter = DATE_FILTER.import(py, "django.template.defaultfilters", "date")?;
+    Ok(Some(format_localtime(
+        plain_date,
+        argument,
+        Formatter::Date,
+        date_filter,
+        context,
+    )?))
+}
+
 /// The Django versions whose `humanize` code this port follows.
 const fn supported(series: (u8, u8)) -> bool {
     matches!(series, (5, 2) | (6, 0..=2))
@@ -516,6 +755,22 @@ impl ResolveFilter for HumanizeFilter {
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
         let series = context.django_series(py)?;
+        if self.kind == HumanizeKind::Naturalday {
+            // The only one with an argument: resolve it once for both paths.
+            let argument = self.django.resolve_argument(py, template, context)?;
+            if let Some(value) = &variable
+                && supported(series)
+                && let Some(content) = naturalday(
+                    value,
+                    argument.value().map(|format| Content::Py(format.to_py(py))),
+                    py,
+                    context,
+                )?
+            {
+                return Ok(Some(content));
+            }
+            return self.django.call(variable, argument, py, context);
+        }
         if let Some(value) = &variable
             && self.django.argument.is_none()
             && supported(series)
@@ -524,7 +779,9 @@ impl ResolveFilter for HumanizeFilter {
                 HumanizeKind::Intcomma => intcomma(value, series, py, context)?,
                 HumanizeKind::Ordinal => ordinal(value, series, py, context)?,
                 HumanizeKind::Apnumber => apnumber(value, py, context)?,
+                HumanizeKind::Intword => intword(value, py, context)?,
                 HumanizeKind::Naturaltime => naturaltime(value, py, context)?,
+                HumanizeKind::Naturalday => None,
             };
             if let Some(content) = native {
                 return Ok(Some(content));
