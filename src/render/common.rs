@@ -8,7 +8,7 @@ use pyo3::types::{PyDict, PyFunction, PyString, PyType};
 
 use dtl_lexer::types::TemplateString;
 
-use super::types::{AsBorrowedContent, Content, ContentString, Context};
+use super::types::{AsBorrowedContent, Content, ContentString, Context, render_int};
 use super::{Evaluate, Render, RenderResult, Resolve, ResolveFailures, ResolveResult};
 use crate::error::{AnnotatePyErr, RenderError};
 use crate::parse::{TagElement, TokenTree};
@@ -361,6 +361,10 @@ impl Resolve for ForVariable {
             context.refresh_formatting_flags(py)?;
             return Ok(result);
         }
+        // `forloop.length` is new in Django 6.0; before that it is missing.
+        if self.variant == ForVariableName::Length && context.django_series(py)? < (6, 0) {
+            return Ok(None);
+        }
         let Some(for_loop) = context.get_for_loop(self.parent_count) else {
             return Ok(Some("{}".as_content()));
         };
@@ -553,7 +557,7 @@ impl Render for TokenTree {
             Self::TranslatedText(text) => {
                 TranslatedText::new(text.at).render(py, template, context)
             }
-            Self::Int(n) => Ok(n.to_string().into()),
+            Self::Int(n) => Ok(render_int(n, context)?.into()),
             Self::Float(f) => Content::Float(*f).render(context).map_err(Into::into),
             Self::Tag(tag) => tag.render(py, template, context),
             Self::Variable(variable) => {

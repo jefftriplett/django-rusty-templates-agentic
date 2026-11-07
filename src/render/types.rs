@@ -25,7 +25,7 @@ use super::filters::FloatNumberFormats;
 use super::filters::TruncationText;
 use super::humanize::HumanizeStrings;
 use super::inheritance::{BlockEntry, BlockMarker};
-use super::l10n::{NumberFormat, localize_number};
+use super::l10n::{NumberFormat, localize_int, localize_number};
 use super::language_cache::{LanguageCache, LanguageInfo};
 use super::timesince::TimeStrings;
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
@@ -1446,6 +1446,19 @@ pub(crate) fn append_python_string(
     Ok(())
 }
 
+/// Prints an integer Rusty computed itself, localized as Django's
+/// `localize()` prints an `int`.
+pub fn render_int(number: &BigInt, context: &Context) -> PyResult<String> {
+    if let Some(number) = localize_int(number, context)? {
+        return Ok(number);
+    }
+    Python::attach(|py| {
+        Content::Py(number.into_pyobject(py)?.into_any())
+            .render(context)
+            .map(Cow::into_owned)
+    })
+}
+
 impl<'t, 'py> Content<'t, 'py> {
     pub fn render_into(self, context: &Context, output: &mut String) -> PyResult<()> {
         match self {
@@ -1631,7 +1644,7 @@ impl<'t, 'py> Content<'t, 'py> {
                 });
             }
             Self::Float(content) => return Ok(content.to_string().into()),
-            Self::Int(content) => return Ok(content.to_string().into()),
+            Self::Int(content) => return render_int(&content, context).map(Cow::Owned),
             Self::Bool(true) => return Ok(Cow::Borrowed("True")),
             Self::Bool(false) => return Ok(Cow::Borrowed("False")),
         };
