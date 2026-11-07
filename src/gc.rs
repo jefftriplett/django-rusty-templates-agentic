@@ -450,6 +450,7 @@ impl Trace for StockNode {
         match self {
             Self::Static { path, .. } => path.trace(visit)?,
             Self::Prefix { .. } => {}
+            Self::Node(node) => node.trace(visit)?,
             Self::Flag { nodes, .. } => nodes.trace(visit)?,
             Self::Override { value, nodes, .. } => {
                 value.trace(visit)?;

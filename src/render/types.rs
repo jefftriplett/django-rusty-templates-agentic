@@ -1268,6 +1268,34 @@ impl PyContext {
             .expect("Mutex should not be poisoned");
         guard.insert(key, value)
     }
+
+    /// Like Django's `Context.update()`. Django pushes a layer that stays
+    /// until a later pop; here the values join the current scope.
+    fn update<'py>(&self, py: Python<'py>, other_dict: Bound<'py, PyAny>) -> PyResult<()> {
+        if !other_dict.hasattr("__getitem__")? {
+            return Err(PyTypeError::new_err(
+                "other_dict must be a mapping (dictionary-like) object.",
+            ));
+        }
+        let other_dict = if other_dict.hasattr("dicts")? {
+            other_dict.getattr("dicts")?.get_item(-1)?
+        } else {
+            other_dict
+        };
+        for item in other_dict.call_method0("items")?.try_iter()? {
+            let (key, value): (String, Bound<'py, PyAny>) = item?.extract()?;
+            self.__setitem__(py, key, value)?;
+        }
+        Ok(())
+    }
+
+    /// Like Django's `Context.flatten()`.
+    fn flatten<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        self.context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned")
+            .as_dict(py)
+    }
 }
 
 #[derive(Debug, IntoPyObject)]
