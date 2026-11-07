@@ -85,6 +85,7 @@ use crate::filters::UrlizetruncFilter;
 use crate::filters::WordcountFilter;
 use crate::filters::WordwrapFilter;
 use crate::filters::YesnoFilter;
+use crate::filters::{HumanizeFilter, HumanizeKind};
 use crate::filters::{LanguageField, LanguageInfoFilter};
 use dtl_lexer::common::{LexerError, get_all_at, text_content_at, translated_text_content_at};
 use dtl_lexer::core::{Lexer, TokenType};
@@ -256,8 +257,11 @@ fn stock_filter<T: Copy>(
         .map(|(_, kind)| *kind)
 }
 
+const HUMANIZE: &str = "django.contrib.humanize.templatetags.humanize";
+
 /// A library filter, natively handled when it is one of Django's own
-/// `{% load tz %}`, `{% load l10n %}` or `{% load i18n %}` filters.
+/// `{% load tz %}`, `{% load l10n %}`, `{% load i18n %}` or
+/// `{% load humanize %}` filters.
 fn external_filter(py: Python<'_>, filter: Py<PyAny>, argument: Option<Argument>) -> FilterType {
     let bound = filter.bind(py);
     let tz = stock_filter(
@@ -291,6 +295,27 @@ fn external_filter(py: Python<'_>, filter: Py<PyAny>, argument: Option<Argument>
             ],
         )
     };
+    // Only check humanize when the filter comes from it, so templates that
+    // don't use it never import the module.
+    let humanize = || {
+        let from_humanize = bound
+            .getattr(intern!(py, "__module__"))
+            .is_ok_and(|module| module.eq(HUMANIZE).unwrap_or(false));
+        if !from_humanize {
+            return None;
+        }
+        stock_filter(
+            py,
+            bound,
+            HUMANIZE,
+            &[
+                ("apnumber", HumanizeKind::Apnumber),
+                ("intcomma", HumanizeKind::Intcomma),
+                ("naturaltime", HumanizeKind::Naturaltime),
+                ("ordinal", HumanizeKind::Ordinal),
+            ],
+        )
+    };
     let django = || DjangoFilter {
         filter: Gc::new(filter.clone_ref(py)),
         argument: argument.clone(),
@@ -303,6 +328,11 @@ fn external_filter(py: Python<'_>, filter: Py<PyAny>, argument: Option<Argument>
     } else if let Some(localize) = l10n() {
         FilterType::L10n(L10nFilter {
             localize,
+            django: django(),
+        })
+    } else if let Some(kind) = humanize() {
+        FilterType::Humanize(HumanizeFilter {
+            kind,
             django: django(),
         })
     } else if let Some(field) = i18n() {

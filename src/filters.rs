@@ -25,6 +25,7 @@ pub enum FilterType {
     Tz(TzFilter),
     L10n(L10nFilter),
     LanguageInfo(LanguageInfoFilter),
+    Humanize(HumanizeFilter),
     ForceEscape(ForceEscapeFilter),
     Join(JoinFilter),
     Justify(JustifyFilter),
@@ -581,6 +582,24 @@ pub enum LanguageField {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LanguageInfoFilter {
     pub field: LanguageField,
+    pub django: DjangoFilter,
+}
+
+/// Which `{% load humanize %}` filter a [`HumanizeFilter`] stands in for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HumanizeKind {
+    Apnumber,
+    Intcomma,
+    Naturaltime,
+    Ordinal,
+}
+
+/// Django's `humanize` filters, computed natively for plain numbers and
+/// datetimes with translations cached per language. Other inputs call
+/// Django's filter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HumanizeFilter {
+    pub kind: HumanizeKind,
     pub django: DjangoFilter,
 }
 

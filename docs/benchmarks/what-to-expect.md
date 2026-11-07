@@ -15,6 +15,7 @@ Warm renders with the cached loader, which both backends use by default when you
 | Inheritance: `extends`, `block.super`, 20 includes | 190 µs | 29 µs | 6.5× |
 | 200 model-style objects: properties, methods, related attributes | 1,612 µs | 263 µs | 6.1× |
 | `urlize` on 200 email addresses | 2,519 µs | 245 µs | 10.3× |
+| `intcomma` on 200 integers (`{% load humanize %}`) | 1,007 µs | 115 µs | 8.7× |
 | Custom filter on each of 200 rows | 331 µs | 63 µs | 5.3× |
 | Mixed template: one custom `Node` tag, rest native | 1,922 µs | 516 µs | 3.7× |
 | Tiny template, two variables | 5.0 µs | 1.8 µs | 2.7× |

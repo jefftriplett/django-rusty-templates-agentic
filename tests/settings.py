@@ -6,6 +6,7 @@ INSTALLED_APPS = [
     "tests.apps.DummyAppConfig",
     "django.contrib.contenttypes",
     "django.contrib.auth",
+    "django.contrib.humanize",
 ]
 
 TEMPLATES = [
