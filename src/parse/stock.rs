@@ -21,10 +21,14 @@ pub(super) enum StockCompiler {
     Cache,
     Translate,
     BlockTranslate,
+    /// A Django compiler that reads only its token, called at parse time.
+    /// Its node renders with the live context.
+    Node(&'static str, &'static str),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StockNode {
+    Node(super::PythonNode),
     Static {
         path: TagElement,
         target: Option<String>,
@@ -88,12 +92,108 @@ impl StockNode {
     }
 }
 
+/// A compiler's defining module and function name, when it has both.
+fn compiler_name(tag: &Bound<'_, PyAny>) -> Option<(String, String)> {
+    let attribute = |name| {
+        tag.getattr(name)
+            .ok()
+            .and_then(|value| value.extract::<String>().ok())
+    };
+    Some((attribute("__module__")?, attribute("__name__")?))
+}
+
+/// Whether `tag` is still the function `module.name`, so a replacement
+/// registered under the same name keeps its own semantics.
+fn is_django_compiler(
+    py: Python<'_>,
+    tag: &Bound<'_, PyAny>,
+    module: &str,
+    name: &str,
+) -> PyResult<bool> {
+    Ok(py.import(module)?.getattr(name)?.is(tag))
+}
+
+/// One of Django admin's `InclusionAdminNode` tags. Its function's result
+/// renders a template chosen per model from `opts`.
+#[derive(Clone, Copy)]
+pub(super) struct AdminInclusion {
+    pub module: &'static str,
+    /// The tag's function in `module`, or `None` for tags whose function
+    /// returns the context unchanged.
+    pub func: Option<&'static str>,
+    pub template_name: &'static str,
+    pub takes_context: bool,
+}
+
+const ADMIN_MODIFY: &str = "django.contrib.admin.templatetags.admin_modify";
+const ADMIN_LIST: &str = "django.contrib.admin.templatetags.admin_list";
+const ADMIN_LOG: &str = "django.contrib.admin.templatetags.log";
+const FLATPAGES: &str = "django.contrib.flatpages.templatetags.flatpages";
+
+pub(super) fn admin_inclusion(
+    py: Python<'_>,
+    tag: &Bound<'_, PyAny>,
+) -> PyResult<Option<AdminInclusion>> {
+    let Some((module, name)) = compiler_name(tag) else {
+        return Ok(None);
+    };
+    let admin = |module, func, template_name, takes_context| AdminInclusion {
+        module,
+        func,
+        template_name,
+        takes_context,
+    };
+    let kind = match (module.as_str(), name.as_str()) {
+        (ADMIN_MODIFY, "prepopulated_fields_js_tag") => admin(
+            ADMIN_MODIFY,
+            Some("prepopulated_fields_js"),
+            "prepopulated_fields_js.html",
+            true,
+        ),
+        (ADMIN_MODIFY, "submit_row_tag") => {
+            admin(ADMIN_MODIFY, Some("submit_row"), "submit_line.html", true)
+        }
+        (ADMIN_MODIFY, "change_form_object_tools_tag") => {
+            admin(ADMIN_MODIFY, None, "change_form_object_tools.html", true)
+        }
+        // Django 6.1 added `{% change_form_admin_actions %}`.
+        (ADMIN_MODIFY, "admin_actions_tag") => {
+            admin(ADMIN_MODIFY, None, "change_form_actions.html", true)
+        }
+        (ADMIN_LIST, "pagination_tag") => {
+            admin(ADMIN_LIST, Some("pagination"), "pagination.html", false)
+        }
+        (ADMIN_LIST, "result_list_tag") => admin(
+            ADMIN_LIST,
+            Some("result_list"),
+            "change_list_results.html",
+            false,
+        ),
+        (ADMIN_LIST, "date_hierarchy_tag") => admin(
+            ADMIN_LIST,
+            Some("date_hierarchy"),
+            "date_hierarchy.html",
+            false,
+        ),
+        (ADMIN_LIST, "search_form_tag") => {
+            admin(ADMIN_LIST, Some("search_form"), "search_form.html", false)
+        }
+        (ADMIN_LIST, "admin_actions_tag") => {
+            admin(ADMIN_LIST, Some("admin_actions"), "actions.html", true)
+        }
+        (ADMIN_LIST, "change_list_object_tools_tag") => {
+            admin(ADMIN_LIST, None, "change_list_object_tools.html", true)
+        }
+        _ => return Ok(None),
+    };
+    if !is_django_compiler(py, tag, &module, &name)? {
+        return Ok(None);
+    }
+    Ok(Some(kind))
+}
+
 pub(super) fn compiler(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<Option<StockCompiler>> {
-    let Some(module) = tag
-        .getattr("__module__")
-        .ok()
-        .and_then(|value| value.extract::<String>().ok())
-    else {
+    let Some((module, name)) = compiler_name(tag) else {
         return Ok(None);
     };
     if !matches!(
@@ -103,16 +203,11 @@ pub(super) fn compiler(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<Optio
             | "django.templatetags.tz"
             | "django.templatetags.i18n"
             | "django.templatetags.cache"
+            | ADMIN_LOG
+            | FLATPAGES
     ) {
         return Ok(None);
     }
-    let Some(name) = tag
-        .getattr("__name__")
-        .ok()
-        .and_then(|value| value.extract::<String>().ok())
-    else {
-        return Ok(None);
-    };
     let kind = match (module.as_str(), name.as_str()) {
         ("django.templatetags.static", "do_static") => StockCompiler::Static,
         ("django.templatetags.static", "get_static_prefix") => StockCompiler::Prefix("STATIC_URL"),
@@ -140,10 +235,12 @@ pub(super) fn compiler(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<Optio
         ("django.templatetags.cache", "do_cache") => StockCompiler::Cache,
         ("django.templatetags.i18n", "do_translate") => StockCompiler::Translate,
         ("django.templatetags.i18n", "do_block_translate") => StockCompiler::BlockTranslate,
+        (ADMIN_LOG, "get_admin_log") => StockCompiler::Node(ADMIN_LOG, "get_admin_log"),
+        (FLATPAGES, "get_flatpages") => StockCompiler::Node(FLATPAGES, "get_flatpages"),
         _ => return Ok(None),
     };
     // Names alone must not reinterpret a replacement compiler's semantics.
-    if !py.import(module.as_str())?.getattr(name.as_str())?.is(tag) {
+    if !is_django_compiler(py, tag, &module, &name)? {
         return Ok(None);
     }
     Ok(Some(kind))
@@ -331,6 +428,22 @@ impl Parser<'_, '_> {
             parser.parse_filter_expression(parser.template.content(span), span, span.0)
         };
         let node = match compiler {
+            StockCompiler::Node(module, name) => {
+                // Django's Token.contents: the tag without its delimiters.
+                let source = self.template.content(at);
+                let contents = source
+                    .strip_prefix("{%")
+                    .and_then(|source| source.strip_suffix("%}"))
+                    .unwrap_or(source)
+                    .trim();
+                let compiler = self.py.import(module)?.getattr(name)?;
+                let node = self
+                    .py
+                    .import("django_rusty_templates.stock")?
+                    .getattr("compile_token_node")?
+                    .call1((compiler, contents))?;
+                StockNode::Node(super::PythonNode(crate::gc::Gc::new(node.unbind())))
+            }
             StockCompiler::Static => {
                 let Some(path) = args.first() else {
                     return Err(invalid().into());

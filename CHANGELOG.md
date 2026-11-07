@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Compile Django admin's inclusion tags, `get_admin_log` and `get_flatpages` natively, so all of Django's contrib templates, including the admin change form, change list and index, compile natively. ([#318](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/318))
+
 ## 2026.11.2
 
 Report the tried origins when a loader can't find a template and keep the original error as the cause for invalid context processor results and loader configurations, and deny more Clippy restriction lints. ([#207](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/207))

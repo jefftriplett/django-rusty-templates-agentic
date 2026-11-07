@@ -102,6 +102,7 @@ TEMPLATES = [
 * **Built-in tags.** All of Django's built-in tags (`defaulttags` and `loader_tags`), including `querystring`, `partialdef` and `partial` on the Django versions that have them.
 * **Built-in filters.** All 57 of Django's built-in filters.
 * **Stock libraries.** The tags from `{% load i18n %}`, `{% load l10n %}`, `{% load tz %}`, `{% load static %}` and `{% load cache %}`, and the filters from `{% load l10n %}` (`localize`, `unlocalize`), `{% load tz %}` (`localtime`, `utc`, `timezone`) and `{% load i18n %}` (`language_name`, `language_name_local`, `language_name_translated`, `language_bidi`). A library that registers its own filters under these names keeps them.
+* **Admin and flatpages tags.** The admin's inclusion tags (`submit_row`, `result_list`, `pagination`, `admin_actions`, the object tools and the rest), `get_admin_log` and `get_flatpages` compile natively, so the admin's change form, change list and index pages no longer fall back to Django's parser. Their functions and queries still run in Python, with the live context.
 
 Checked against Django 5.2 and the development version with `engine.explain_template()`; see [Inspecting templates](#inspecting-templates).
 
@@ -109,7 +110,7 @@ Checked against Django 5.2 and the development version with `engine.explain_temp
 
 | Library | Filters and tags | Notes |
 |---|---|---|
-| `django.contrib` | `humanize` filters (`intcomma`, `naturaltime`, …), admin tags, and other contrib libraries | Run as custom libraries. |
+| `django.contrib` | `humanize` filters (`intcomma`, `naturaltime`, …), the admin's simple tags, and other contrib libraries | Run as custom libraries. |
 | Your project | Custom filters and tags | See below. |
 
 Custom filters run in Python and are called as Django calls them: `is_safe`, `needs_autoescape` and `expects_localtime` are honoured, and quoted string arguments arrive as `SafeString`. `simple_tag` and `inclusion_tag` tags are called from Rust. Tags with their own compile function use Django's parser for that tag, and the rest of the template stays native.

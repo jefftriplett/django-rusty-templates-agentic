@@ -7,7 +7,8 @@ from django.conf import settings
 from django.core.cache import InvalidCacheBackendError, caches
 from django.core.cache.utils import make_template_fragment_key
 from django.template import TemplateSyntaxError
-from django.template.base import render_value_in_context
+from django.template.base import Token, TokenType, render_value_in_context
+from django.template.context import BaseContext
 from django.templatetags.i18n import GetLanguageInfoListNode
 from django.templatetags.static import PrefixNode, StaticNode
 from django.utils import timezone, translation
@@ -152,3 +153,30 @@ def finish_block_translation(result, data, tag, nested):
                 % (tag, result, data)
             )
         return None
+
+
+def admin_context(context):
+    """The function of admin tags that render their context unchanged."""
+    return context
+
+
+def admin_values(values):
+    """The variables ``Context.new(values)`` exposes to an admin tag's template.
+
+    Admin functions return a dict, the context they were given, or a Django
+    ``Context`` wrapping it.
+    """
+    if isinstance(values, BaseContext):
+        flat = {}
+        for layer in values.dicts:
+            flat.update(admin_values(layer))
+        return flat
+    flatten = getattr(values, "flatten", None)
+    if flatten is not None:
+        return flatten()
+    return values
+
+
+def compile_token_node(compiler, contents):
+    """Run a compiler that reads only its token, never the parser."""
+    return compiler(None, Token(TokenType.BLOCK, contents))
