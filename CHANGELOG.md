@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2026.11.3
+
 Compile Django admin's inclusion tags, `get_admin_log` and `get_flatpages` natively, so all of Django's contrib templates, including the admin change form, change list and index, compile natively. ([#318](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/318))
 
 Let custom tags marked `rusty_isolated_compiler = True` keep templates that use `extends`, `block`, `cycle` or partials native, unless those tags appear inside the custom tag's body. ([#319](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/319))
