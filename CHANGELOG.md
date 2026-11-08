@@ -28,6 +28,10 @@ Run Django's contrib and forms test suites (admin, auth, forms, humanize, sitema
 
 Make `takes_context` simple tags about 1.6× faster than Django, close to plain simple tags, by moving less state on each call and reusing the Python context wrapper. ([#353](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/353), [#356](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/356))
 
+Accept translated filter arguments such as `default:_("Not started")` after a variable in `with`, `if`, `for` and `include`, which Rusty rejected and which broke a Wagtail admin template. ([#359](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/359))
+
+Add `scripts/survey_templates.py` and a [report](docs/third-party-templates.md) on how much of crispy-forms, allauth, Wagtail, debug-toolbar, compressor and widget-tweaks compiles natively, and which of their tags fall back. ([#361](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/361))
+
 ## 2026.11.2
 
 Report the tried origins when a loader can't find a template and keep the original error as the cause for invalid context processor results and loader configurations, and deny more Clippy restriction lints. ([#207](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/207))
