@@ -51,6 +51,43 @@ def test_literal_filter_expressions(source, expected, inherited):
 
 
 @pytest.mark.parametrize(
+    "source,expected",
+    [
+        ('{% with s=x|default:_("Not started") %}{{ s }}{% endwith %}', "Not started"),
+        (
+            '{% with a=1 s=x|default:_("No") t=x|default:"y" %}{{ s }}{{ t }}{% endwith %}',
+            "Noy",
+        ),
+        ('{% with x|default:_("No") as s %}{{ s }}{% endwith %}', "No"),
+        ('{% if x|default:_("No") == "No" %}yes{% endif %}', "yes"),
+        ('{% for c in x|default:_("No") %}{{ c }}{% endfor %}', "No"),
+        ('{% include "s.html" with s=x|default:_("No") %}', "No"),
+        ("{% with s=x|default:_('N)o') %}{{ s }}{% endwith %}", "N)o"),
+        ('{% with s=x|default:_("No")|upper %}{{ s }}{% endwith %}', "NO"),
+    ],
+)
+def test_translated_argument_after_variable(source, expected):
+    """Wagtail's workflow history uses `default:_("Not started")` in a `with`."""
+    loaders = [("django.template.loaders.locmem.Loader", {"s.html": "{{ s }}"})]
+    for cls in (DjangoEngine, Engine):
+        engine = cls(loaders=loaders)
+        assert engine.from_string(source).render(Context({"x": ""})) == expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '{% with s=x|default:_("No" %}{{ s }}{% endwith %}',
+        "{% with s=x|default:_(No) %}{{ s }}{% endwith %}",
+    ],
+)
+def test_malformed_translated_argument_after_variable(source):
+    for cls in (DjangoEngine, Engine):
+        with pytest.raises(TemplateSyntaxError):
+            cls().from_string(source)
+
+
+@pytest.mark.parametrize(
     "source",
     [
         '{% if "ab"| %}no{% endif %}',
