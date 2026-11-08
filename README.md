@@ -236,6 +236,11 @@ and its one-based `line`. Version-specific variable syntax reports no tag
 location. Inspection loads tag libraries but does not compile a Python fallback
 tree or render the template; a native report does not imply zero Python callbacks.
 
+To survey every template an installed package ships, and the tags that would
+make your templates fall back, see
+[Third-party template libraries](docs/third-party-templates.md). It has results
+for crispy-forms, allauth, Wagtail, debug-toolbar, compressor and widget-tweaks.
+
 Mixed templates expose the original nodes through `template.nodelist` for Django
 inspection and direct indexing. `template.nodelist.rendering_nodes` contains the
 compiled runtime regions. Inspecting Python nodes does not mean their render
