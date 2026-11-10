@@ -466,7 +466,21 @@ impl Resolve for Argument {
                 }
             }
             ArgumentType::ForVariable(variable) => {
-                return variable.resolve(py, template, context, failures);
+                match variable.resolve(py, template, context, failures)? {
+                    Some(content) => content,
+                    // Such as `forloop.length` before Django 6.0.
+                    None => {
+                        let key = template.content(variable.at).to_string();
+                        let object = context.display(py);
+                        return Err(RenderError::ArgumentDoesNotExist {
+                            key,
+                            object,
+                            key_at: variable.at.into(),
+                            object_at: None,
+                        }
+                        .into());
+                    }
+                }
             }
             ArgumentType::Float(number) => Content::Float(*number),
             ArgumentType::Int(number) => Content::Int(number.clone()),

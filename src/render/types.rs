@@ -27,6 +27,7 @@ use super::humanize::HumanizeStrings;
 use super::inheritance::{BlockEntry, BlockMarker};
 use super::l10n::{NumberFormat, localize_int, localize_number};
 use super::language_cache::{LanguageCache, LanguageInfo};
+use super::stack::RenderStack;
 use super::timesince::TimeStrings;
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::parse::CycleId;
@@ -201,6 +202,8 @@ pub struct Context {
     // Created on first use: most renders never need them, and a smaller
     // `Context` is cheaper to move into and out of Python callbacks.
     caches: Option<Box<LanguageCaches>>,
+    // How deep in nested templates this render is. Child contexts copy it.
+    pub(crate) render_stack: RenderStack,
 }
 
 /// Translated strings and formats a render keeps for its active language.
@@ -319,6 +322,7 @@ impl Context {
             assigned: HashSet::new(),
             cycle_variables: HashSet::new(),
             caches: None,
+            render_stack: RenderStack::default(),
         }
     }
 
@@ -384,6 +388,7 @@ impl Context {
                 })
                 .collect(),
             caches: self.caches.clone(),
+            render_stack: self.render_stack,
         }
     }
 

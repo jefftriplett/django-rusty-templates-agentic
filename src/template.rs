@@ -1982,6 +1982,7 @@ pub mod django_rusty_templates {
             context: &mut Context,
             render: impl FnOnce(&mut Context) -> Result<T, PyRenderError>,
         ) -> Result<T, PyRenderError> {
+            let previous_stack = context.render_stack.enter()?;
             let previous_blocks = std::mem::take(&mut context.inheritance_blocks);
             let previous_history = std::mem::take(&mut context.inheritance_history);
             let previous_root = context.root_template.clone();
@@ -2012,6 +2013,7 @@ pub mod django_rusty_templates {
             context.root_template = previous_root;
             context.cycle_indices = previous_cycles;
             context.instrument_render = previous_instrument;
+            context.render_stack.leave(previous_stack);
             result
         }
 
