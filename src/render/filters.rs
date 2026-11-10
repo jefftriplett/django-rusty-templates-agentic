@@ -5026,7 +5026,8 @@ mod tests {
                 .py_render(py, Some(context.into_any()), None)
                 .unwrap();
 
-            assert_eq!(result, "1.3");
+            // Django's `slugify` drops the decimal point.
+            assert_eq!(result, "13");
         });
     }
 
