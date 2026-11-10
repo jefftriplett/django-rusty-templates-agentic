@@ -110,24 +110,7 @@ pub trait Evaluate {
         py: Python<'_>,
         template: TemplateString<'_>,
         context: &mut Context,
-    ) -> Option<bool>;
-}
-
-impl<T> Evaluate for Option<T>
-where
-    T: Evaluate,
-{
-    fn evaluate(
-        &self,
-        py: Python<'_>,
-        template: TemplateString<'_>,
-        context: &mut Context,
-    ) -> Option<bool> {
-        match self {
-            Some(inner) => inner.evaluate(py, template, context),
-            None => Some(false),
-        }
-    }
+    ) -> Result<bool, PyRenderError>;
 }
 
 /// All resolvable template elements can be rendered
