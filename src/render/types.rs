@@ -23,6 +23,7 @@ use super::dateformat::localize_datetime;
 use super::filters::FileSizeStrings;
 use super::filters::FloatNumberFormats;
 use super::filters::TruncationText;
+use super::filters::python_float_str;
 use super::humanize::HumanizeStrings;
 use super::inheritance::{BlockEntry, BlockMarker};
 use super::l10n::{NumberFormat, localize_int, localize_number};
@@ -1651,7 +1652,7 @@ impl<'t, 'py> Content<'t, 'py> {
                         .map(|output| Cow::Owned(output.into_owned()))
                 });
             }
-            Self::Float(content) => return Ok(content.to_string().into()),
+            Self::Float(content) => return Ok(python_float_str(content).into()),
             Self::Int(content) => return render_int(&content, context).map(Cow::Owned),
             Self::Bool(true) => return Ok(Cow::Borrowed("True")),
             Self::Bool(false) => return Ok(Cow::Borrowed("False")),
@@ -1662,7 +1663,7 @@ impl<'t, 'py> Content<'t, 'py> {
     pub fn resolve_string(self, context: &Context) -> PyResult<ContentString<'t>> {
         Ok(match self {
             Self::String(content) => content,
-            Self::Float(content) => ContentString::String(content.to_string().into()),
+            Self::Float(content) => ContentString::String(python_float_str(content).into()),
             Self::Int(content) => ContentString::String(content.to_string().into()),
             Self::Py(content) => return resolve_python(content, context),
             Self::Bool(true) => ContentString::String(Cow::Borrowed("True")),

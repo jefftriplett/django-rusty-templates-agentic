@@ -621,7 +621,7 @@ impl ResolveFilter for EscapeFilter {
                         Cow::Owned(encoded)
                     }
                     Content::Int(n) => Cow::Owned(n.to_string()),
-                    Content::Float(n) => Cow::Owned(n.to_string()),
+                    Content::Float(n) => Cow::Owned(python_float_str(n)),
                     Content::Py(object) => {
                         let escaped = py
                             .import("django.utils.html")?
@@ -1706,6 +1706,20 @@ impl ResolveFilter for LastFilter {
         let obj = content.to_py(py);
 
         match obj.get_item(-1) {
+            // `is_safe=True`: the last character of safe text is safe.
+            Ok(last)
+                if last.is_exact_instance_of::<PyString>()
+                    && obj.is_instance(SAFEDATA.import(
+                        py,
+                        "django.utils.safestring",
+                        "SafeData",
+                    )?)? =>
+            {
+                let last = last.extract::<String>()?;
+                Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
+                    last,
+                )))))
+            }
             Ok(last) => Ok(Some(Content::Py(last))),
             Err(err) => {
                 if err.is_instance_of::<pyo3::exceptions::PyIndexError>(py) {
@@ -1769,7 +1783,7 @@ impl ResolveFilter for SafeFilter {
                 Some(content) => match content {
                     Content::String(content) => content.into_raw(),
                     Content::Int(n) => Cow::Owned(n.to_string()),
-                    Content::Float(n) => Cow::Owned(n.to_string()),
+                    Content::Float(n) => Cow::Owned(python_float_str(n)),
                     Content::Py(object) => {
                         let content = object.str()?.extract::<String>()?;
                         Cow::Owned(content)
@@ -1791,20 +1805,21 @@ impl ResolveFilter for SafeFilter {
 /// See <https://github.com/django/django/blob/stable/5.2.x/django/utils/text.py#L453>
 pub fn slugify(content: Cow<str>) -> Cow<str> {
     let mut slug = String::with_capacity(content.len());
-
-    // treat start as if preceded by dash to strip leading dashes
-    let mut prev_dash = true;
+    let mut previous_dash = false;
     for c in content.as_ref().nfkd().filter(char::is_ascii) {
         if c.is_ascii_alphanumeric() || c == '_' {
             slug.push(c.to_ascii_lowercase());
-            prev_dash = false;
-        } else if (c.is_whitespace() || c == '-') && !prev_dash {
+            previous_dash = false;
+        // Python's `\s` also matches the separators U+001C to U+001F.
+        } else if !previous_dash
+            && (c == '-' || c.is_ascii_whitespace() || matches!(c, '\x0b' | '\x1c'..='\x1f'))
+        {
             slug.push('-');
-            prev_dash = true;
+            previous_dash = true;
         }
     }
-    slug.truncate(slug.trim_end_matches(['-', '_']).len());
-    Cow::Owned(slug)
+    // Django's `.strip("-_")`.
+    Cow::Owned(slug.trim_matches(['-', '_']).to_string())
 }
 
 impl ResolveFilter for SlugifyFilter {
@@ -1826,9 +1841,13 @@ impl ResolveFilter for SlugifyFilter {
                         false => Content::String(ContentString::HtmlUnsafe(slug)),
                     }
                 }
-                // Int and Float requires no slugify, we only need to turn it into a string.
-                Content::Int(content) => content.to_string().into_content(),
-                Content::Float(content) => content.to_string().into_content(),
+                // `slugify` drops the sign and the decimal point of a number.
+                Content::Int(content) => slugify(Cow::Owned(content.to_string()))
+                    .into_owned()
+                    .into_content(),
+                Content::Float(content) => slugify(Cow::Owned(python_float_str(content)))
+                    .into_owned()
+                    .into_content(),
                 Content::String(content) => content.map_content(slugify),
                 Content::Bool(true) => "true".as_content(),
                 Content::Bool(false) => "false".as_content(),
@@ -3899,6 +3918,18 @@ impl ResolveFilter for DictsortreversedFilter {
 /// references.
 const MAX_JSON_DEPTH: usize = 100;
 
+/// Python's `str()` of a float. A float literal in a template, such as
+/// `{{ 1.0|lower }}`, reaches string filters as an `f64`.
+pub(crate) fn python_float_str(value: f64) -> String {
+    if value.is_nan() {
+        "nan".to_string()
+    } else if value.is_infinite() {
+        if value < 0.0 { "-inf" } else { "inf" }.to_string()
+    } else {
+        python_float_repr(value)
+    }
+}
+
 /// Python's `repr()` of a finite float, as `json.dumps` writes it: the
 /// shortest round-trip digits, in exponent form below 1e-4 and from 1e16.
 pub(crate) fn python_float_repr(value: f64) -> String {
@@ -4497,11 +4528,54 @@ impl ResolveFilter for LinenumbersFilter {
     }
 }
 
+static TITLE_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+/// Django's `title` for ASCII text: Python's `str.title()`, then a capital
+/// that follows a lowercase letter and an apostrophe, or a digit, is made
+/// lowercase again.
+fn title_ascii(text: &str) -> String {
+    let mut title = Vec::with_capacity(text.len());
+    let mut previous_cased = false;
+    for byte in text.bytes() {
+        title.push(if previous_cased {
+            byte.to_ascii_lowercase()
+        } else {
+            byte.to_ascii_uppercase()
+        });
+        previous_cased = byte.is_ascii_alphabetic();
+    }
+    // `re.sub("([a-z])'([A-Z])", lower, ...)`. Matches don't overlap, so the
+    // letter one match ends with can't start the next.
+    let mut index = 0;
+    while index + 2 < title.len() {
+        if title[index].is_ascii_lowercase()
+            && title[index + 1] == b'\''
+            && title[index + 2].is_ascii_uppercase()
+        {
+            title[index + 2].make_ascii_lowercase();
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    // `re.sub(r"\d([A-Z])", lower, ...)`.
+    let mut index = 0;
+    while index + 1 < title.len() {
+        if title[index].is_ascii_digit() && title[index + 1].is_ascii_uppercase() {
+            title[index + 1].make_ascii_lowercase();
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&title).into_owned()
+}
+
 impl ResolveFilter for TitleFilter {
     fn resolve<'t, 'py>(
         &self,
         variable: Option<Content<'t, 'py>>,
-        _py: Python<'py>,
+        py: Python<'py>,
         _template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
@@ -4509,36 +4583,18 @@ impl ResolveFilter for TitleFilter {
             return Ok(Some("".as_content()));
         };
         let content_string = content.resolve_string(context)?;
-
-        Ok(Some(content_string.map_content(|content| {
-            let mut result = String::with_capacity(content.len());
-            let mut prev = None;
-            let mut prev_letter_was_lowercased = false;
-
-            for ch in content.chars() {
-                if ch.is_alphabetic() {
-                    // Django's special cases to trigger lowercase:
-                    // 1. After apostrophe that follows a lowercased letter
-                    // 2. After a digit
-                    let should_lowercase = match prev {
-                        Some('\'') if prev_letter_was_lowercased => true,
-                        Some(c) if c.is_ascii_digit() | c.is_alphabetic() => true,
-                        _ => false,
-                    };
-
-                    if should_lowercase {
-                        result.extend(ch.to_lowercase());
-                    } else {
-                        result.extend(ch.to_uppercase());
-                    }
-                    prev_letter_was_lowercased = should_lowercase;
-                } else {
-                    result.push(ch);
-                }
-                prev = Some(ch);
-            }
-            Cow::Owned(result)
-        })))
+        let text = content_string.as_raw();
+        let title = if text.is_ascii() {
+            title_ascii(text)
+        } else {
+            // Rust has no titlecase mapping (`ß` is `Ss`, `ǆ` is `ǅ`) and
+            // lowercases a final sigma differently, so Python does these.
+            TITLE_FILTER
+                .import(py, "django.template.defaultfilters", "title")?
+                .call1((text.as_ref(),))?
+                .extract::<String>()?
+        };
+        Ok(Some(content_string.map_content(|_| Cow::Owned(title))))
     }
 }
 
@@ -4594,47 +4650,128 @@ impl ResolveFilter for WordcountFilter {
 ///
 /// Don't wrap long words, thus the output text may have lines longer than ``width``.
 fn wordwrap(text: &str, width: usize) -> String {
-    let mut result = String::with_capacity(text.len());
-
-    for (i, line) in text.split('\n').enumerate() {
-        if i > 0 {
-            result.push('\n');
-        }
-
-        if line.is_empty() {
-            continue;
-        }
-
-        let leading_whitespace = line.chars().take_while(|c| c.is_whitespace()).count();
-        let (indent, trimmed_line) = line.split_at(leading_whitespace);
-
-        let mut words = trimmed_line.split_whitespace();
-
-        let Some(first_word) = words.next() else {
-            // Line contains only whitespace - preserve it
-            result.push_str(line);
-            continue;
-        };
-
-        result.push_str(indent);
-        result.push_str(first_word);
-
-        let mut current_len = leading_whitespace + first_word.len();
-        for word in words {
-            let word_len = word.len();
-
-            if current_len + word_len < width {
-                result.push(' ');
-                current_len += 1 + word_len;
-            } else {
-                result.push('\n');
-                current_len = word_len;
-            }
-            result.push_str(word);
+    let mut lines: Vec<Cow<str>> = Vec::new();
+    for line in python_splitlines(text) {
+        let before = lines.len();
+        wrap_line(&expand_tabs(line), width, &mut lines);
+        if lines.len() == before {
+            // The line only held whitespace, which wrapping drops.
+            lines.push(Cow::Borrowed(line));
         }
     }
+    if text.ends_with('\n') {
+        lines.push(Cow::Borrowed(""));
+    }
+    lines.join("\n")
+}
 
-    result
+/// Python's `str.isspace()` for one character.
+fn is_python_space(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\x1c'..='\x1f')
+}
+
+/// Python's `str.splitlines()`.
+fn python_splitlines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut characters = text.char_indices().peekable();
+    while let Some((index, c)) = characters.next() {
+        let boundary = matches!(
+            c,
+            '\n' | '\r' | '\x0b' | '\x0c' | '\x1c'..='\x1e' | '\u{85}' | '\u{2028}' | '\u{2029}'
+        );
+        if !boundary {
+            continue;
+        }
+        lines.push(&text[start..index]);
+        start = index + c.len_utf8();
+        if c == '\r'
+            && let Some((_, '\n')) = characters.peek()
+        {
+            characters.next();
+            start += 1;
+        }
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
+}
+
+/// Python's `str.expandtabs()` for a single line: tab stops every 8 columns.
+fn expand_tabs(line: &str) -> Cow<'_, str> {
+    if !line.contains('\t') {
+        return Cow::Borrowed(line);
+    }
+    let mut expanded = String::with_capacity(line.len() + 8);
+    let mut column = 0;
+    for c in line.chars() {
+        if c == '\t' {
+            let spaces = 8 - column % 8;
+            expanded.extend(std::iter::repeat_n(' ', spaces));
+            column += spaces;
+        } else {
+            expanded.push(c);
+            column += 1;
+        }
+    }
+    Cow::Owned(expanded)
+}
+
+/// `textwrap.TextWrapper(width, break_long_words=False,
+/// break_on_hyphens=False, replace_whitespace=False).wrap(line)`, appended
+/// to `lines`. The line is split into words and runs of ASCII whitespace.
+/// Each output line takes the chunks that fit, without the whitespace at its
+/// start (after the first line) and end; a word longer than `width` gets a
+/// line to itself.
+fn wrap_line(line: &str, width: usize, lines: &mut Vec<Cow<'_, str>>) {
+    let is_separator = |c: char| matches!(c, '\t' | '\n' | '\x0b' | '\x0c' | '\r' | ' ');
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut in_whitespace = None;
+    for (index, c) in line.char_indices() {
+        let whitespace = is_separator(c);
+        if in_whitespace.is_some_and(|previous| previous != whitespace) {
+            chunks.push(&line[start..index]);
+            start = index;
+        }
+        in_whitespace = Some(whitespace);
+    }
+    if start < line.len() {
+        chunks.push(&line[start..]);
+    }
+    let is_blank = |chunk: &str| chunk.chars().all(is_python_space);
+    let first_line = lines.len();
+    let mut index = 0;
+    while index < chunks.len() {
+        let mut current: Vec<&str> = Vec::new();
+        let mut length = 0_usize;
+        if is_blank(chunks[index]) && lines.len() > first_line {
+            index += 1;
+        }
+        while let Some(chunk) = chunks.get(index) {
+            let chunk_length = chunk.chars().count();
+            if length.saturating_add(chunk_length) > width {
+                break;
+            }
+            current.push(chunk);
+            length += chunk_length;
+            index += 1;
+        }
+        if current.is_empty()
+            && let Some(chunk) = chunks.get(index)
+        {
+            // A word longer than the width isn't broken.
+            current.push(chunk);
+            index += 1;
+        }
+        if current.last().is_some_and(|chunk| is_blank(chunk)) {
+            current.pop();
+        }
+        if !current.is_empty() {
+            lines.push(Cow::Owned(current.concat()));
+        }
+    }
 }
 
 impl ResolveFilter for WordwrapFilter {
@@ -4658,8 +4795,10 @@ impl ResolveFilter for WordwrapFilter {
 
         let arg = argument.expect("missing argument in context should already have raised");
 
-        // Check for negative values before converting to usize
-        if let Some(bigint) = arg.to_bigint()
+        // `textwrap` checks the width when it wraps a line, and empty text
+        // has no lines.
+        if !text.as_raw().is_empty()
+            && let Some(bigint) = arg.to_bigint()
             && let Some(n) = bigint.to_isize()
             && n <= 0
         {
@@ -4887,7 +5026,8 @@ mod tests {
                 .py_render(py, Some(context.into_any()), None)
                 .unwrap();
 
-            assert_eq!(result, "1.3");
+            // Django's `slugify` drops the decimal point.
+            assert_eq!(result, "13");
         });
     }
 
