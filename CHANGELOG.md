@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+Raise `RecursionError`, as Django does, when a template includes itself or a recursive include runs out of stack, instead of crashing the process; `center` with a huge width and `forloop.length` as a filter argument before Django 6.0 no longer abort or panic either. ([#373](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/373))
+
+Make `{% if %}` follow Django: exceptions from a bare condition (such as a database error in `{% if queryset %}`) are raised instead of rendering the else branch, `and`/`or` only evaluate their right side when needed, and `!=` calls `__ne__`. A missing filter argument now raises even when the filter wouldn't use it. ([#374](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/374))
+
+Match Django's output for `title` (`ab 'cd'`, non-ASCII text), `slugify` (leading underscores, number literals), `wordwrap` (non-ASCII text, runs of spaces, tabs), `last` on safe text, and float literals passed to string filters. ([#375](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/375))
+
 ## 2026.11.3
 
 Compile Django admin's inclusion tags, `get_admin_log` and `get_flatpages` natively, so all of Django's contrib templates, including the admin change form, change list and index, compile natively. ([#318](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/318))
