@@ -228,13 +228,14 @@ impl ResolveFilter for AddFilter {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
-        let Some(variable) = variable else {
-            return Ok(None);
-        };
+        // Resolved first: a missing argument raises even for a missing value.
         let right = self
             .argument
             .resolve(py, template, context, ResolveFailures::Raise)?
             .expect("missing argument in context should already have raised");
+        let Some(variable) = variable else {
+            return Ok(None);
+        };
         Ok(match (variable.to_bigint(), right.to_bigint()) {
             (Some(variable), Some(right)) => Some(Content::Int(variable + right)),
             _ => {
@@ -279,15 +280,17 @@ impl ResolveFilter for CenterFilter {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
+        // Django resolves a filter's arguments before calling it, so a
+        // missing argument raises even for a missing value.
+        let argument = self
+            .argument
+            .resolve(py, template, context, ResolveFailures::Raise)?;
         let Some(content) = variable else {
             return Ok(Some("".as_content()));
         };
         let content = content.resolve_string(context)?;
         let length = content.as_raw().chars().count();
-        let arg = self
-            .argument
-            .resolve(py, template, context, ResolveFailures::Raise)?
-            .expect("missing argument in context should already have raised");
+        let arg = argument.expect("missing argument in context should already have raised");
 
         if context.django_series(py)? >= (6, 0) {
             // Django 6.0's `f"{value:^{width}}"` returns the value for a width
@@ -363,13 +366,16 @@ impl ResolveFilter for CutFilter {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
+        // Django resolves a filter's arguments before calling it, so a
+        // missing argument raises even for a missing value.
+        let argument = self
+            .argument
+            .resolve(py, template, context, ResolveFailures::Raise)?;
         let Some(variable) = variable else {
             return Ok(Some("".as_content()));
         };
 
-        let arg = self
-            .argument
-            .resolve(py, template, context, ResolveFailures::Raise)?
+        let arg = argument
             .expect("missing argument in context should already have raised")
             .resolve_string_strict(context, self.argument.at.into())?
             .into_raw();
@@ -399,6 +405,11 @@ impl ResolveFilter for DefaultFilter {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
+        // Django resolves a filter's arguments before calling it, so a
+        // missing argument raises even when the value isn't replaced.
+        let argument = self
+            .argument
+            .resolve(py, template, context, ResolveFailures::Raise)?;
         match variable {
             Some(left)
                 if left
@@ -407,9 +418,7 @@ impl ResolveFilter for DefaultFilter {
             {
                 Ok(Some(left))
             }
-            None | Some(_) => self
-                .argument
-                .resolve(py, template, context, ResolveFailures::Raise),
+            None | Some(_) => Ok(argument),
         }
     }
 }
@@ -422,11 +431,12 @@ impl ResolveFilter for DefaultIfNoneFilter {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
+        // As for `default`, a missing argument always raises.
+        let argument = self
+            .argument
+            .resolve(py, template, context, ResolveFailures::Raise)?;
         match variable {
-            Some(Content::Py(ref value)) if value.is_none() => {
-                self.argument
-                    .resolve(py, template, context, ResolveFailures::Raise)
-            }
+            Some(Content::Py(ref value)) if value.is_none() => Ok(argument),
             Some(left) => Ok(Some(left)),
             None => Ok(Some("".as_content())),
         }
@@ -441,15 +451,16 @@ impl ResolveFilter for DateFilter {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
-        let Some(value) = variable else {
-            return Ok(Some("".as_content()));
-        };
+        // Resolved first: a missing argument raises even for a missing value.
         let format = match &self.argument {
             Some(arg) => Some(
                 arg.resolve(py, template, context, ResolveFailures::Raise)?
                     .expect("missing argument in context should already have raised"),
             ),
             None => None,
+        };
+        let Some(value) = variable else {
+            return Ok(Some("".as_content()));
         };
         let date = DATE_FILTER.import(py, "django.template.defaultfilters", "date")?;
         let formatted = format_date(value, format, Formatter::Date, date, context)
@@ -538,6 +549,11 @@ impl ResolveFilter for DivisibleByFilter {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
+        // Django resolves a filter's arguments before calling it, so a
+        // missing argument raises even for a missing value.
+        let argument = self
+            .argument
+            .resolve(py, template, context, ResolveFailures::Raise)?;
         let Some(variable) = variable else {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "invalid literal for int() with base 10: 'None'",
@@ -556,10 +572,7 @@ impl ResolveFilter for DivisibleByFilter {
                 .into());
         }
 
-        let right = self
-            .argument
-            .resolve(py, template, context, ResolveFailures::Raise)?
-            .expect("missing argument in context should already have raised");
+        let right = argument.expect("missing argument in context should already have raised");
 
         let Some(right_val) = right.to_bigint() else {
             return Err(
@@ -4632,16 +4645,18 @@ impl ResolveFilter for WordwrapFilter {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
+        // Django resolves a filter's arguments before calling it, so a
+        // missing argument raises even for a missing value.
+        let argument = self
+            .argument
+            .resolve(py, template, context, ResolveFailures::Raise)?;
         let Some(content) = variable else {
             return Ok(Some("".as_content()));
         };
 
         let text = content.resolve_string(context)?;
 
-        let arg = self
-            .argument
-            .resolve(py, template, context, ResolveFailures::Raise)?
-            .expect("missing argument in context should already have raised");
+        let arg = argument.expect("missing argument in context should already have raised");
 
         // Check for negative values before converting to usize
         if let Some(bigint) = arg.to_bigint()

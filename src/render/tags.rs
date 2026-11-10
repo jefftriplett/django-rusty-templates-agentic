@@ -6,7 +6,8 @@ use either::Either;
 use num_bigint::{BigInt, Sign};
 use num_traits::cast::ToPrimitive;
 use pyo3::exceptions::{
-    PyAttributeError, PyKeyError, PyOverflowError, PyTypeError, PyValueError, PyZeroDivisionError,
+    PyAttributeError, PyException, PyKeyError, PyOverflowError, PyTypeError, PyValueError,
+    PyZeroDivisionError,
 };
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -33,7 +34,7 @@ use crate::parse::{
 };
 use crate::path::construct_relative_path;
 use crate::template::django_rusty_templates::{
-    NoReverseMatch, Template, TemplateDoesNotExist, TemplateSyntaxError,
+    NoReverseMatch, Template, TemplateDoesNotExist, TemplateSyntaxError, VariableDoesNotExist,
 };
 use crate::utils::PyResultMethods;
 
@@ -130,29 +131,10 @@ impl Resolve for Url {
     }
 }
 
-impl Evaluate for Content<'_, '_> {
-    fn evaluate(
-        &self,
-        _py: Python<'_>,
-        _template: TemplateString<'_>,
-        _context: &mut Context,
-    ) -> Option<bool> {
-        Some(match self {
-            Self::Py(obj) => obj.is_truthy().unwrap_or(false),
-            Self::String(s) => !s.as_raw().is_empty(),
-            Self::Float(f) => *f != 0.0,
-            Self::Int(n) => *n != BigInt::ZERO,
-            Self::Bool(b) => *b,
-        })
-    }
-}
-
 trait PyCmp<T> {
     fn eq(&self, other: &T) -> bool;
 
-    fn ne(&self, other: &T) -> bool {
-        !self.eq(other)
-    }
+    fn ne(&self, other: &T) -> bool;
 
     fn lt(&self, other: &T) -> bool;
 
@@ -206,6 +188,25 @@ impl PyCmp<Content<'_, '_>> for Content<'_, '_> {
             (Self::String(obj), Content::String(other)) => obj.as_raw() == other.as_raw(),
             (Self::Bool(obj), Content::Bool(other)) => obj == other,
             _ => false,
+        }
+    }
+
+    /// Python's `!=` calls `__ne__`, which a class can define apart from
+    /// `__eq__`, and is `False` like every operator when the call raises.
+    fn ne(&self, other: &Content<'_, '_>) -> bool {
+        match (self, other) {
+            (Self::Py(obj), Content::Py(other)) => obj.ne(other).unwrap_or(false),
+            (Self::Py(obj), Content::Float(other)) => obj.ne(other).unwrap_or(false),
+            (Self::Py(obj), Content::Int(other)) => obj.ne(other).unwrap_or(false),
+            (Self::Py(obj), Content::Bool(other)) => obj.ne(other).unwrap_or(false),
+            (Self::Py(obj), Content::String(other)) => obj.ne(other.as_raw()).unwrap_or(false),
+            // The Python object is on the right, so its reflected `__ne__`
+            // runs, as it would after `int.__ne__` returns `NotImplemented`.
+            (Self::Float(obj), Content::Py(other)) => other.ne(obj).unwrap_or(false),
+            (Self::Int(obj), Content::Py(other)) => other.ne(obj).unwrap_or(false),
+            (Self::String(obj), Content::Py(other)) => other.ne(obj.as_raw()).unwrap_or(false),
+            (Self::Bool(obj), Content::Py(other)) => other.ne(obj).unwrap_or(false),
+            _ => !self.eq(other),
         }
     }
 
@@ -418,6 +419,17 @@ impl PyCmp<Self> for Option<Content<'_, '_>> {
         }
     }
 
+    fn ne(&self, other: &Self) -> bool {
+        match (self, other) {
+            (None, None) => false,
+            (Some(obj), Some(other)) => obj.ne(other),
+            (Some(obj), None) | (None, Some(obj)) => match obj {
+                Content::Py(obj) => obj.ne(PyNone::get(obj.py())).unwrap_or(false),
+                _ => true,
+            },
+        }
+    }
+
     fn lt(&self, other: &Self) -> bool {
         match (self, other) {
             (Some(obj), Some(other)) => obj.lt(other),
@@ -483,168 +495,180 @@ impl Contains<Option<Content<'_, '_>>> for Content<'_, '_> {
     }
 }
 
-trait ResolveTuple<'t, 'py> {
-    fn resolve(
+/// Whether Django's `except Exception` around each operator catches `error`.
+/// `KeyboardInterrupt` and other `BaseException`s escape.
+fn operator_catches(py: Python<'_>, error: &PyRenderError) -> bool {
+    match error {
+        PyRenderError::PyErr(error) => error.is_instance_of::<PyException>(py),
+        PyRenderError::RenderError(_) | PyRenderError::InvalidTagResult(_) => true,
+    }
+}
+
+/// Python's `bool(value)`; a missing variable is `None`.
+fn truth(value: Option<&Content<'_, '_>>) -> PyResult<bool> {
+    Ok(match value {
+        None => false,
+        Some(Content::Py(object)) => object.is_truthy()?,
+        Some(Content::String(text)) => !text.as_raw().is_empty(),
+        Some(Content::Float(number)) => *number != 0.0,
+        Some(Content::Int(number)) => *number != BigInt::ZERO,
+        Some(Content::Bool(value)) => *value,
+    })
+}
+
+type ConditionValue<'t, 'py> = Result<Option<Content<'t, 'py>>, PyRenderError>;
+
+impl IfCondition {
+    /// Django's `condition.eval(context)`. A variable gives its value (`None`
+    /// when missing) and lets its exceptions escape. An operator catches
+    /// every `Exception` its operands and its own work raise, and is then
+    /// `False`.
+    fn value<'t, 'py>(
         &self,
         py: Python<'py>,
         template: TemplateString<'t>,
         context: &mut Context,
-    ) -> Result<(Option<Content<'t, 'py>>, Option<Content<'t, 'py>>), PyRenderError>;
-}
+    ) -> ConditionValue<'t, 'py> {
+        if let Self::Variable(variable) = self {
+            return variable.resolve(
+                py,
+                template,
+                context,
+                ResolveFailures::IgnoreVariableDoesNotExist,
+            );
+        }
+        match self.operator_value(py, template, context) {
+            Err(error) if operator_catches(py, &error) => Ok(Some(Content::Bool(false))),
+            result => result,
+        }
+    }
 
-impl<'t, 'py> ResolveTuple<'t, 'py> for (IfCondition, IfCondition) {
-    fn resolve(
-        &self,
+    /// The operands of a binary operator, left first.
+    fn operands<'t, 'py>(
+        pair: &(Self, Self),
         py: Python<'py>,
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> Result<(Option<Content<'t, 'py>>, Option<Content<'t, 'py>>), PyRenderError> {
-        const IGNORE: ResolveFailures = ResolveFailures::IgnoreVariableDoesNotExist;
-        Ok(match self {
-            (IfCondition::Variable(l), IfCondition::Variable(r)) => {
-                let left = l.resolve(py, template, context, IGNORE)?;
-                let right = r.resolve(py, template, context, IGNORE)?;
-                (left, right)
+        let left = pair.0.value(py, template, context)?;
+        let right = pair.1.value(py, template, context)?;
+        Ok((left, right))
+    }
+
+    fn operator_value<'t, 'py>(
+        &self,
+        py: Python<'py>,
+        template: TemplateString<'t>,
+        context: &mut Context,
+    ) -> ConditionValue<'t, 'py> {
+        let result = match self {
+            Self::Variable(_) => unreachable!("`value` resolves variables"),
+            // `x and y` and `x or y` give one of their operands, and only
+            // evaluate `y` when `x` doesn't decide the result.
+            Self::And(inner) => {
+                let left = inner.0.value(py, template, context)?;
+                return if truth(left.as_ref())? {
+                    inner.1.value(py, template, context)
+                } else {
+                    Ok(left)
+                };
             }
-            (IfCondition::Variable(l), r) => {
-                let left = l.resolve(py, template, context, IGNORE)?;
-                let right = r
-                    .evaluate(py, template, context)
-                    .expect("Right cannot be an expression that evaluates to None");
-                (left, Some(Content::Bool(right)))
+            Self::Or(inner) => {
+                let left = inner.0.value(py, template, context)?;
+                return if truth(left.as_ref())? {
+                    Ok(left)
+                } else {
+                    inner.1.value(py, template, context)
+                };
             }
-            (l, IfCondition::Variable(r)) => {
-                let left = l
-                    .evaluate(py, template, context)
-                    .expect("Left cannot be an expression that evaluates to None");
-                let right = r.resolve(py, template, context, IGNORE)?;
-                (Some(Content::Bool(left)), right)
+            Self::Not(inner) => !truth(inner.value(py, template, context)?.as_ref())?,
+            Self::Equal(inner) => {
+                let (left, right) = Self::operands(inner, py, template, context)?;
+                left.eq(&right)
             }
-            (l, r) => {
-                let left = l
-                    .evaluate(py, template, context)
-                    .expect("Left cannot be an expression that evaluates to None");
-                let right = r
-                    .evaluate(py, template, context)
-                    .expect("Right cannot be an expression that evaluates to None");
-                (Some(Content::Bool(left)), Some(Content::Bool(right)))
+            Self::NotEqual(inner) => {
+                let (left, right) = Self::operands(inner, py, template, context)?;
+                left.ne(&right)
             }
-        })
+            Self::LessThan(inner) => {
+                let (left, right) = Self::operands(inner, py, template, context)?;
+                left.lt(&right)
+            }
+            Self::GreaterThan(inner) => {
+                let (left, right) = Self::operands(inner, py, template, context)?;
+                left.gt(&right)
+            }
+            Self::LessThanEqual(inner) => {
+                let (left, right) = Self::operands(inner, py, template, context)?;
+                left.lte(&right)
+            }
+            Self::GreaterThanEqual(inner) => {
+                let (left, right) = Self::operands(inner, py, template, context)?;
+                left.gte(&right)
+            }
+            Self::In(inner) => match Self::operands(inner, py, template, context)? {
+                (left, Some(right)) => right.contains(left).unwrap_or(false),
+                _ => false,
+            },
+            Self::NotIn(inner) => match Self::operands(inner, py, template, context)? {
+                (left, Some(right)) => !(right.contains(left).unwrap_or(true)),
+                _ => false,
+            },
+            Self::Is(inner) => {
+                let (left, right) = Self::operands(inner, py, template, context)?;
+                is_same(py, left.as_ref(), right.as_ref())
+            }
+            Self::IsNot(inner) => {
+                let (left, right) = Self::operands(inner, py, template, context)?;
+                !is_same(py, left.as_ref(), right.as_ref())
+            }
+        };
+        Ok(Some(Content::Bool(result)))
+    }
+}
+
+/// Python's `left is right`. A missing variable is `None`, and values Rusty
+/// computed are only the same object as `True`, `False` or another of them.
+fn is_same(
+    py: Python<'_>,
+    left: Option<&Content<'_, '_>>,
+    right: Option<&Content<'_, '_>>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(Content::Py(left)), Some(Content::Py(right))) => left.is(right),
+        (Some(Content::Py(object)), None) | (None, Some(Content::Py(object))) => object.is_none(),
+        (Some(Content::Bool(left)), Some(Content::Bool(right))) => left == right,
+        (Some(Content::Bool(value)), Some(Content::Py(object)))
+        | (Some(Content::Py(object)), Some(Content::Bool(value))) => {
+            object.is(PyBool::new(py, *value).as_any())
+        }
+        _ => false,
     }
 }
 
 impl Evaluate for IfCondition {
-    #[allow(clippy::too_many_lines)]
+    /// Django's `IfNode`: a condition that raises `VariableDoesNotExist`
+    /// doesn't match, and the truth of its value is tested outside the
+    /// operators, so an exception from `__bool__` there escapes.
     fn evaluate(
         &self,
         py: Python<'_>,
         template: TemplateString<'_>,
         context: &mut Context,
-    ) -> Option<bool> {
-        Some(match self {
-            Self::Variable(v) => v.evaluate(py, template, context)?,
-            Self::And(inner) => {
-                let left = inner.0.evaluate(py, template, context).unwrap_or(false);
-                let right = inner.1.evaluate(py, template, context).unwrap_or(false);
-                if left { right } else { false }
+    ) -> Result<bool, PyRenderError> {
+        match self.value(py, template, context) {
+            Ok(value) => Ok(truth(value.as_ref())?),
+            Err(PyRenderError::RenderError(
+                RenderError::VariableDoesNotExist { .. } | RenderError::ArgumentDoesNotExist { .. },
+            )) => Ok(false),
+            Err(PyRenderError::PyErr(error))
+                if error.is_instance_of::<VariableDoesNotExist>(py) =>
+            {
+                Ok(false)
             }
-            Self::Or(inner) => {
-                let left = inner.0.evaluate(py, template, context);
-                let right = inner.1.evaluate(py, template, context);
-                match left {
-                    None => false,
-                    Some(left) => {
-                        if left {
-                            true
-                        } else {
-                            right.unwrap_or(false)
-                        }
-                    }
-                }
-            }
-            Self::Not(inner) => match inner.evaluate(py, template, context) {
-                None | Some(true) => false,
-                Some(false) => true,
-            },
-            Self::Equal(inner) => match inner.resolve(py, template, context) {
-                Ok((l, r)) => l.eq(&r),
-                Err(_) => false,
-            },
-            Self::NotEqual(inner) => match inner.resolve(py, template, context) {
-                Ok((l, r)) => l.ne(&r),
-                Err(_) => false,
-            },
-            Self::LessThan(inner) => match inner.resolve(py, template, context) {
-                Ok((l, r)) => l.lt(&r),
-                Err(_) => false,
-            },
-            Self::GreaterThan(inner) => match inner.resolve(py, template, context) {
-                Ok((l, r)) => l.gt(&r),
-                Err(_) => false,
-            },
-            Self::LessThanEqual(inner) => match inner.resolve(py, template, context) {
-                Ok((l, r)) => l.lte(&r),
-                Err(_) => false,
-            },
-            Self::GreaterThanEqual(inner) => match inner.resolve(py, template, context) {
-                Ok((l, r)) => l.gte(&r),
-                Err(_) => false,
-            },
-            Self::In(inner) => {
-                let Ok(inner) = inner.resolve(py, template, context) else {
-                    return Some(false);
-                };
-                match inner {
-                    (l, Some(r)) => r.contains(l).unwrap_or(false),
-                    _ => false,
-                }
-            }
-            Self::NotIn(inner) => {
-                let Ok(inner) = inner.resolve(py, template, context) else {
-                    return Some(false);
-                };
-                match inner {
-                    (l, Some(r)) => !(r.contains(l).unwrap_or(true)),
-                    _ => false,
-                }
-            }
-            Self::Is(inner) => {
-                let Ok(inner) = inner.resolve(py, template, context) else {
-                    return Some(false);
-                };
-                match inner {
-                    (Some(Content::Py(left)), Some(Content::Py(right))) => left.is(&right),
-                    (Some(Content::Py(obj)), None) | (None, Some(Content::Py(obj))) => {
-                        obj.is(PyNone::get(py).as_any())
-                    }
-                    (Some(Content::Bool(left)), Some(Content::Py(right))) => {
-                        right.is(PyBool::new(py, left).as_any())
-                    }
-                    (None, None) => true,
-                    _ => false,
-                }
-            }
-            Self::IsNot(inner) => {
-                let Ok(inner) = inner.resolve(py, template, context) else {
-                    return Some(false);
-                };
-                match inner {
-                    (Some(Content::Py(left)), Some(Content::Py(right))) => !left.is(&right),
-                    (Some(Content::Bool(left)), Some(Content::Bool(right))) => left != right,
-                    (Some(Content::Py(obj)), None) | (None, Some(Content::Py(obj))) => {
-                        !obj.is(PyNone::get(py).as_any())
-                    }
-                    (Some(Content::Bool(left)), Some(Content::Py(right))) => {
-                        !right.is(PyBool::new(py, left).as_any())
-                    }
-                    (Some(Content::Py(left)), Some(Content::Bool(right))) => {
-                        !left.is(PyBool::new(py, right).as_any())
-                    }
-                    (None, None) => false,
-                    _ => true,
-                }
-            }
-        })
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -758,7 +782,7 @@ impl Render for Tag {
                 truthy,
                 falsey,
             } => {
-                if condition.evaluate(py, template, context).unwrap_or(false) {
+                if condition.evaluate(py, template, context)? {
                     truthy.render_into(py, template, context, output)
                 } else {
                     falsey.render_into(py, template, context, output)
@@ -1127,7 +1151,7 @@ impl Render for Tag {
                 truthy,
                 falsey,
             } => {
-                if condition.evaluate(py, template, context).unwrap_or(false) {
+                if condition.evaluate(py, template, context)? {
                     truthy.render(py, template, context)?
                 } else {
                     falsey.render(py, template, context)?

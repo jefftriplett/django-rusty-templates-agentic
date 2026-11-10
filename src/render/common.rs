@@ -9,7 +9,7 @@ use pyo3::types::{PyDict, PyFunction, PyString, PyType};
 use dtl_lexer::types::TemplateString;
 
 use super::types::{AsBorrowedContent, Content, ContentString, Context, render_int};
-use super::{Evaluate, Render, RenderResult, Resolve, ResolveFailures, ResolveResult};
+use super::{Render, RenderResult, Resolve, ResolveFailures, ResolveResult};
 use crate::error::{AnnotatePyErr, RenderError};
 use crate::parse::{TagElement, TokenTree};
 use crate::types::Argument;
@@ -513,24 +513,6 @@ impl Resolve for TagElement {
             Self::Int(int) => Ok(Some(Content::Int(int.clone()))),
             Self::Float(float) => Ok(Some(Content::Float(*float))),
         }
-    }
-}
-
-impl Evaluate for TagElement {
-    fn evaluate(
-        &self,
-        py: Python<'_>,
-        template: TemplateString<'_>,
-        context: &mut Context,
-    ) -> Option<bool> {
-        self.resolve(
-            py,
-            template,
-            context,
-            ResolveFailures::IgnoreVariableDoesNotExist,
-        )
-        .ok()?
-        .evaluate(py, template, context)
     }
 }
 
