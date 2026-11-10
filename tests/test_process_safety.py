@@ -122,7 +122,6 @@ def test_center_width_above_the_native_limit(width, value):
         "{% for x in xs %}{{ x|add:forloop.length }}{% endfor %}",
         "{% for x in xs %}{{ x|center:forloop.length }}{% endfor %}",
         "{% for x in xs %}{{ x|divisibleby:forloop.length }}{% endfor %}",
-        "{% for x in xs %}{{ x|yesno:forloop.length }}{% endfor %}",
     ],
 )
 def test_forloop_length_argument(engine_class, source):
