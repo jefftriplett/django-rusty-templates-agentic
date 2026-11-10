@@ -8,6 +8,7 @@ mod language_cache;
 pub(crate) use language_cache::CatalogCache;
 pub mod humanize;
 pub mod lorem;
+mod stack;
 mod stock;
 pub mod tags;
 mod timesince;

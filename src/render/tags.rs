@@ -1627,6 +1627,7 @@ impl Include {
                 new_context.use_l10n = context.use_l10n;
                 new_context.use_tz = context.use_tz;
                 new_context.format_values = context.format_values;
+                new_context.render_stack = context.render_stack;
                 new_context.number_format = context.number_format.clone();
                 render(&mut new_context)
             }
@@ -2080,6 +2081,7 @@ impl InclusionTag {
         child.use_l10n = context.use_l10n;
         child.use_tz = context.use_tz;
         child.format_values = context.format_values;
+        child.render_stack = context.render_stack;
         child.number_format = context.number_format.clone();
         if let Some(template_name) = self.admin_template {
             // `InclusionAdminNode` lets each model or app override the template.

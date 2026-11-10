@@ -324,6 +324,14 @@ impl ResolveFilter for CenterFilter {
         if size <= length {
             return Ok(Some(Content::String(content)));
         }
+        if size > MAX_JUSTIFY_WIDTH {
+            // Python raises `MemoryError` or `OverflowError` for a width it
+            // can't allocate; allocating it here would abort the process.
+            let centered = PyString::new(py, content.as_raw())
+                .call_method1(intern!(py, "center"), (size,))?
+                .extract::<String>()?;
+            return Ok(Some(content.map_content(|_| Cow::Owned(centered))));
+        }
         let round_up = size % 2 == 0 && length % 2 != 0;
         let right = if round_up {
             // If the size is even and the content length is odd, we need to adjust the centering
