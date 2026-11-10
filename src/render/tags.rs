@@ -195,8 +195,17 @@ impl PyCmp<Content<'_, '_>> for Content<'_, '_> {
     /// `__eq__`, and is `False` like every operator when the call raises.
     fn ne(&self, other: &Content<'_, '_>) -> bool {
         match (self, other) {
-            (Self::Py(object), _) => object.ne(other.to_py(object.py())).unwrap_or(false),
-            (_, Content::Py(object)) => self.to_py(object.py()).ne(object).unwrap_or(false),
+            (Self::Py(obj), Content::Py(other)) => obj.ne(other).unwrap_or(false),
+            (Self::Py(obj), Content::Float(other)) => obj.ne(other).unwrap_or(false),
+            (Self::Py(obj), Content::Int(other)) => obj.ne(other).unwrap_or(false),
+            (Self::Py(obj), Content::Bool(other)) => obj.ne(other).unwrap_or(false),
+            (Self::Py(obj), Content::String(other)) => obj.ne(other.as_raw()).unwrap_or(false),
+            // The Python object is on the right, so its reflected `__ne__`
+            // runs, as it would after `int.__ne__` returns `NotImplemented`.
+            (Self::Float(obj), Content::Py(other)) => other.ne(obj).unwrap_or(false),
+            (Self::Int(obj), Content::Py(other)) => other.ne(obj).unwrap_or(false),
+            (Self::String(obj), Content::Py(other)) => other.ne(obj.as_raw()).unwrap_or(false),
+            (Self::Bool(obj), Content::Py(other)) => other.ne(obj).unwrap_or(false),
             _ => !self.eq(other),
         }
     }
