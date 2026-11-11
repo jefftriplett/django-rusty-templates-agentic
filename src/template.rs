@@ -1706,37 +1706,76 @@ pub mod django_rusty_templates {
 
     /// Views of a template's nodes that are built on first use. Clones of a
     /// template share them; a template with different nodes needs fresh ones.
-    #[derive(Debug, Clone)]
-    struct TemplateCaches {
-        inspection_nodes: Gc<InspectionNodes>,
-        django_renderer: Gc<InspectionNodes>,
-        fallback_blocks: Gc<InspectionNodes>,
-        native_blocks: Gc<OnceLock<HashMap<String, Gc<Vec<TokenTree>>>>>,
-        native_partials: Gc<OnceLock<HashMap<String, PartialDefinition>>>,
-        partial_data: Gc<InspectionNodes>,
+    ///
+    /// They live in one GC container, not one each: every template pays for
+    /// the containers whether or not it ever fills them, and every clone of a
+    /// template takes a reference to each.
+    #[derive(Debug)]
+    struct NodeCaches {
+        inspection_nodes: InspectionNodes,
+        django_renderer: InspectionNodes,
+        fallback_blocks: InspectionNodes,
+        native_blocks: OnceLock<HashMap<String, Gc<Vec<TokenTree>>>>,
+        partial_data: InspectionNodes,
     }
 
-    impl Default for TemplateCaches {
-        fn default() -> Self {
+    impl NodeCaches {
+        fn new(partial_data: InspectionNodes) -> Self {
             Self {
-                inspection_nodes: Gc::new(InspectionNodes(GcOnceLock::new())),
-                django_renderer: Gc::new(InspectionNodes(GcOnceLock::new())),
-                fallback_blocks: Gc::new(InspectionNodes(GcOnceLock::new())),
-                native_blocks: Gc::new(OnceLock::new()),
-                native_partials: Gc::new(OnceLock::new()),
-                partial_data: Gc::new(InspectionNodes(GcOnceLock::new())),
+                inspection_nodes: InspectionNodes(GcOnceLock::new()),
+                django_renderer: InspectionNodes(GcOnceLock::new()),
+                fallback_blocks: InspectionNodes(GcOnceLock::new()),
+                native_blocks: OnceLock::new(),
+                partial_data,
             }
         }
     }
 
-    impl Trace for TemplateCaches {
+    impl Trace for NodeCaches {
         fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
             self.inspection_nodes.trace(visit)?;
             self.django_renderer.trace(visit)?;
             self.fallback_blocks.trace(visit)?;
             self.native_blocks.trace(visit)?;
-            self.native_partials.trace(visit)?;
             self.partial_data.trace(visit)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct TemplateCaches {
+        nodes: Gc<NodeCaches>,
+        /// Kept apart because a block's detached body shares its owner's
+        /// partial definitions but none of the other views.
+        native_partials: Gc<OnceLock<HashMap<String, PartialDefinition>>>,
+    }
+
+    impl TemplateCaches {
+        fn new(partial_data: InspectionNodes) -> Self {
+            Self {
+                nodes: Gc::new(NodeCaches::new(partial_data)),
+                native_partials: Gc::new(OnceLock::new()),
+            }
+        }
+    }
+
+    impl Default for TemplateCaches {
+        fn default() -> Self {
+            Self::new(InspectionNodes(GcOnceLock::new()))
+        }
+    }
+
+    impl std::ops::Deref for TemplateCaches {
+        type Target = NodeCaches;
+
+        fn deref(&self) -> &NodeCaches {
+            &self.nodes
+        }
+    }
+
+    impl Trace for TemplateCaches {
+        fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+            self.nodes.trace(visit)?;
+            self.native_partials.trace(visit)
         }
     }
 
@@ -1900,7 +1939,7 @@ pub mod django_rusty_templates {
                     ));
                 }
             };
-            let partial_data = Gc::new(InspectionNodes(GcOnceLock::new()));
+            let partial_data = InspectionNodes(GcOnceLock::new());
             if let Some(compiler) = &parser.compiler_parser {
                 partial_data.0.get_or_try_init(py, || {
                     compiler.bind(py).getattr("extra_data").map(Bound::unbind)
@@ -1913,10 +1952,7 @@ pub mod django_rusty_templates {
                 filename,
                 template_name,
                 loader_path: Vec::new(),
-                caches: TemplateCaches {
-                    partial_data,
-                    ..TemplateCaches::default()
-                },
+                caches: TemplateCaches::new(partial_data),
                 python_renderer,
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
                 has_python_callbacks,
@@ -2029,14 +2065,14 @@ pub mod django_rusty_templates {
         pub(crate) fn extends_parent(&self) -> bool {
             self.nodes
                 .iter()
-                .any(|node| matches!(node, TokenTree::Tag(Tag::Extends { .. })))
+                .any(|node| matches!(node.as_tag(), Some(Tag::Extends { .. })))
         }
 
         pub(crate) fn native_partials(&self) -> &HashMap<String, PartialDefinition> {
             self.caches.native_partials.get_or_init(|| {
                 fn collect(nodes: &[TokenTree], partials: &mut HashMap<String, PartialDefinition>) {
                     for node in nodes {
-                        if let TokenTree::Tag(Tag::PartialDef { definition, .. }) = node {
+                        if let Some(Tag::PartialDef { definition, .. }) = node.as_tag() {
                             partials.insert(definition.name.clone(), definition.clone());
                         }
                         for children in node.child_nodes() {
@@ -2054,7 +2090,7 @@ pub mod django_rusty_templates {
             self.caches.native_blocks.get_or_init(|| {
                 fn collect(nodes: &[TokenTree], blocks: &mut HashMap<String, Gc<Vec<TokenTree>>>) {
                     for node in nodes {
-                        if let TokenTree::Tag(Tag::Block { name, nodes }) = node {
+                        if let Some(Tag::Block { name, nodes }) = node.as_tag() {
                             blocks.insert(name.clone(), nodes.clone());
                         }
                         for children in node.child_nodes() {
@@ -2092,7 +2128,7 @@ pub mod django_rusty_templates {
 
         fn nodes_have_callbacks(nodes: &[TokenTree]) -> bool {
             nodes.iter().any(|node| {
-                matches!(node, TokenTree::Tag(Tag::PythonNode(_)))
+                matches!(node.as_tag(), Some(Tag::PythonNode(_)))
                     || node
                         .child_nodes()
                         .iter()
@@ -2103,10 +2139,8 @@ pub mod django_rusty_templates {
         fn nodes_have_inheritance(nodes: &[TokenTree]) -> bool {
             fn contains(nodes: &[TokenTree]) -> bool {
                 nodes.iter().any(|node| {
-                    matches!(
-                        node,
-                        TokenTree::Tag(Tag::Block { .. } | Tag::Extends { .. })
-                    ) || node.child_nodes().iter().any(|nodes| contains(nodes))
+                    matches!(node.as_tag(), Some(Tag::Block { .. } | Tag::Extends { .. }))
+                        || node.child_nodes().iter().any(|nodes| contains(nodes))
                 })
             }
             contains(nodes)
@@ -2124,7 +2158,7 @@ pub mod django_rusty_templates {
                         blocks: &Bound<'_, PyDict>,
                     ) -> PyResult<()> {
                         for node in nodes {
-                            if let TokenTree::Tag(Tag::Block { name, nodes }) = node {
+                            if let Some(Tag::Block { name, nodes }) = node.as_tag() {
                                 let body = owner.block_template(nodes.clone());
                                 let block = py
                                     .import("django_rusty_templates.inheritance")?
@@ -2477,7 +2511,7 @@ pub mod django_rusty_templates {
         fn _has_extends(&self) -> bool {
             self.nodes
                 .iter()
-                .any(|node| matches!(node, TokenTree::Tag(Tag::Extends { .. })))
+                .any(|node| matches!(node.as_tag(), Some(Tag::Extends { .. })))
         }
 
         #[getter]

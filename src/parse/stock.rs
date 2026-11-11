@@ -619,7 +619,7 @@ impl Parser<'_, '_> {
                 }
             }
         };
-        Ok(TokenTree::Tag(Tag::Stock {
+        Ok(TokenTree::tag(Tag::Stock {
             node: Box::new(node),
             at,
         }))
