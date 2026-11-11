@@ -1232,36 +1232,42 @@ impl For {
             list.reverse();
         }
         let mut join = super::JoinResults::default();
+        let scopes = context.scope_depth();
         context.push_for_loop(list.len());
-        for (index, values) in list.into_iter().enumerate() {
-            let values = match values {
-                Ok(values) => values,
-                Err(error) => {
-                    let error =
-                        error.annotate(py, self.iterable.at, "while iterating this", template);
-                    return Err(error.into());
-                }
-            };
-            context.push_variables(
-                &self.variables.names,
-                self.variables.at,
-                values,
-                self.iterable.at,
-                index,
-                template,
-            )?;
-            context.sync_loop_context(py, index == 0)?;
-            for (body_index, node) in self.body.iter().enumerate() {
-                join.collect(
-                    index * self.body.len() + body_index,
-                    node.render_into(py, template, context, rendered),
+        let result = (|| {
+            for (index, values) in list.into_iter().enumerate() {
+                let values = match values {
+                    Ok(values) => values,
+                    Err(error) => {
+                        let error =
+                            error.annotate(py, self.iterable.at, "while iterating this", template);
+                        return Err(error.into());
+                    }
+                };
+                context.push_variables(
+                    &self.variables.names,
+                    self.variables.at,
+                    values,
+                    self.iterable.at,
+                    index,
+                    template,
                 )?;
+                context.sync_loop_context(py, index == 0)?;
+                for (body_index, node) in self.body.iter().enumerate() {
+                    join.collect(
+                        index * self.body.len() + body_index,
+                        node.render_into(py, template, context, rendered),
+                    )?;
+                }
+                context.increment_for_loop();
             }
-            context.increment_for_loop();
-        }
-        context.pop_variables();
+            Ok(())
+        })();
+        // Leave the loop's scope on errors too: a caller that catches the
+        // error may keep rendering with this context, as Django's does.
+        context.pop_variables_to(scopes);
         context.pop_for_loop();
-        join.finish(py)
+        result.and_then(|()| join.finish(py))
     }
 
     fn render_string_into(
@@ -1293,22 +1299,26 @@ impl For {
         let variable = &self.variables.names[0];
         let mut join = super::JoinResults::default();
         let mut utf8 = [0; 4];
+        let scopes = context.scope_depth();
         context.push_for_loop(length);
-        for (index, c) in chars.enumerate() {
-            let c = PyString::new(py, c.encode_utf8(&mut utf8));
-            context.push_variable(variable.clone(), c.into_any(), index);
-            context.sync_loop_context(py, index == 0)?;
-            for (body_index, node) in self.body.iter().enumerate() {
-                join.collect(
-                    index * self.body.len() + body_index,
-                    node.render_into(py, template, context, rendered),
-                )?;
+        let result = (|| {
+            for (index, c) in chars.enumerate() {
+                let c = PyString::new(py, c.encode_utf8(&mut utf8));
+                context.push_variable(variable.clone(), c.into_any(), index);
+                context.sync_loop_context(py, index == 0)?;
+                for (body_index, node) in self.body.iter().enumerate() {
+                    join.collect(
+                        index * self.body.len() + body_index,
+                        node.render_into(py, template, context, rendered),
+                    )?;
+                }
+                context.increment_for_loop();
             }
-            context.increment_for_loop();
-        }
-        context.pop_variables();
+            Ok(())
+        })();
+        context.pop_variables_to(scopes);
         context.pop_for_loop();
-        join.finish(py)
+        result.and_then(|()| join.finish(py))
     }
 }
 
