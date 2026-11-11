@@ -45,7 +45,7 @@ pub mod django_rusty_templates {
 
     static IMPORT_STRING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
-    static MARK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    static SAFE_STRING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
     /// Experimental JSON-only runtime sharing its parser/renderer with browser Wasm.
     #[pyclass]
@@ -2697,8 +2697,10 @@ pub mod django_rusty_templates {
             request: Option<Bound<'py, PyAny>>,
         ) -> PyResult<Bound<'py, PyAny>> {
             let rendered = self.py_render(py, context, request)?;
-            MARK_SAFE
-                .import(py, "django.utils.safestring", "mark_safe")?
+            // `mark_safe` of a plain `str` is `SafeString(str)`. Building it
+            // directly skips a Python-level call on every render.
+            SAFE_STRING
+                .import(py, "django.utils.safestring", "SafeString")?
                 .call1((rendered,))
         }
     }
@@ -2906,8 +2908,10 @@ pub mod django_rusty_templates {
                     base_context.extend(processor_values);
                     // A dict is read lazily, so names the template never uses
                     // cost nothing. Like Django, other key types are ignored.
+                    // Django reads the caller's dict live as well, so no copy
+                    // is taken: one would cost time in proportion to its size.
                     if let Ok(dict) = context.cast::<PyDict>() {
-                        source = Some(dict.copy()?);
+                        source = Some(dict.clone());
                     } else {
                         base_context.extend(context.extract::<HashMap<String, Py<PyAny>>>()?);
                     }

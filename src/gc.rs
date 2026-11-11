@@ -204,7 +204,7 @@ impl<T: Trace> Trace for Box<T> {
     }
 }
 
-impl<K, T: Trace> Trace for HashMap<K, T> {
+impl<K, T: Trace, S> Trace for HashMap<K, T, S> {
     fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.values().try_for_each(|value| value.trace(visit))
     }
