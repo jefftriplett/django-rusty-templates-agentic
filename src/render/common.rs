@@ -1,10 +1,12 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 
 use pyo3::exceptions::{PyAttributeError, PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyFunction, PyString, PyType};
+use rustc_hash::FxHashMap;
 
 use dtl_lexer::types::TemplateString;
 
@@ -116,20 +118,62 @@ fn resolve_callable<'py>(
     }
 }
 
+/// Most names a thread can keep. Templates repeat a small set of names,
+/// so this is only reached by a process generating templates without end.
+const MAX_PART_NAMES: usize = 1 << 16;
+
+thread_local! {
+    /// Python's interned string for each name looked up on this thread.
+    static PART_NAMES: RefCell<FxHashMap<Box<str>, Py<PyString>>> = RefCell::default();
+}
+
+/// The interned Python string for a variable name or lookup part.
+///
+/// Building a `str` per lookup costs an allocation and a hash each time.
+/// An interned one keeps its hash, and attribute lookups only use the type's
+/// method cache for interned names.
+pub(crate) fn interned_name<'py>(py: Python<'py>, part: &str) -> Bound<'py, PyString> {
+    PART_NAMES.with_borrow_mut(|names| {
+        if let Some(name) = names.get(part) {
+            return name.bind(py).clone();
+        }
+        let name = PyString::intern(py, part);
+        if names.len() < MAX_PART_NAMES {
+            names.insert(part.into(), name.clone().unbind());
+        }
+        name
+    })
+}
+
+/// Whether `variable[key]` can work at all: its type has a mapping or a
+/// sequence item slot, which is where Python stores `__getitem__`.
+fn is_subscriptable(variable: &Bound<'_, PyAny>) -> bool {
+    // SAFETY: `variable` is a valid object and the GIL is held.
+    let mapping = unsafe { pyo3::ffi::PyMapping_Check(variable.as_ptr()) };
+    if mapping != 0 {
+        return true;
+    }
+    // SAFETY: as above.
+    let sequence = unsafe { pyo3::ffi::PySequence_Check(variable.as_ptr()) };
+    sequence != 0
+}
+
 fn lookup_part<'py>(
     variable: Bound<'py, PyAny>,
     part: &str,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
     let py = variable.py();
+    let name = interned_name(py, part);
+    let name = &name;
     // Exact dictionaries need no generic mapping dispatch or KeyError on a
     // miss. Missing keys must still fall through to attributes and integer keys.
     let exact_dict = variable.cast_exact::<PyDict>().ok();
     if let Some(dict) = &exact_dict {
-        if let Some(value) = dict.get_item(part)? {
+        if let Some(value) = dict.get_item(name)? {
             return Ok(Some(value));
         }
-    } else if variable.get_type().hasattr("__getitem__")? {
-        match variable.get_item(part) {
+    } else if is_subscriptable(&variable) {
+        match variable.get_item(name) {
             Ok(value) => return Ok(Some(value)),
             Err(error)
                 if error.is_instance_of::<PyTypeError>(py)
@@ -146,8 +190,8 @@ fn lookup_part<'py>(
         let base_context = BASE_CONTEXT.import(py, "django.template.context", "BaseContext")?;
         variable.is_instance(base_context)?
     };
-    if !is_context || !variable.get_type().hasattr(part)? {
-        match variable.getattr(part) {
+    if !is_context || !variable.get_type().hasattr(name)? {
+        match variable.getattr(name) {
             Ok(value) => return Ok(Some(value)),
             Err(error)
                 if error.is_instance_of::<PyTypeError>(py)
@@ -160,7 +204,7 @@ fn lookup_part<'py>(
                     && DIR
                         .import(py, "builtins", "dir")?
                         .call1((&variable,))?
-                        .contains(part)?
+                        .contains(name)?
                 {
                     return Err(error);
                 }

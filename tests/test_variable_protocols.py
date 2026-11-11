@@ -92,3 +92,81 @@ def test_dictionary_lookup_fast_path_preserves_protocols(
     assert_render, source, value, expected
 ):
     assert_render(source, {"value": value}, expected)
+
+
+class LateGetItem:
+    name = "attribute"
+
+
+class DisabledGetItem:
+    __getitem__ = None
+    name = "attribute"
+
+
+class ClassGetItemOnly:
+    name = "attribute"
+
+    def __class_getitem__(cls, key):
+        raise AssertionError("must not subscript the class")
+
+
+class GetAttrGetItem:
+    """`__getattr__` answers for `__getitem__`, which subscripting ignores."""
+
+    def __getattr__(self, name):
+        if name == "__getitem__":
+            return lambda key: "from getattr"
+        return "attribute"
+
+
+class Slots:
+    __slots__ = ("name",)
+
+    def __init__(self):
+        self.name = "slot"
+
+
+def late_get_item():
+    class Late(LateGetItem):
+        pass
+
+    value = Late()
+    Late.__getitem__ = lambda self, key: f"item {key}"
+    return value
+
+
+@pytest.mark.parametrize(
+    ("source", "build", "expected"),
+    [
+        ("{{ value.name }}", late_get_item, "item name"),
+        ("{{ value.name }}", DisabledGetItem, "attribute"),
+        ("{{ value.name }}", ClassGetItemOnly, "attribute"),
+        ("{{ value.name }}", GetAttrGetItem, "attribute"),
+        ("{{ value.name }}", Slots, "slot"),
+        ("{{ value.real }}{{ value.imag }}", lambda: 3, "30"),
+        ("{{ value.0 }}{{ value.stop }}", lambda: range(4, 9), "49"),
+        ("{{ value.1 }}", lambda: "abc", "b"),
+        ("{{ value.1 }}", lambda: b"abc", "98"),
+        ("{{ value.x }}{{ value.name }}", lambda: {"x": 1, "name": "key"}, "1key"),
+        ("{{ value.x.x.x }}", lambda: {"x": {"x": {"x": "deep"}}}, "deep"),
+    ],
+)
+def test_subscript_and_attribute_lookup_by_type(assert_render, source, build, expected):
+    """Subscripting is tried only when the type supports it (#379)."""
+    assert_render(source, {"value": build()}, expected)
+
+
+def test_lookups_from_several_threads():
+    """Each thread keeps its own table of interned names (#379)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from django.template import engines
+
+    template = engines["rusty"].from_string(
+        "{% for o in rows %}{{ o.name }}{{ o.other.name }}{% endfor %}"
+    )
+    rows = [{"name": i, "other": Slots()} for i in range(20)]
+    expected = "".join(f"{i}slot" for i in range(20))
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: template.render({"rows": rows}), range(40)))
+    assert results == [expected] * 40

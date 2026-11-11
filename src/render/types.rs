@@ -20,6 +20,7 @@ use pyo3::sync::{MutexExt, PyOnceLock};
 use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyType};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
+use super::common::interned_name;
 use super::dateformat::localize_datetime;
 use super::filters::FileSizeStrings;
 use super::filters::FloatNumberFormats;
@@ -645,7 +646,8 @@ impl Context {
         {
             return values.last().map(|value| value.bind(py).clone());
         }
-        self.source.as_ref()?.bind(py).get_item(key).ok().flatten()
+        let source = self.source.as_ref()?.bind(py);
+        source.get_item(interned_name(py, key)).ok().flatten()
     }
 
     pub fn resolve_root<'py>(
