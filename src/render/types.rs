@@ -1,13 +1,13 @@
 use crate::gc::{Gc, GcOnceLock, Trace};
 use pyo3::{PyTraverseError, PyVisit};
 use std::borrow::Cow;
-use std::cell::{OnceCell, RefCell};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::iter::zip;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use html_escape::{encode_quoted_attribute, encode_quoted_attribute_to_string};
 use miette::SourceSpan;
@@ -184,8 +184,10 @@ pub struct Context {
     pub formatting_context: Option<Py<PyAny>>,
     // Number formats of the active language, read on the first localized
     // number. `{% language %}` replaces it for its body. It holds only Rust
-    // strings, so `Trace` has nothing to visit.
-    pub(crate) number_format: OnceCell<Option<NumberFormat>>,
+    // strings, so `Trace` has nothing to visit. Child scopes share the cell,
+    // so a number printed in a `{% with %}` body fills it for the parent and
+    // later scopes rather than reading the formats again in each scope.
+    pub(crate) number_format: Arc<OnceLock<Option<NumberFormat>>>,
     // Weak reference to an input Context, used only while calling Python code.
     pub callback_input: Option<Gc<Py<PyAny>>>,
     pub inheritance_blocks: HashMap<String, Vec<BlockEntry>>,
@@ -310,7 +312,7 @@ impl Context {
             format_values: false,
             instrument_render: true,
             formatting_context: None,
-            number_format: OnceCell::new(),
+            number_format: Arc::default(),
             callback_input: None,
             inheritance_blocks: HashMap::new(),
             python_blocks: None,
@@ -377,7 +379,7 @@ impl Context {
             format_values: self.format_values,
             instrument_render: self.instrument_render,
             formatting_context: self.formatting_context.as_ref().map(|v| v.clone_ref(py)),
-            number_format: self.number_format.clone(),
+            number_format: Arc::clone(&self.number_format),
             callback_input: self.callback_input.clone(),
             inheritance_blocks: self.inheritance_blocks.clone(),
             python_blocks: self.python_blocks.as_ref().map(|v| v.clone_ref(py)),

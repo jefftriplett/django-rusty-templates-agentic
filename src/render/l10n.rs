@@ -2,19 +2,37 @@
 //!
 //! Django reads `USE_THOUSAND_SEPARATOR` and the active language's separators
 //! for every number it renders. They only change between renders or inside
-//! `{% language %}`, so a render reads them once, on its first number.
+//! `{% language %}`, so a render reads them once, on its first number, and
+//! that read is served from a cache shared by all renders.
 
 use html_escape::encode_quoted_attribute;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
-use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString, PyTuple, PyType};
+use std::sync::Mutex;
 
+use pyo3::intern;
+use pyo3::prelude::*;
+use pyo3::sync::{MutexExt, PyOnceLock};
+use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple, PyType};
+
+use super::language_cache::get_language;
 use super::types::Context;
 
 static GET_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static FORMATS: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+
+/// Languages whose number formats are kept at once.
+const CACHED_LANGUAGES: usize = 16;
+
+/// Number formats read in earlier renders, valid while Django's
+/// `formats._format_cache` is the same dict.
+struct CachedFormats {
+    django_cache: Py<PyAny>,
+    entries: Vec<(String, bool, Option<NumberFormat>)>,
+}
+
+static NUMBER_FORMATS: Mutex<Option<CachedFormats>> = Mutex::new(None);
 
 /// How Django groups the digits of a number's integer part.
 #[derive(Clone, Debug)]
@@ -46,14 +64,64 @@ pub struct NumberFormat {
 }
 
 impl NumberFormat {
-    /// Read the active language's formats. `None` when a value has a type the
-    /// native formatter does not reproduce, such as a lazy string: Django then
-    /// formats every number of the render.
+    /// The active language's formats, from the cache of earlier renders when
+    /// Django's own format cache would answer too. `None` when a value has a
+    /// type the native formatter does not reproduce, such as a lazy string:
+    /// Django then formats every number of the render.
     pub fn load(py: Python<'_>) -> PyResult<Option<Self>> {
         let use_thousand_separator = SETTINGS
             .import(py, "django.conf", "settings")?
-            .getattr("USE_THOUSAND_SEPARATOR")?
+            .getattr(intern!(py, "USE_THOUSAND_SEPARATOR"))?
             .is_truthy()?;
+        let language = get_language(py)?;
+        let Ok(language) = language.cast_exact::<PyString>() else {
+            return Self::read(py, use_thousand_separator);
+        };
+        let language = language.to_str()?;
+        // Django keys its own cache by format name and language, and replaces
+        // the dict when a format setting changes (`reset_format_cache`, which
+        // `override_settings` calls). Entries made against an older dict are
+        // dropped, so this cache is never staler than Django's.
+        let django_cache = FORMATS
+            .get_or_try_init(py, || py.import("django.utils.formats").map(Bound::unbind))?
+            .bind(py)
+            .getattr(intern!(py, "_format_cache"))?;
+        {
+            let cached = NUMBER_FORMATS
+                .lock_py_attached(py)
+                .expect("number format cache lock is not poisoned");
+            if let Some(cached) = cached.as_ref()
+                && cached.django_cache.bind(py).is(&django_cache)
+                && let Some((.., format)) = cached.entries.iter().find(|(name, thousands, _)| {
+                    name == language && *thousands == use_thousand_separator
+                })
+            {
+                return Ok(format.clone());
+            }
+        }
+        let format = Self::read(py, use_thousand_separator)?;
+        let mut guard = NUMBER_FORMATS
+            .lock_py_attached(py)
+            .expect("number format cache lock is not poisoned");
+        let cached = match guard.as_mut() {
+            Some(cached) if cached.django_cache.bind(py).is(&django_cache) => cached,
+            _ => guard.insert(CachedFormats {
+                django_cache: django_cache.unbind(),
+                entries: Vec::new(),
+            }),
+        };
+        if cached.entries.len() >= CACHED_LANGUAGES {
+            cached.entries.remove(0);
+        }
+        cached
+            .entries
+            .push((language.to_owned(), use_thousand_separator, format.clone()));
+        drop(guard);
+        Ok(format)
+    }
+
+    /// Read the active language's formats from Django.
+    fn read(py: Python<'_>, use_thousand_separator: bool) -> PyResult<Option<Self>> {
         let get_format = GET_FORMAT.import(py, "django.utils.formats", "get_format")?;
         let get_format = |name| get_format.call1((name, py.None(), true));
         let decimal_separator = get_format("DECIMAL_SEPARATOR")?;
@@ -260,4 +328,77 @@ pub fn localize_number(
         }
         Number::Int | Number::Float | Number::Decimal => Ok(Some(format.format(&number))),
     }
+}
+
+/// Date format strings read in earlier renders, under the same rule as
+/// [`NumberFormat::load`]: valid for one language while Django's
+/// `formats._format_cache` is the same dict.
+struct CachedDateFormats {
+    django_cache: Py<PyAny>,
+    entries: Vec<(String, String, Option<String>)>,
+}
+
+static DATE_FORMATS: Mutex<Option<CachedDateFormats>> = Mutex::new(None);
+
+/// Most date format strings kept, across languages and format names.
+const CACHED_DATE_FORMATS: usize = 64;
+
+/// `get_format(name)` as a native string, or `None` when Django returns
+/// something else, such as a lazy translation.
+pub fn date_format(py: Python<'_>, name: &str) -> PyResult<Option<String>> {
+    let read = || -> PyResult<Option<String>> {
+        let format = GET_FORMAT
+            .import(py, "django.utils.formats", "get_format")?
+            .call1((name,))?;
+        Ok(match format.cast_exact::<PyString>() {
+            Ok(format) => Some(format.to_cow()?.into_owned()),
+            Err(_) => None,
+        })
+    };
+    let language = get_language(py)?;
+    let Ok(language) = language.cast_exact::<PyString>() else {
+        return read();
+    };
+    let language = language.to_str()?;
+    let django_cache = FORMATS
+        .get_or_try_init(py, || py.import("django.utils.formats").map(Bound::unbind))?
+        .bind(py)
+        .getattr(intern!(py, "_format_cache"))?;
+    let lock = || {
+        DATE_FORMATS
+            .lock_py_attached(py)
+            .expect("date format cache lock is not poisoned")
+    };
+    {
+        let cached = lock();
+        if let Some(cached) = cached.as_ref()
+            && cached.django_cache.bind(py).is(&django_cache)
+            && let Some((.., format)) =
+                cached
+                    .entries
+                    .iter()
+                    .find(|(cached_language, cached_name, _)| {
+                        cached_language == language && cached_name == name
+                    })
+        {
+            return Ok(format.clone());
+        }
+    }
+    let format = read()?;
+    let mut guard = lock();
+    let cached = match guard.as_mut() {
+        Some(cached) if cached.django_cache.bind(py).is(&django_cache) => cached,
+        _ => guard.insert(CachedDateFormats {
+            django_cache: django_cache.unbind(),
+            entries: Vec::new(),
+        }),
+    };
+    if cached.entries.len() >= CACHED_DATE_FORMATS {
+        cached.entries.remove(0);
+    }
+    cached
+        .entries
+        .push((language.to_owned(), name.to_owned(), format.clone()));
+    drop(guard);
+    Ok(format)
 }

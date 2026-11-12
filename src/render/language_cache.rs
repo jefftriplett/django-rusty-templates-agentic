@@ -123,6 +123,16 @@ fn catalog(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     }
 }
 
+/// The catalog `gettext` would use now, or `None` with `USE_I18N` off, when
+/// Django's null translation is in use.
+pub fn active_catalog(py: Python<'_>) -> PyResult<Option<Bound<'_, PyAny>>> {
+    let settings = SETTINGS.import(py, "django.conf", "settings")?;
+    if !settings.getattr(intern!(py, "USE_I18N"))?.is_truthy()? {
+        return Ok(None);
+    }
+    catalog(py).map(Some)
+}
+
 /// Catalogs a node keeps at once, enough for a site's interleaved languages.
 const CATALOG_CAPACITY: usize = 8;
 
