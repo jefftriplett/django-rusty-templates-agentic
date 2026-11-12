@@ -14,6 +14,24 @@ Close a `{% for %}` loop's scope when it raises, so a tag that catches the error
 
 Compiled templates take less memory: a `{{ v }}` node drops from about 235 bytes to 66, and an empty template from 1.5 KB to 0.7 KB. ([#386](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/386))
 
+Reuse one handle per compiled template instead of building a new one on every render, and recognise Django contexts by type: printing a variable or plain text is 20–30% faster. ([#389](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/389))
+
+Cache number and date formats across renders while still following `override_settings`, the active language and `USE_THOUSAND_SEPARATOR`: printing a number drops from 4.5 µs to 1 µs, so a template printing one number is no longer slower than Django. ([#390](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/390))
+
+Stop copying the block table into every `{% block %}` and `{% with %}`, which made templates with many blocks quadratic: 80 overridden blocks render in 64 µs instead of 601 µs. ([#392](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/392))
+
+Read a plain Django `Context` passed to `render` lazily instead of flattening it, and let callables see it directly: these renders are 2–11× faster and now faster than Django. ([#393](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/393))
+
+Handle list and tuple indexes, missing attributes, printing objects and `None`, `escape`, `simple_tag` results, string `add`, `widthratio` and `spaceless` natively, 1.5–5× faster than before. `{{ " 1"|add:"2" }}` now gives `3` and `{{ obj|escape }}` escapes `str(obj)`, as in Django. ([#394](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/394))
+
+A template with a custom compiled tag reads and writes Django's `Context` natively, so it renders about 4× faster than Django instead of 1.4×; `forloop` keys now come in Django's order. ([#395](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/395))
+
+Fix a hang when a value's `__del__` writes to the context it is being replaced in, and stop holding locks while `block.super` renders or a cached value is built. ([#396](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/396))
+
+Give filters Django's value for a missing variable (`""`, or `None` in `{% if %}`), so `{{ missing|add:text }}` or `{{ missing|length }}` render what Django renders; `cut` and `yesno` raise Django's exception types, and Django 5.2 rejects `{{ 1e-7 }}` as Django does. ([#397](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/397))
+
+A template that a tag renders with its context no longer sees the outer template's block overrides, so its own `{% extends %}` and blocks work as in Django. ([#398](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/398))
+
 ## 2026.11.3
 
 Compile Django admin's inclusion tags, `get_admin_log` and `get_flatpages` natively, so all of Django's contrib templates, including the admin change form, change list and index, compile natively. ([#318](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/318))
