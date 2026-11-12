@@ -90,8 +90,10 @@ def test_callback_exception_retains_original_and_restores_stack(debug):
         ).render(context)
     assert caught.value is original
     assert len(context.dicts) == depth
-    assert context["value"] == "changed"
-    assert context["added"] is added
+    # The failed loop closes its scope, as Django's does, so changes the
+    # callback made inside the loop go with it (#382).
+    assert context["value"] == "parent"
+    assert "added" not in context
 
 
 @pytest.mark.parametrize("debug", [False, True])

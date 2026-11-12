@@ -802,10 +802,6 @@ impl Context {
         template: TemplateString<'_>,
     ) -> Result<(), PyRenderError> {
         let replace = index != 0;
-        if !replace {
-            let names_set = names.iter().cloned().collect();
-            self.names.push(names_set);
-        }
         if names.len() == 1 {
             self._insert(&names[0], values, replace);
         } else {
@@ -846,6 +842,11 @@ impl Context {
                 .into());
             }
         }
+        // Open the scope only once its names are bound, so a failed first
+        // unpacking leaves nothing for the loop's cleanup to pop.
+        if !replace {
+            self.names.push(names.iter().cloned().collect());
+        }
         Ok(())
     }
 
@@ -873,6 +874,19 @@ impl Context {
             for name in names {
                 self.pop_variable(&name);
             }
+        }
+    }
+
+    /// How many variable scopes are open, for `pop_variables_to`.
+    pub fn scope_depth(&self) -> usize {
+        self.names.len()
+    }
+
+    /// Close every scope opened since `scope_depth` returned `depth`. A tag
+    /// that fails part-way may have opened its scope or not.
+    pub fn pop_variables_to(&mut self, depth: usize) {
+        while self.names.len() > depth {
+            self.pop_variables();
         }
     }
 

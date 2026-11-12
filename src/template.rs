@@ -1997,17 +1997,22 @@ pub mod django_rusty_templates {
                             .getattr("begin_render")?
                             .call1((live.bind(py), Py::new(py, self.clone())?))
                     })
-                    .transpose()?
+                    .transpose()
             } else {
-                None
+                Ok(None)
             };
-            let result = render(context);
-            if let Some(scope) = callback_scope {
-                let cleanup = scope.call_method0("close");
-                if result.is_ok() {
-                    cleanup?;
+            // A failure to open or close the callback scope is reported only
+            // after the state taken above is back in place.
+            let result = match callback_scope {
+                Ok(scope) => {
+                    let result = render(context);
+                    match scope.map(|scope| scope.call_method0("close")) {
+                        Some(Err(error)) if result.is_ok() => Err(error.into()),
+                        _ => result,
+                    }
                 }
-            }
+                Err(error) => Err(error.into()),
+            };
             context.inheritance_blocks = previous_blocks;
             context.inheritance_history = previous_history;
             context.root_template = previous_root;
