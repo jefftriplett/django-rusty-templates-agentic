@@ -1874,6 +1874,7 @@ pub struct Parser<'t, 'py> {
     pub compiler_parser: Option<Py<PyAny>>,
     compiler_loads: Vec<At>,
     registered_compilers: Option<HashMap<String, Bound<'py, PyAny>>>,
+    mixed_compilers: Option<bool>,
 }
 
 impl<'t, 'py> Parser<'t, 'py> {
@@ -1909,6 +1910,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             compiler_parser: None,
             compiler_loads: Vec::new(),
             registered_compilers: None,
+            mixed_compilers: None,
         }
     }
 
@@ -1945,6 +1947,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             compiler_parser: None,
             compiler_loads: Vec::new(),
             registered_compilers: None,
+            mixed_compilers: None,
         }
     }
 
@@ -3360,12 +3363,19 @@ impl<'t, 'py> Parser<'t, 'py> {
         Ok(TokenTree::tag(Tag::Load))
     }
 
-    fn register_opaque(
-        &mut self,
-        name: &str,
-        compiler: &Bound<'py, PyAny>,
-    ) -> Result<(), PyParseError> {
-        let mixed_compilers = self
+    /// Whether a library tag used in this template needs Django's full
+    /// parser. Every opaque tag asks the same question, so the answer is
+    /// computed once, from one lex of the template.
+    fn mixed_compilers(&mut self) -> bool {
+        if let Some(mixed) = self.mixed_compilers {
+            return mixed;
+        }
+        let template = self.template;
+        let tag_names: HashSet<&str> = Lexer::new(template)
+            .filter(|token| token.token_type == TokenType::Tag)
+            .filter_map(|token| token.content(template).split_whitespace().next())
+            .collect();
+        let mixed = self
             .engine
             .libraries
             .values()
@@ -3375,6 +3385,9 @@ impl<'t, 'py> Parser<'t, 'py> {
                     return true;
                 };
                 tags.iter().any(|(name, candidate)| {
+                    if !tag_names.contains(name.as_str()) {
+                        return false;
+                    }
                     if stock::compiler(self.py, candidate).is_ok_and(|kind| kind.is_some())
                         || stock::admin_inclusion(self.py, candidate)
                             .is_ok_and(|kind| kind.is_some())
@@ -3414,21 +3427,25 @@ impl<'t, 'py> Parser<'t, 'py> {
                             || !candidate
                                 .getattr("rusty_isolated_compiler")
                                 .is_ok_and(|value| value.is_truthy().unwrap_or(false)))
-                        && Lexer::new(self.template).any(|token| {
-                            token.token_type == TokenType::Tag
-                                && token.content(self.template).split_whitespace().next()
-                                    == Some(name.as_str())
-                        })
                 })
             });
+        self.mixed_compilers = Some(mixed);
+        mixed
+    }
+
+    fn register_opaque(
+        &mut self,
+        name: &str,
+        compiler: &Bound<'py, PyAny>,
+    ) -> Result<(), PyParseError> {
         if self.inspect_only
-            || mixed_compilers
             || !compiler
                 .getattr("rusty_isolated_compiler")
                 .is_ok_and(|value| value.is_truthy().unwrap_or(false))
             || compiler
                 .getattr("rusty_requires_full_parser")
                 .is_ok_and(|value| value.is_truthy().unwrap_or(true))
+            || self.mixed_compilers()
         {
             if self.compiler_parser.is_some() {
                 let error = crate::template::django_rusty_templates::TemplateSyntaxError::new_err(

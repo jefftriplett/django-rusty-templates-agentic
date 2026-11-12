@@ -1,7 +1,7 @@
 use crate::gc::{Gc, GcOnceLock, Trace};
 use pyo3::{PyTraverseError, PyVisit};
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -208,6 +208,7 @@ pub struct Context {
     pub format_values: bool,
     pub instrument_render: bool,
     pub formatting_context: Option<Py<PyAny>>,
+    live_methods: Cell<Option<super::live::Methods>>,
     // Number formats of the active language, read on the first localized
     // number. `{% language %}` replaces it for its body. It holds only Rust
     // strings, so `Trace` has nothing to visit. Child scopes share the cell,
@@ -338,6 +339,7 @@ impl Context {
             format_values: false,
             instrument_render: true,
             formatting_context: None,
+            live_methods: Cell::new(None),
             number_format: Arc::default(),
             callback_input: None,
             inheritance_blocks: HashMap::new(),
@@ -427,6 +429,7 @@ impl Context {
             format_values: self.format_values,
             instrument_render: self.instrument_render,
             formatting_context: self.formatting_context.as_ref().map(|v| v.clone_ref(py)),
+            live_methods: self.live_methods.clone(),
             number_format: Arc::clone(&self.number_format),
             callback_input: self.callback_input.clone(),
             inheritance_blocks: self.inheritance_blocks.clone(),
@@ -724,11 +727,9 @@ impl Context {
         key: &str,
     ) -> PyResult<Option<Bound<'py, PyAny>>> {
         if let Some(context) = &self.formatting_context {
-            return match context.bind(py).get_item(key) {
-                Ok(value) => Ok(Some(value)),
-                Err(error) if error.is_instance_of::<PyKeyError>(py) => Ok(None),
-                Err(error) => Err(error),
-            };
+            let context = context.bind(py);
+            let methods = super::live::Methods::cached(&self.live_methods, context)?;
+            return super::live::get(context, methods, &interned_name(py, key));
         }
         if key == "forloop" && !self.loops.is_empty() {
             return self.loop_dictionary(py, 0).map(Some);
@@ -751,10 +752,7 @@ impl Context {
 
     pub fn refresh_formatting_flags(&mut self, py: Python<'_>) -> PyResult<()> {
         if let Some(context) = &self.formatting_context {
-            let context = context.bind(py);
-            self.autoescape = context.getattr("autoescape")?.extract()?;
-            self.use_l10n = context.getattr("use_l10n")?.extract()?;
-            self.use_tz = context.getattr("use_tz")?.extract()?;
+            (self.autoescape, self.use_l10n, self.use_tz) = super::live::flags(context.bind(py))?;
         }
         Ok(())
     }
@@ -998,13 +996,14 @@ impl Context {
             .is_some_and(|loop_| loop_.dictionary.get().is_some())
     }
 
-    fn fill_loop_dictionary(loop_: &ForLoop, dict: &Bound<'_, PyDict>) -> PyResult<()> {
-        dict.set_item("counter", loop_.counter())?;
-        dict.set_item("counter0", loop_.counter0())?;
-        dict.set_item("revcounter", loop_.rev_counter())?;
-        dict.set_item("revcounter0", loop_.rev_counter0())?;
-        dict.set_item("first", loop_.first())?;
-        dict.set_item("last", loop_.last())?;
+    fn fill_loop_dictionary(loop_: &ForLoop, dict: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = dict.py();
+        dict.set_item(intern!(py, "counter0"), loop_.counter0())?;
+        dict.set_item(intern!(py, "counter"), loop_.counter())?;
+        dict.set_item(intern!(py, "revcounter"), loop_.rev_counter())?;
+        dict.set_item(intern!(py, "revcounter0"), loop_.rev_counter0())?;
+        dict.set_item(intern!(py, "first"), loop_.first())?;
+        dict.set_item(intern!(py, "last"), loop_.last())?;
         Ok(())
     }
 
@@ -1022,11 +1021,12 @@ impl Context {
             .dictionary
             .get_or_try_init(py, || {
                 let dict = PyDict::new(py);
+                // Django's key order: parentloop, length (6.0+), then counters.
                 dict.set_item("parentloop", self.loop_dictionary(py, depth + 1)?)?;
-                Self::fill_loop_dictionary(loop_, &dict)?;
                 if self.django_series(py)? >= (6, 0) {
                     dict.set_item("length", loop_.length())?;
                 }
+                Self::fill_loop_dictionary(loop_, dict.as_any())?;
                 Ok(dict.unbind())
             })
             .map(|dict| dict.bind(py).clone().into_any())
@@ -1042,40 +1042,38 @@ impl Context {
             if let Some(loop_) = self.loops.last()
                 && let Some(dict) = loop_.dictionary.get()
             {
-                Self::fill_loop_dictionary(loop_, dict.bind(py))?;
+                Self::fill_loop_dictionary(loop_, dict.bind(py).as_any())?;
             }
             return Ok(());
         };
         let context = context.bind(py);
+        let methods = super::live::Methods::cached(&self.live_methods, context)?;
         if let Some(names) = self.names.last() {
             for key in names {
                 if let Some(value) = self.get(py, key) {
-                    context.set_item(key, value)?;
+                    super::live::set(context, methods, &interned_name(py, key), &value)?;
                 }
             }
         }
+        let forloop = intern!(py, "forloop");
+        let for_loop = self.loops.last().expect("inside native loop");
         let dict = if first {
-            let parent = context
-                .get_item("forloop")
-                .unwrap_or_else(|_| PyDict::new(py).into_any());
+            let parent = super::live::get(context, methods, forloop)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| PyDict::new(py).into_any());
             let dict = PyDict::new(py);
             dict.set_item("parentloop", parent)?;
-            context.set_item("forloop", &dict)?;
+            if self.django_series(py)? >= (6, 0) {
+                dict.set_item("length", for_loop.length())?;
+            }
+            super::live::set(context, methods, forloop, &dict)?;
             dict.into_any()
         } else {
-            context.get_item("forloop")?
+            super::live::get(context, methods, forloop)?
+                .ok_or_else(|| PyKeyError::new_err("forloop"))?
         };
-        let for_loop = self.loops.last().expect("inside native loop");
-        dict.set_item("counter", for_loop.counter())?;
-        dict.set_item("counter0", for_loop.counter0())?;
-        dict.set_item("revcounter", for_loop.rev_counter())?;
-        dict.set_item("revcounter0", for_loop.rev_counter0())?;
-        dict.set_item("first", for_loop.first())?;
-        dict.set_item("last", for_loop.last())?;
-        if first && self.django_series(py)? >= (6, 0) {
-            dict.set_item("length", for_loop.length())?;
-        }
-        Ok(())
+        Self::fill_loop_dictionary(for_loop, &dict)
     }
 
     #[expect(
@@ -1599,7 +1597,6 @@ impl<'t, 'py> Content<'t, 'py> {
                     return append_python_string(&content, autoescape, output);
                 }
                 if context.format_values
-                    && context.formatting_context.is_none()
                     && let Some(number) = localize_number(&content, context.use_l10n, context)?
                 {
                     if context.autoescape {
@@ -1611,7 +1608,6 @@ impl<'t, 'py> Content<'t, 'py> {
                 }
                 // Inside `{% localize %}` the `use_l10n` override goes to Django.
                 if context.format_values
-                    && context.formatting_context.is_none()
                     && context.use_l10n.is_none()
                     && let Some(formatted) = localize_datetime(
                         &content,
@@ -1626,9 +1622,12 @@ impl<'t, 'py> Content<'t, 'py> {
                     }
                     return Ok(());
                 }
+                // Django's `render_value_in_context` changes only numbers and
+                // dates; other values print natively even in a live context.
+                let string = content.is_instance_of::<PyString>();
                 if context.format_values
-                    && (context.formatting_context.is_some()
-                        || (!content.is_instance_of::<PyString>() && is_localizable(&content)?))
+                    && ((string && context.formatting_context.is_some())
+                        || (!string && is_localizable(&content)?))
                 {
                     let rendered = if content.is_instance_of::<PyString>() {
                         let autoescape: bool = context
@@ -1727,17 +1726,14 @@ impl<'t, 'py> Content<'t, 'py> {
                     && (context.formatting_context.is_some()
                         || !content.is_instance_of::<PyString>()) =>
             {
-                if context.formatting_context.is_none()
-                    && let Some(number) = localize_number(&content, context.use_l10n, context)?
-                {
+                if let Some(number) = localize_number(&content, context.use_l10n, context)? {
                     return Ok(Cow::Owned(if context.autoescape {
                         encode_quoted_attribute(&number).into_owned()
                     } else {
                         number
                     }));
                 }
-                if context.formatting_context.is_none()
-                    && context.use_l10n.is_none()
+                if context.use_l10n.is_none()
                     && let Some(formatted) = localize_datetime(
                         &content,
                         context.use_tz,
@@ -1750,7 +1746,7 @@ impl<'t, 'py> Content<'t, 'py> {
                         formatted
                     }));
                 }
-                if context.formatting_context.is_some() || is_localizable(&content)? {
+                if is_localizable(&content)? {
                     let py = content.py();
                     let rendered = RENDER_VALUE
                         .import(py, "django.template.base", "render_value_in_context")?
