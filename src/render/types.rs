@@ -18,6 +18,7 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
 use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyType};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use super::dateformat::localize_datetime;
 use super::filters::FileSizeStrings;
@@ -119,7 +120,9 @@ pub enum IncludeTemplateKey {
     Vec(Vec<String>),
 }
 
-type BindingMap = HashMap<String, Vec<Py<PyAny>>>;
+/// Hashed on every variable read and loop iteration. Template variable names
+/// are short and come from template source, so a fast hash beats `SipHash`.
+type BindingMap = FxHashMap<String, Vec<Py<PyAny>>>;
 
 /// Bindings shared by a parent and its child scopes. The `Arc` lets the
 /// parent take them back without copying once no child or retained snapshot
@@ -288,7 +291,8 @@ impl Context {
         autoescape: bool,
     ) -> Self {
         let context = context.into_iter();
-        let mut bindings = BindingMap::with_capacity(context.size_hint().0);
+        let mut bindings =
+            BindingMap::with_capacity_and_hasher(context.size_hint().0, FxBuildHasher);
         for (key, value) in context {
             bindings.insert(key, vec![value]);
         }
@@ -331,8 +335,18 @@ impl Context {
     /// bindings given to `new`, as later pairs there do.
     #[must_use]
     pub fn with_source(mut self, source: &Bound<'_, PyDict>) -> Self {
-        self.context
-            .retain(|key, _| !source.contains(key.as_str()).unwrap_or(false));
+        let py = source.py();
+        self.context.retain(|key, _| {
+            // The built-in names are checked on every render; interned
+            // strings spare allocating and hashing each one.
+            let shadowed = match key.as_str() {
+                "None" => source.contains(intern!(py, "None")),
+                "True" => source.contains(intern!(py, "True")),
+                "False" => source.contains(intern!(py, "False")),
+                key => source.contains(key),
+            };
+            !shadowed.unwrap_or(false)
+        });
         self.source = Some(source.clone().unbind());
         self
     }
@@ -489,7 +503,7 @@ impl Context {
         let names: Vec<_> = self.assigned.iter().cloned().collect();
         for name in names {
             match live.get_item(&name) {
-                Ok(value) => self._insert(name, value, true),
+                Ok(value) => self._insert(&name, value, true),
                 Err(error) if error.is_instance_of::<PyKeyError>(py) => {
                     self.assigned.remove(&name);
                 }
@@ -693,51 +707,46 @@ impl Context {
         format!("{context:?}")
     }
 
-    fn _insert(&mut self, key: String, value: Bound<'_, PyAny>, replace: bool) {
+    /// `key` is borrowed so a loop rebinding the same name on every
+    /// iteration allocates the `String` once, on the first insert.
+    fn _insert(&mut self, key: &str, value: Bound<'_, PyAny>, replace: bool) {
         // Pure native renders never need a Python snapshot. Start tracking
         // mutations only after the first conversion has captured a base.
         if self.django_context_base.get_mut().is_some() {
-            self.django_context_changes.insert(key.clone());
+            self.django_context_changes.insert(key.to_string());
+        }
+        let py = value.py();
+        let value = value.unbind();
+        if let Some(values) = self.bindings_mut().get_mut(key) {
+            if replace {
+                values.pop();
+            }
+            values.push(value);
+            return;
         }
         let inherited = self
             .scope_bindings
             .as_ref()
             .filter(|shared| shared.overlay)
-            .map(|shared| shared.base.clone());
-        let py = value.py();
-        let value = value.unbind();
-        let source = self.source.as_ref().map(|source| source.clone_ref(py));
-        let source = source.as_ref();
-        match self.bindings_mut().entry(key) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                let values = entry.get_mut();
-                if replace {
-                    values.pop();
-                }
-                values.push(value);
-            }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                let mut values: Vec<_> = inherited
-                    .as_ref()
-                    .and_then(|base| base.0.get(entry.key()))
-                    .map(|values| values.iter().map(|value| value.clone_ref(py)).collect())
-                    .or_else(|| {
-                        // First write to a name from the caller's dict.
-                        let value = source?.bind(py).get_item(entry.key()).ok().flatten()?;
-                        Some(vec![value.unbind()])
-                    })
-                    .unwrap_or_default();
-                if replace {
-                    values.pop();
-                }
-                values.push(value);
-                entry.insert(values);
-            }
+            .and_then(|shared| shared.base.0.get(key))
+            .map(|values| values.iter().map(|value| value.clone_ref(py)).collect());
+        let mut values: Vec<_> = inherited
+            .or_else(|| {
+                // First write to a name from the caller's dict.
+                let source = self.source.as_ref()?.bind(py);
+                let value = source.get_item(key).ok().flatten()?;
+                Some(vec![value.unbind()])
+            })
+            .unwrap_or_default();
+        if replace {
+            values.pop();
         }
+        values.push(value);
+        self.context.insert(key.to_string(), values);
     }
 
     pub fn append(&mut self, key: String, value: Bound<'_, PyAny>) {
-        self._insert(key, value, false);
+        self._insert(&key, value, false);
     }
 
     pub fn insert(&mut self, key: String, value: Bound<'_, PyAny>) -> PyResult<()> {
@@ -749,7 +758,7 @@ impl Context {
             .names
             .last_mut()
             .is_none_or(|names| !names.insert(key.clone()));
-        self._insert(key, value, replace);
+        self._insert(&key, value, replace);
         Ok(())
     }
 
@@ -778,7 +787,7 @@ impl Context {
             names_set.insert(name.clone());
             self.names.push(names_set);
         }
-        self._insert(name, value, replace);
+        self._insert(&name, value, replace);
     }
 
     pub fn push_variables(
@@ -796,7 +805,7 @@ impl Context {
             self.names.push(names_set);
         }
         if names.len() == 1 {
-            self._insert(names[0].clone(), values, replace);
+            self._insert(&names[0], values, replace);
         } else {
             let py = values.py();
             let values: Vec<_> = match values.try_iter() {
@@ -823,7 +832,7 @@ impl Context {
             };
             if names.len() == values.len() {
                 for (name, value) in zip(names, values) {
-                    self._insert(name.clone(), value, replace);
+                    self._insert(name, value, replace);
                 }
             } else {
                 return Err(RenderError::TupleUnpackError {
@@ -1100,12 +1109,12 @@ impl Context {
             live.bind(value.py())
                 .call_method1("set_upward", (&key, &value))?;
             self.assigned.insert(key.clone());
-            self._insert(key, value, true);
+            self._insert(&key, value, true);
             return Ok(());
         }
         if self.get(value.py(), &key).is_some() {
             self.assigned.insert(key.clone());
-            self._insert(key, value, true);
+            self._insert(&key, value, true);
             Ok(())
         } else {
             self.insert(key, value)

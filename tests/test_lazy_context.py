@@ -122,3 +122,34 @@ def test_non_string_keys_are_ignored_like_django():
     context = {1: "one", "a": "x"}
     django = DjangoEngine().from_string("{{ a }}").render(Context(context))
     assert Engine().from_string("{{ a }}").render(context) == django == "x"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{{ late }}|{{ add }}|{{ late }}",
+        "{{ name }}|{{ change }}|{{ name }}",
+        "{{ name }}|{{ drop }}|[{{ name }}]",
+        "{% with name='w' %}{{ change }}{{ name }}{% endwith %}|{{ name }}",
+    ],
+)
+def test_caller_dict_changes_during_render_are_seen_like_django(source):
+    """Django reads the caller's dict live, so no snapshot is taken (#378)."""
+
+    def build():
+        context = {"name": "caller", "items": [1, 2]}
+        context["add"] = lambda: context.update(late="added") or ""
+        context["change"] = lambda: context.update(name="changed") or ""
+        context["drop"] = lambda: context.pop("name", "") and ""
+        return context
+
+    expected = DjangoEngine().from_string(source).render(Context(build()))
+    assert Engine().from_string(source).render(build()) == expected
+
+
+def test_render_returns_safe_string_for_any_output():
+    from django.utils.safestring import SafeString
+
+    for source in ["", "plain <b>", "{{ name }}"]:
+        rendered = Engine().from_string(source).render({"name": "<x>"})
+        assert type(rendered) is SafeString
