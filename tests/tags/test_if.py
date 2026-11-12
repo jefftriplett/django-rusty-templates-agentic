@@ -183,6 +183,8 @@ def test_render_op_literal_var(a, b, op, assert_render):
         -(10**310),
         Float("1.0e310"),
         Float("-1.0e310"),
+        True,
+        False,
     ],
 )
 @pytest.mark.parametrize(
@@ -198,6 +200,8 @@ def test_render_op_literal_var(a, b, op, assert_render):
         -(10**310),
         Float("1.0e310"),
         Float("-1.0e310"),
+        True,
+        False,
     ],
 )
 @pytest.mark.parametrize("op", ["==", "!=", "<", ">", "<=", ">="])
