@@ -1338,35 +1338,56 @@ pub enum TokenTree {
     TranslatedText(Text),
     Int(BigInt),
     Float(f64),
-    Tag(Tag),
+    Tag(Box<Tag>),
     Variable(Variable),
     ForVariable(ForVariable),
     Filter(Box<Filter>),
 }
 
 impl TokenTree {
+    /// Tags are boxed so a text or variable node, which is most of a
+    /// template, is not as large as the largest tag.
+    pub fn tag(tag: Tag) -> Self {
+        Self::Tag(Box::new(tag))
+    }
+
+    pub fn as_tag(&self) -> Option<&Tag> {
+        match self {
+            Self::Tag(tag) => Some(tag),
+            _ => None,
+        }
+    }
+
+    pub fn into_tag(self) -> Option<Tag> {
+        match self {
+            Self::Tag(tag) => Some(*tag),
+            _ => None,
+        }
+    }
+
     /// Child lists used to discover inheritance blocks without a Python tree.
     pub fn child_nodes(&self) -> Vec<&[Self]> {
-        match self {
-            Self::Tag(Tag::Stock { node, .. }) => node.child_nodes(),
-            Self::Tag(Tag::Block { nodes, .. }) => vec![nodes],
-            Self::Tag(Tag::PartialDef { definition, .. }) => vec![&definition.nodes],
-            Self::Tag(
-                Tag::Extends { nodes, .. }
-                | Tag::Autoescape { nodes, .. }
-                | Tag::With { nodes, .. }
-                | Tag::FilterBlock { nodes, .. }
-                | Tag::Spaceless(nodes)
-                | Tag::Verbatim(nodes),
-            ) => vec![nodes],
-            Self::Tag(Tag::If { truthy, falsey, .. }) => {
+        let Some(tag) = self.as_tag() else {
+            return Vec::new();
+        };
+        match tag {
+            Tag::Stock { node, .. } => node.child_nodes(),
+            Tag::Block { nodes, .. } => vec![nodes],
+            Tag::PartialDef { definition, .. } => vec![&definition.nodes],
+            Tag::Extends { nodes, .. }
+            | Tag::Autoescape { nodes, .. }
+            | Tag::With { nodes, .. }
+            | Tag::FilterBlock { nodes, .. }
+            | Tag::Spaceless(nodes)
+            | Tag::Verbatim(nodes) => vec![nodes],
+            Tag::If { truthy, falsey, .. } => {
                 vec![truthy, falsey.as_deref().unwrap_or_default()]
             }
-            Self::Tag(Tag::IfChanged { truthy, falsey, .. }) => vec![truthy, falsey],
-            Self::Tag(Tag::For(node)) => {
+            Tag::IfChanged { truthy, falsey, .. } => vec![truthy, falsey],
+            Tag::For(node) => {
                 vec![&node.body, node.empty.as_deref().unwrap_or_default()]
             }
-            Self::Tag(Tag::SimpleBlockTag(node)) => vec![&node.nodes],
+            Tag::SimpleBlockTag(node) => vec![&node.nodes],
             _ => Vec::new(),
         }
     }
@@ -1979,7 +2000,7 @@ impl<'t, 'py> Parser<'t, 'py> {
     }
 
     fn check_extends_first(nodes: &[TokenTree], node: &TokenTree) -> Result<(), PyParseError> {
-        if matches!(node, TokenTree::Tag(Tag::Extends { .. }))
+        if matches!(node.as_tag(), Some(Tag::Extends { .. }))
             && nodes.iter().any(|node| !matches!(node, TokenTree::Text(_)))
         {
             return Err(
@@ -2000,7 +2021,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             }
             if let Some((end, node)) = self.python_nodes.get(&token.at.0) {
                 self.skip_until = *end;
-                nodes.push(TokenTree::Tag(Tag::PythonNode(node.clone())));
+                nodes.push(TokenTree::tag(Tag::PythonNode(node.clone())));
                 continue;
             }
             let node = match token.token_type {
@@ -2025,6 +2046,9 @@ impl<'t, 'py> Parser<'t, 'py> {
             Self::check_extends_first(&nodes, &node)?;
             nodes.push(node);
         }
+        // A compiled template lives as long as its loader's cache, so give
+        // back the room left over from growing the list.
+        nodes.shrink_to_fit();
         Ok(nodes)
     }
 
@@ -2041,7 +2065,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             }
             if let Some((end, node)) = self.python_nodes.get(&token.at.0) {
                 self.skip_until = *end;
-                nodes.push(TokenTree::Tag(Tag::PythonNode(node.clone())));
+                nodes.push(TokenTree::tag(Tag::PythonNode(node.clone())));
                 continue;
             }
             let node = match token.token_type {
@@ -2056,6 +2080,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                     Either::Left(token_tree) => token_tree,
                     Either::Right(end_tag) => {
                         if until.contains(&end_tag.end) {
+                            nodes.shrink_to_fit();
                             return Ok((nodes, end_tag));
                         }
                         return Err(ParseError::WrongEndTag {
@@ -2449,7 +2474,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                 );
             }
         };
-        Ok(TokenTree::Tag(Tag::ResetCycle(id)))
+        Ok(TokenTree::tag(Tag::ResetCycle(id)))
     }
 
     fn parse_regroup(&self, parts: TagParts) -> Result<TokenTree, PyParseError> {
@@ -2502,7 +2527,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                 .call_method1("compile_filter", (expression,))?
                 .unbind(),
         );
-        Ok(TokenTree::Tag(Tag::Regroup(Regroup {
+        Ok(TokenTree::tag(Tag::Regroup(Regroup {
             target,
             expression,
             asvar,
@@ -2529,7 +2554,7 @@ impl<'t, 'py> Parser<'t, 'py> {
         } else {
             Vec::new()
         };
-        Ok(TokenTree::Tag(Tag::IfChanged {
+        Ok(TokenTree::tag(Tag::IfChanged {
             id: CycleId(NEXT_CYCLE_ID.fetch_add(1, Ordering::Relaxed)),
             values,
             truthy,
@@ -2584,7 +2609,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             "with".into(),
             at,
         )?;
-        Ok(TokenTree::Tag(Tag::With { assignments, nodes }))
+        Ok(TokenTree::tag(Tag::With { assignments, nodes }))
     }
 
     fn parse_filter_block(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
@@ -2630,7 +2655,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             "filter".into(),
             at,
         )?;
-        Ok(TokenTree::Tag(Tag::FilterBlock { filters, nodes }))
+        Ok(TokenTree::tag(Tag::FilterBlock { filters, nodes }))
     }
 
     fn parse_widthratio(&self, parts: TagParts) -> Result<TokenTree, PyParseError> {
@@ -2656,7 +2681,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             .iter()
             .map(|token| token.parse(self))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(TokenTree::Tag(Tag::WidthRatio { args, asvar }))
+        Ok(TokenTree::tag(Tag::WidthRatio { args, asvar }))
     }
 
     fn parse_firstof(&self, parts: TagParts) -> Result<TokenTree, PyParseError> {
@@ -2685,7 +2710,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             vars.push(token.parse(self)?);
         }
 
-        Ok(TokenTree::Tag(Tag::FirstOf(FirstOf { vars, asvar })))
+        Ok(TokenTree::tag(Tag::FirstOf(FirstOf { vars, asvar })))
     }
 
     fn parse_cycle(&mut self, parts: TagParts) -> Result<Cycle, ParseError> {
@@ -2795,7 +2820,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             "resetcycle" => Either::Left(self.parse_resetcycle(tag.parts)?),
             "with" => Either::Left(self.parse_with(at, tag.parts)?),
             "filter" => Either::Left(self.parse_filter_block(at, tag.parts)?),
-            "debug" => Either::Left(TokenTree::Tag(Tag::Debug)),
+            "debug" => Either::Left(TokenTree::tag(Tag::Debug)),
             "spaceless" | "verbatim" => {
                 let name = tag.content(self.template);
                 let end = if name == "verbatim" {
@@ -2804,7 +2829,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                     EndTagType::Custom("endspaceless".to_string())
                 };
                 let (nodes, _) = self.parse_until(vec![end], name.to_string().into(), at)?;
-                Either::Left(TokenTree::Tag(if name == "verbatim" {
+                Either::Left(TokenTree::tag(if name == "verbatim" {
                     Tag::Verbatim(nodes)
                 } else {
                     Tag::Spaceless(nodes)
@@ -2841,12 +2866,12 @@ impl<'t, 'py> Parser<'t, 'py> {
                 else {
                     unreachable!("querystring is a simple tag")
                 };
-                let TokenTree::Tag(Tag::SimpleTag(simple)) =
-                    self.parse_simple_tag(context, at, tag.parts)?
+                let Some(Tag::SimpleTag(simple)) =
+                    self.parse_simple_tag(context, at, tag.parts)?.into_tag()
                 else {
                     unreachable!("querystring parser returns a simple tag")
                 };
-                Either::Left(TokenTree::Tag(Tag::QueryString(simple)))
+                Either::Left(TokenTree::tag(Tag::QueryString(simple)))
             }
             "regroup" => Either::Left(self.parse_regroup(tag.parts)?),
             "ifchanged" => Either::Left(self.parse_ifchanged(at, tag.parts)?),
@@ -2858,7 +2883,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             "widthratio" => Either::Left(self.parse_widthratio(tag.parts)?),
             "url" => Either::Left(self.parse_url(at, tag.parts)?),
             "firstof" => Either::Left(self.parse_firstof(tag.parts)?),
-            "csrf_token" => Either::Left(TokenTree::Tag(Tag::CsrfToken(CsrfToken))),
+            "csrf_token" => Either::Left(TokenTree::tag(Tag::CsrfToken(CsrfToken))),
             "load" => Either::Left(self.parse_load(at, tag.parts)?),
             "autoescape" => Either::Left(self.parse_autoescape(at, tag.parts)?),
             "endautoescape" => Either::Right(EndTag {
@@ -2909,8 +2934,8 @@ impl<'t, 'py> Parser<'t, 'py> {
                 parts: None,
             }),
             "include" => Either::Left(self.parse_include(at, tag.parts)?),
-            "lorem" => Either::Left(TokenTree::Tag(Tag::Lorem(self.parse_lorem(at, tag.parts)?))),
-            "comment" => Either::Left(TokenTree::Tag(Tag::Comment(
+            "lorem" => Either::Left(TokenTree::tag(Tag::Lorem(self.parse_lorem(at, tag.parts)?))),
+            "comment" => Either::Left(TokenTree::tag(Tag::Comment(
                 self.parse_comment(at, tag.parts)?,
             ))),
             "partialdef" if self.engine.django_series >= (6, 0) => {
@@ -2926,7 +2951,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                         .into(),
                     );
                 };
-                Either::Left(TokenTree::Tag(Tag::Partial {
+                Either::Left(TokenTree::tag(Tag::Partial {
                     name: self.template.content(*name).to_string(),
                     at,
                 }))
@@ -2944,11 +2969,11 @@ impl<'t, 'py> Parser<'t, 'py> {
                     parts: None,
                 })
             }
-            "now" => Either::Left(TokenTree::Tag(Tag::Now(self.parse_now(tag.parts)?))),
-            "templatetag" => Either::Left(TokenTree::Tag(Tag::TemplateTag(
+            "now" => Either::Left(TokenTree::tag(Tag::Now(self.parse_now(tag.parts)?))),
+            "templatetag" => Either::Left(TokenTree::tag(Tag::TemplateTag(
                 lex_templatetag(self.template, tag.parts).map_err(ParseError::from)?,
             ))),
-            "cycle" => Either::Left(TokenTree::Tag(Tag::Cycle(self.parse_cycle(tag.parts)?))),
+            "cycle" => Either::Left(TokenTree::tag(Tag::Cycle(self.parse_cycle(tag.parts)?))),
             tag_name => {
                 if let Some(TagContext::Unloaded(tag)) = self.external_tags.get(tag_name).cloned() {
                     self.load_tag(at, tag_name, &tag)?;
@@ -2966,15 +2991,15 @@ impl<'t, 'py> Parser<'t, 'py> {
                         Either::Left(self.parse_simple_tag(context, at, tag.parts)?)
                     }
                     Some(TagContext::Inclusion { context, filename }) => {
-                        let TokenTree::Tag(Tag::SimpleTag(call)) =
-                            self.parse_simple_tag(context, at, tag.parts)?
+                        let Some(Tag::SimpleTag(call)) =
+                            self.parse_simple_tag(context, at, tag.parts)?.into_tag()
                         else {
                             unreachable!("helper parser returns a simple tag")
                         };
                         if call.target_var.is_some() {
                             return Err(crate::template::django_rusty_templates::TemplateSyntaxError::new_err(format!("'{tag_name}' received too many positional arguments")).into());
                         }
-                        Either::Left(TokenTree::Tag(Tag::InclusionTag(InclusionTag {
+                        Either::Left(TokenTree::tag(Tag::InclusionTag(InclusionTag {
                             id: CycleId(NEXT_CYCLE_ID.fetch_add(1, Ordering::Relaxed)),
                             call,
                             filename: Gc::new(filename.clone().unbind()),
@@ -2987,8 +3012,8 @@ impl<'t, 'py> Parser<'t, 'py> {
                         template_name,
                     }) => {
                         let template_name = *template_name;
-                        let TokenTree::Tag(Tag::SimpleTag(call)) =
-                            self.parse_simple_tag(context, at, tag.parts)?
+                        let Some(Tag::SimpleTag(call)) =
+                            self.parse_simple_tag(context, at, tag.parts)?.into_tag()
                         else {
                             unreachable!("helper parser returns a simple tag")
                         };
@@ -2997,7 +3022,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                         if call.target_var.is_some() {
                             return Err(crate::template::django_rusty_templates::TemplateSyntaxError::new_err(format!("'{tag_name}' received too many positional arguments")).into());
                         }
-                        Either::Left(TokenTree::Tag(Tag::InclusionTag(InclusionTag {
+                        Either::Left(TokenTree::tag(Tag::InclusionTag(InclusionTag {
                             id: CycleId(NEXT_CYCLE_ID.fetch_add(1, Ordering::Relaxed)),
                             call,
                             filename: Gc::new(self.py.None()),
@@ -3053,7 +3078,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             ))
             .into());
         }
-        Ok(TokenTree::Tag(Tag::PartialDef {
+        Ok(TokenTree::tag(Tag::PartialDef {
             definition: PartialDefinition {
                 name,
                 nodes: Gc::new(nodes),
@@ -3099,7 +3124,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                 );
             }
         }
-        Ok(TokenTree::Tag(Tag::Block {
+        Ok(TokenTree::tag(Tag::Block {
             name,
             nodes: Gc::new(nodes),
         }))
@@ -3143,7 +3168,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             None
         };
         let nodes = self.parse_nodes()?;
-        Ok(TokenTree::Tag(Tag::Extends {
+        Ok(TokenTree::tag(Tag::Extends {
             at,
             parent,
             parent_token,
@@ -3259,7 +3284,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             kwargs,
             target_var,
         };
-        Ok(TokenTree::Tag(Tag::SimpleTag(tag)))
+        Ok(TokenTree::tag(Tag::SimpleTag(tag)))
     }
 
     fn parse_simple_block_tag(
@@ -3285,7 +3310,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             kwargs,
             target_var,
         };
-        Ok(TokenTree::Tag(Tag::SimpleBlockTag(tag)))
+        Ok(TokenTree::tag(Tag::SimpleBlockTag(tag)))
     }
 
     fn parse_load(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
@@ -3321,7 +3346,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                     .into());
                 }
             }
-            return Ok(TokenTree::Tag(Tag::Load));
+            return Ok(TokenTree::tag(Tag::Load));
         }
         for token in tokens {
             let library = token.load_library(self.py, &self.engine.libraries, self.template)?;
@@ -3332,7 +3357,7 @@ impl<'t, 'py> Parser<'t, 'py> {
                 self.register_tag(&name, tag)?;
             }
         }
-        Ok(TokenTree::Tag(Tag::Load))
+        Ok(TokenTree::tag(Tag::Load))
     }
 
     fn register_opaque(
@@ -3476,7 +3501,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             }
         }
         self.skip_until = end;
-        Ok(TokenTree::Tag(Tag::PythonNode(PythonNode(Gc::new(node)))))
+        Ok(TokenTree::tag(Tag::PythonNode(PythonNode(Gc::new(node)))))
     }
 
     /// Whether a tag between `start` and `end` shares parse-time state that
@@ -3820,7 +3845,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             kwargs,
             asvar,
         };
-        Ok(TokenTree::Tag(Tag::Url(url)))
+        Ok(TokenTree::tag(Tag::Url(url)))
     }
 
     fn parse_include(&self, at: At, parts: TagParts) -> Result<TokenTree, ParseError> {
@@ -3893,13 +3918,13 @@ impl<'t, 'py> Parser<'t, 'py> {
             kwargs,
             only: only.is_some(),
         };
-        Ok(TokenTree::Tag(Tag::Include(include)))
+        Ok(TokenTree::tag(Tag::Include(include)))
     }
 
     fn parse_autoescape(&mut self, at: At, parts: TagParts) -> Result<TokenTree, PyParseError> {
         let token = lex_autoescape_argument(self.template, parts).map_err(ParseError::from)?;
         let (nodes, _) = self.parse_until(vec![EndTagType::Autoescape], "autoescape".into(), at)?;
-        Ok(TokenTree::Tag(Tag::Autoescape {
+        Ok(TokenTree::tag(Tag::Autoescape {
             enabled: token.enabled,
             nodes,
         }))
@@ -3938,7 +3963,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             } => None,
             _ => unreachable!(),
         };
-        Ok(TokenTree::Tag(Tag::If {
+        Ok(TokenTree::tag(Tag::If {
             condition,
             truthy: nodes,
             falsey,
@@ -3970,7 +3995,7 @@ impl<'t, 'py> Parser<'t, 'py> {
             } => None,
             _ => unreachable!(),
         };
-        Ok(TokenTree::Tag(Tag::For(For {
+        Ok(TokenTree::tag(Tag::For(For {
             iterable,
             variables,
             reversed,
@@ -4001,6 +4026,13 @@ fn get_kwonly_defaults(kwonly_defaults: &Bound<'_, PyAny>) -> PyResult<HashSet<S
 mod tests {
     use super::*;
     use pyo3::types::{PyDict, PyDictMethods};
+
+    /// Text and variable nodes are most of a template, so the node type
+    /// must stay small; large payloads belong behind a `Box`.
+    #[test]
+    fn test_token_tree_stays_small() {
+        assert!(std::mem::size_of::<TokenTree>() <= 40);
+    }
 
     use crate::{
         filters::{DefaultFilter, ExternalFilter, LowerFilter},
@@ -4553,7 +4585,7 @@ mod tests {
             let mut parser = Parser::new(py, template.into(), Engine::empty().into(), None);
             let nodes = parser.parse().unwrap();
 
-            let url = TokenTree::Tag(Tag::Url(Url {
+            let url = TokenTree::tag(Tag::Url(Url {
                 at: (0, 25),
                 view_name: TagElement::Text(Text { at: (8, 13) }),
                 args: vec![],
@@ -4574,7 +4606,7 @@ mod tests {
             let mut parser = Parser::new(py, template.into(), Engine::empty().into(), None);
             let nodes = parser.parse().unwrap();
 
-            let url = TokenTree::Tag(Tag::Url(Url {
+            let url = TokenTree::tag(Tag::Url(Url {
                 at: (0, 28),
                 view_name: TagElement::TranslatedText(Text { at: (10, 13) }),
                 args: vec![],
@@ -4595,7 +4627,7 @@ mod tests {
             let mut parser = Parser::new(py, template.into(), Engine::empty().into(), None);
             let nodes = parser.parse().unwrap();
 
-            let url = TokenTree::Tag(Tag::Url(Url {
+            let url = TokenTree::tag(Tag::Url(Url {
                 at: (0, 24),
                 view_name: TagElement::Variable(Variable { at: (7, 14) }),
                 args: vec![],
@@ -4630,7 +4662,7 @@ mod tests {
                     (22, 7),
                 )),
             });
-            let url = TokenTree::Tag(Tag::Url(Url {
+            let url = TokenTree::tag(Tag::Url(Url {
                 at: (0, 39),
                 view_name: TagElement::Filter(default),
                 args: vec![],
@@ -4663,7 +4695,7 @@ mod tests {
             let mut parser = Parser::new(py, template.into(), Engine::empty().into(), None);
             let nodes = parser.parse().unwrap();
 
-            let url = TokenTree::Tag(Tag::Url(Url {
+            let url = TokenTree::tag(Tag::Url(Url {
                 at: (0, 12),
                 view_name: TagElement::Int(64.into()),
                 args: vec![],
@@ -4684,7 +4716,7 @@ mod tests {
             let mut parser = Parser::new(py, template.into(), Engine::empty().into(), None);
             let nodes = parser.parse().unwrap();
 
-            let url = TokenTree::Tag(Tag::Url(Url {
+            let url = TokenTree::tag(Tag::Url(Url {
                 at: (0, 66),
                 view_name: TagElement::Variable(Variable { at: (7, 14) }),
                 args: vec![
@@ -4722,7 +4754,7 @@ mod tests {
             let mut parser = Parser::new(py, template.into(), Engine::empty().into(), None);
             let nodes = parser.parse().unwrap();
 
-            let url = TokenTree::Tag(Tag::Url(Url {
+            let url = TokenTree::tag(Tag::Url(Url {
                 at: (0, 44),
                 view_name: TagElement::Variable(Variable { at: (7, 14) }),
                 args: vec![],
@@ -4746,7 +4778,7 @@ mod tests {
             let mut parser = Parser::new(py, template.into(), Engine::empty().into(), None);
             let nodes = parser.parse().unwrap();
 
-            let url = TokenTree::Tag(Tag::Url(Url {
+            let url = TokenTree::tag(Tag::Url(Url {
                 at: (0, 42),
                 view_name: TagElement::Variable(Variable { at: (7, 14) }),
                 args: vec![TagElement::Text(Text { at: (23, 3) })],
@@ -4767,7 +4799,7 @@ mod tests {
             let mut parser = Parser::new(py, template.into(), Engine::empty().into(), None);
             let nodes = parser.parse().unwrap();
 
-            let url = TokenTree::Tag(Tag::Url(Url {
+            let url = TokenTree::tag(Tag::Url(Url {
                 at: (0, 46),
                 view_name: TagElement::Variable(Variable { at: (7, 14) }),
                 args: vec![],
@@ -4788,7 +4820,7 @@ mod tests {
             let mut parser = Parser::new(py, template.into(), Engine::empty().into(), None);
             let nodes = parser.parse().unwrap();
 
-            let url = TokenTree::Tag(Tag::Url(Url {
+            let url = TokenTree::tag(Tag::Url(Url {
                 at: (0, 39),
                 view_name: TagElement::Variable(Variable { at: (7, 14) }),
                 args: vec![
