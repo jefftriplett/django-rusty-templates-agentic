@@ -137,7 +137,11 @@ import django.utils.html as html
 from django_rusty_templates import Engine
 module = ModuleType("cached_escape_probe")
 module.register = Library()
-module.register.simple_tag(lambda: "<unsafe>", name="value")
+class Unsafe:
+    def __str__(self):
+        return "<unsafe>"
+# Plain strings are escaped natively (#369); other results use Django's function.
+module.register.simple_tag(lambda: Unsafe(), name="value")
 sys.modules[module.__name__] = module
 engine = Engine(libraries={module.__name__: module.__name__})
 template = engine.from_string("{% load cached_escape_probe %}{% value %}")

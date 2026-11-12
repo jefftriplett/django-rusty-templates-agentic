@@ -5,7 +5,7 @@ use pyo3::exceptions::{PyAttributeError, PyIndexError, PyKeyError, PyTypeError, 
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyFunction, PyString, PyType};
+use pyo3::types::{PyDict, PyFunction, PyList, PyString, PyTuple, PyType};
 use rustc_hash::FxHashMap;
 
 use dtl_lexer::types::TemplateString;
@@ -24,6 +24,7 @@ use dtl_lexer::types::Variable;
 
 static BASE_CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DIR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static OBJECT_DIR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SIGNATURE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static METHOD_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
@@ -158,11 +159,65 @@ fn is_subscriptable(variable: &Bound<'_, PyAny>) -> bool {
     sequence != 0
 }
 
+/// `name in dir(variable)`, which Django checks to re-raise an
+/// `AttributeError` from an attribute that exists, such as a property.
+///
+/// With the default `object.__dir__`, `dir()` lists the instance `__dict__`
+/// and every `__dict__` along the type's MRO, so those are checked directly
+/// rather than building and sorting the whole list.
+fn in_dir(variable: &Bound<'_, PyAny>, name: &Bound<'_, PyString>) -> PyResult<bool> {
+    let py = variable.py();
+    let object_dir = OBJECT_DIR.get_or_try_init(py, || {
+        py.get_type::<PyAny>()
+            .getattr(intern!(py, "__dir__"))
+            .map(Bound::unbind)
+    })?;
+    let class = variable.get_type();
+    let default_dir = class
+        .getattr(intern!(py, "__dir__"))
+        .is_ok_and(|dir| dir.is(object_dir.bind(py)));
+    // A proxy such as `SimpleLazyObject` reports another `__class__`, which
+    // `object.__dir__` follows.
+    let own_class = variable
+        .getattr(intern!(py, "__class__"))
+        .is_ok_and(|reported| reported.is(&class));
+    if !default_dir || !own_class {
+        return DIR
+            .import(py, "builtins", "dir")?
+            .call1((variable,))?
+            .contains(name);
+    }
+    if let Ok(Some(attributes)) = variable.getattr_opt(intern!(py, "__dict__"))
+        && let Ok(attributes) = attributes.cast_into::<PyDict>()
+        && attributes.contains(name)?
+    {
+        return Ok(true);
+    }
+    for base in class.mro().iter() {
+        if base.getattr(intern!(py, "__dict__"))?.contains(name)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn lookup_part<'py>(
     variable: Bound<'py, PyAny>,
     part: &str,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
     let py = variable.py();
+    // `list["0"]` raises TypeError and an exact list or tuple can have no
+    // attribute named by digits, so Django ends up indexing it. Go there
+    // directly instead of raising and catching two errors and calling dir().
+    if (variable.is_exact_instance_of::<PyList>() || variable.is_exact_instance_of::<PyTuple>())
+        && let Ok(index) = part.parse::<isize>()
+    {
+        return match variable.get_item(index) {
+            Ok(value) => Ok(Some(value)),
+            Err(error) if error.is_instance_of::<PyIndexError>(py) => Ok(None),
+            Err(error) => Err(error),
+        };
+    }
     let name = interned_name(py, part);
     let name = &name;
     // Exact dictionaries need no generic mapping dispatch or KeyError on a
@@ -203,13 +258,7 @@ fn lookup_part<'py>(
             {
                 // A built-in dict has no user-defined property that could
                 // raise AttributeError. Only inspect dir() for other objects.
-                if !is_context
-                    && exact_dict.is_none()
-                    && DIR
-                        .import(py, "builtins", "dir")?
-                        .call1((&variable,))?
-                        .contains(name)?
-                {
+                if !is_context && exact_dict.is_none() && in_dir(&variable, name)? {
                     return Err(error);
                 }
             }

@@ -42,6 +42,32 @@ use dtl_lexer::types::{At, TemplateString};
 
 static DJANGO_CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static RENDER_VALUE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static LOCALIZABLE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+/// Whether Django's `render_value_in_context` would do more than `str()`
+/// and escaping: `localize` formats numbers, dates and times (and bools,
+/// as `str()`), and `template_localtime` only converts datetimes. Anything
+/// else, such as `None`, a list or a model instance, renders natively.
+fn is_localizable(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = value.py();
+    let types = LOCALIZABLE.get_or_try_init(py, || -> PyResult<_> {
+        let decimal = py.import("decimal")?.getattr("Decimal")?;
+        let datetime = py.import("datetime")?;
+        Ok(pyo3::types::PyTuple::new(
+            py,
+            [
+                py.get_type::<PyInt>().into_any(),
+                py.get_type::<pyo3::types::PyFloat>().into_any(),
+                decimal,
+                datetime.getattr("date")?,
+                datetime.getattr("time")?,
+            ],
+        )?
+        .into_any()
+        .unbind())
+    })?;
+    value.is_instance(types.bind(py))
+}
 static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 static SAFE_STRING: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -1507,6 +1533,25 @@ pub(crate) fn append_escaped(text: &str, output: &mut String) {
     }
 }
 
+/// False only for an exact `str` or `SafeString` without a numeric character,
+/// which `int()` would reject.
+fn has_digit(value: &Bound<'_, PyAny>) -> bool {
+    let plain = value.is_exact_instance_of::<PyString>()
+        || crate::render::filters::is_exact_safe_string(value).unwrap_or(false);
+    if !plain {
+        return true;
+    }
+    value
+        .cast::<PyString>()
+        .ok()
+        .and_then(|text| {
+            text.to_cow()
+                .ok()
+                .map(|text| text.chars().any(char::is_numeric))
+        })
+        .unwrap_or(true)
+}
+
 /// Borrow Python text only while its owning handle is alive. `PyO3`'s `to_cow`
 /// preserves the same Unicode conversion and errors as String extraction.
 pub(crate) fn append_python_string(
@@ -1583,7 +1628,7 @@ impl<'t, 'py> Content<'t, 'py> {
                 }
                 if context.format_values
                     && (context.formatting_context.is_some()
-                        || !content.is_instance_of::<PyString>())
+                        || (!content.is_instance_of::<PyString>() && is_localizable(&content)?))
                 {
                     let rendered = if content.is_instance_of::<PyString>() {
                         let autoescape: bool = context
@@ -1705,11 +1750,14 @@ impl<'t, 'py> Content<'t, 'py> {
                         formatted
                     }));
                 }
-                let py = content.py();
-                let rendered = RENDER_VALUE
-                    .import(py, "django.template.base", "render_value_in_context")?
-                    .call1((content, context.value_formatting_context(py)?))?;
-                return Ok(Cow::Owned(rendered.extract()?));
+                if context.formatting_context.is_some() || is_localizable(&content)? {
+                    let py = content.py();
+                    let rendered = RENDER_VALUE
+                        .import(py, "django.template.base", "render_value_in_context")?
+                        .call1((content, context.value_formatting_context(py)?))?;
+                    return Ok(Cow::Owned(rendered.extract()?));
+                }
+                resolve_python(content, context)?
             }
             Self::Py(content) => resolve_python(content, context)?,
             Self::String(content) => content,
@@ -1760,10 +1808,28 @@ impl<'t, 'py> Content<'t, 'py> {
     pub fn to_bigint(&self) -> Option<BigInt> {
         match self {
             Self::Int(left) => Some(left.clone()),
-            Self::String(left) => left.as_raw().parse::<BigInt>().ok(),
+            Self::String(left) => {
+                let text = left.as_raw();
+                match text.parse::<BigInt>() {
+                    Ok(number) => Some(number),
+                    // Python's `int()` also takes spaces, underscores and
+                    // other Unicode digits.
+                    Err(_) if text.chars().any(char::is_numeric) => Python::attach(|py| {
+                        PyType::new::<PyInt>(py)
+                            .call1((text.as_ref(),))
+                            .ok()?
+                            .extract::<BigInt>()
+                            .ok()
+                    }),
+                    Err(_) => None,
+                }
+            }
             Self::Float(left) => left.trunc().to_bigint(),
             Self::Py(left) => match left.extract::<BigInt>() {
                 Ok(left) => Some(left),
+                // `int()` needs a digit, and neither `str` nor `SafeString`
+                // overrides `__int__`, so skip a call that can only raise.
+                Err(_) if !has_digit(left) => None,
                 Err(_) => {
                     let int = PyType::new::<PyInt>(left.py());
                     let left = int.call1((left,)).ok()?;
