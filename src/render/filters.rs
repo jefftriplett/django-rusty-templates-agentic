@@ -96,17 +96,16 @@ impl Resolve for Filter {
                 context.invalid_value(py, Some(template.content(variable.at)))?,
             )));
         }
-        if left.is_none()
-            && matches!(failures, ResolveFailures::IgnoreVariableDoesNotExist)
-            && matches!(
-                self.filter,
-                FilterType::DefaultIfNone(_) | FilterType::Django(_) | FilterType::External(_)
-            )
-        {
+        if left.is_none() && matches!(self.left, crate::parse::TagElement::Variable(_)) {
             // Django gives filters `None` for a missing variable when failures
             // are ignored, as in `{% if %}` and `{% for %}`; otherwise the
             // empty `string_if_invalid`.
-            left = Some(Content::Py(py.None().into_bound(py)));
+            left = Some(match failures {
+                ResolveFailures::IgnoreVariableDoesNotExist => {
+                    Content::Py(py.None().into_bound(py))
+                }
+                ResolveFailures::Raise => "".as_content(),
+            });
         }
         self.filter.resolve(left, py, template, context)
     }
@@ -183,6 +182,27 @@ impl ResolveFilter for FilterType {
             Self::Yesno(filter) => filter.resolve(variable, py, template, context),
         }
     }
+}
+
+/// A filter argument Django uses as a `str`. Other values raise the error
+/// Django's string method raises, built from the value's type name.
+fn string_argument<'t>(
+    argument: Content<'t, '_>,
+    context: &Context,
+    (py, at, template): (Python<'_>, dtl_lexer::types::At, TemplateString<'_>),
+    error: impl FnOnce(&str) -> PyErr,
+) -> Result<Cow<'t, str>, PyRenderError> {
+    let name = match &argument {
+        Content::String(_) => return Ok(argument.resolve_string(context)?.into_raw()),
+        Content::Py(value) if value.is_instance_of::<PyString>() => {
+            return Ok(argument.resolve_string(context)?.into_raw());
+        }
+        Content::Py(value) => value.get_type().name()?.to_string(),
+        Content::Int(_) => "int".to_string(),
+        Content::Float(_) => "float".to_string(),
+        Content::Bool(_) => "bool".to_string(),
+    };
+    Err(error(&name).annotate(py, at, "here", template).into())
 }
 
 pub trait ResolveFilter {
@@ -379,10 +399,12 @@ impl ResolveFilter for CutFilter {
             return Ok(Some("".as_content()));
         };
 
-        let arg = argument
-            .expect("missing argument in context should already have raised")
-            .resolve_string_strict(context, self.argument.at.into())?
-            .into_raw();
+        let arg = string_argument(
+            argument.expect("missing argument in context should already have raised"),
+            context,
+            (py, self.argument.at, template),
+            |name| PyTypeError::new_err(format!("replace() argument 1 must be str, not {name}")),
+        )?;
 
         let content_string = variable.resolve_string(context)?;
         let result = match content_string {
@@ -4845,9 +4867,19 @@ impl ResolveFilter for YesnoFilter {
                 let arg_content = arg
                     .resolve(py, template, context, ResolveFailures::Raise)?
                     .expect("missing argument in context should already have raised");
-                arg_content
-                    .resolve_string_strict(context, arg.at.into())?
-                    .into_raw()
+                match arg_content {
+                    // Django uses its default for an argument of `None`.
+                    Content::Py(value) if value.is_none() => {
+                        Cow::Owned(gettext(py, "yes,no,maybe")?)
+                    }
+                    arg_content => {
+                        string_argument(arg_content, context, (py, arg.at, template), |name| {
+                            PyAttributeError::new_err(format!(
+                                "'{name}' object has no attribute 'split'"
+                            ))
+                        })?
+                    }
+                }
             }
             None => Cow::Owned(gettext(py, "yes,no,maybe")?),
         };
@@ -5271,7 +5303,8 @@ mod tests {
                 .py_render(py, Some(context.into_any()), None)
                 .unwrap();
 
-            assert_eq!(result, "");
+            // Django centers `string_if_invalid`, "" by default (#376).
+            assert_eq!(result, " ".repeat(11));
         });
     }
 

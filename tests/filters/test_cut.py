@@ -166,10 +166,9 @@ def test_cut_error_invalid_arg_type(assert_render_error):
         template=template,
         context=context,
         exception=TypeError,
-        rusty_exception=ValueError,
         django_message=snapshot("replace() argument 1 must be str, not list"),
         rusty_message=snapshot("""\
-  × String argument expected
+  × replace() argument 1 must be str, not list
    ╭────
  1 │ {{ var|cut:bad_arg }}
    ·            ───┬───
