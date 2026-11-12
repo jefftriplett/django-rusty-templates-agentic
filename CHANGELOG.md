@@ -32,6 +32,8 @@ Give filters Django's value for a missing variable (`""`, or `None` in `{% if %}
 
 A template that a tag renders with its context no longer sees the outer template's block overrides, so its own `{% extends %}` and blocks work as in Django. ([#398](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/398))
 
+In templates with a custom compiled tag, `{% for %}` loops that contain no custom tags or includes now render natively when no Python code can reach the Django `Context`, making a template with one custom tag about 2.5× faster and use about a third of the memory. ([#400](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/400))
+
 ## 2026.11.3
 
 Compile Django admin's inclusion tags, `get_admin_log` and `get_flatpages` natively, so all of Django's contrib templates, including the admin change form, change list and index, compile natively. ([#318](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/318))
