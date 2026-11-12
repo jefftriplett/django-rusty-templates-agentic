@@ -57,7 +57,13 @@ def test_retained_native_context_keeps_snapshot_on_parent_mutation(monkeypatch, 
         "{% load tags %}" + scope + "{% remember %}{% replace as value %}{{ value }}"
     )
     assert engine.from_string(source).render(Context({"value": "original"})) == "xnew"
-    assert retained[0]["value"] == "original"
+    # The caller's dict is read live, as Django and a dict input do, so the
+    # assignment written back after the render shows through (#370).
+    assert retained[0]["value"] == "new"
+    retained.clear()
+    django = DjangoEngine(libraries={"tags": module.__name__})
+    assert django.from_string(source).render(Context({"value": "original"})) == "xnew"
+    assert retained[0]["value"] == "new"
     retained.clear()
     gc.collect()
 

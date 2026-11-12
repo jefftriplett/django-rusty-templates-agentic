@@ -17,7 +17,7 @@ use pyo3::exceptions::{PyAttributeError, PyKeyError, PyTypeError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
-use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyType};
+use pyo3::types::{PyBool, PyDict, PyInt, PyList, PyString, PyType};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use super::common::interned_name;
@@ -352,6 +352,28 @@ impl Context {
         });
         self.source = Some(source.clone().unbind());
         self
+    }
+
+    /// Whether `input`, a Django `Context`, already shows exactly what this
+    /// context holds: its dicts are the built-in names and this context's
+    /// source, and nothing native shadows or adds to them. A callback can then
+    /// see `input` as it is, without a snapshot copied into it and back.
+    pub(crate) fn is_live_view_of(&self, py: Python<'_>, dicts: &Bound<'_, PyList>) -> bool {
+        let Some(source) = &self.source else {
+            return false;
+        };
+        dicts.len() == 2
+            && dicts.get_item(1).is_ok_and(|dict| dict.is(source.bind(py)))
+            && self.scope_bindings.is_none()
+            && self.loops.is_empty()
+            && self.names.is_empty()
+            && self.assigned.is_empty()
+            && self.cycle_variables.is_empty()
+            && self.django_context_changes.is_empty()
+            && self
+                .context
+                .keys()
+                .all(|key| matches!(key.as_str(), "None" | "True" | "False"))
     }
 
     /// Whether the caller's dict has `key`.

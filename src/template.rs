@@ -46,6 +46,7 @@ pub mod django_rusty_templates {
     static IMPORT_STRING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
     static SAFE_STRING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    static WEAKREF: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
     /// Experimental JSON-only runtime sharing its parser/renderer with browser Wasm.
     #[pyclass]
@@ -2808,6 +2809,47 @@ pub mod django_rusty_templates {
         }
     }
 
+    /// The caller's dict inside `Context(dict)`, when the context is still in
+    /// that shape: exactly `Context`, holding Django's built-in names and the
+    /// caller's dict, which `Context.__init__` stores without copying. Reading
+    /// it lazily skips `flatten()`, which copied every key on every render.
+    /// `None` for anything else, such as a pushed context or changed
+    /// built-ins, which is flattened as before.
+    fn plain_context_dict<'py>(
+        py: Python<'py>,
+        context: &Bound<'py, PyAny>,
+        context_class: &Bound<'py, PyAny>,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        if !context.get_type().is(context_class) {
+            return Ok(None);
+        }
+        let Ok(dicts) = context
+            .getattr(intern!(py, "dicts"))?
+            .cast_into_exact::<PyList>()
+        else {
+            return Ok(None);
+        };
+        if dicts.len() != 2 {
+            return Ok(None);
+        }
+        let (Ok(builtins), Ok(dict)) = (
+            dicts.get_item(0)?.cast_into_exact::<PyDict>(),
+            dicts.get_item(1)?.cast_into_exact::<PyDict>(),
+        ) else {
+            return Ok(None);
+        };
+        let is_builtin = |name: &Bound<'py, PyString>, expected: &Bound<'py, PyAny>| {
+            builtins
+                .get_item(name)
+                .map(|value| value.is_some_and(|value| value.is(expected)))
+        };
+        let standard = builtins.len() == 3
+            && is_builtin(intern!(py, "True"), PyBool::new(py, true).as_any())?
+            && is_builtin(intern!(py, "False"), PyBool::new(py, false).as_any())?
+            && is_builtin(intern!(py, "None"), &py.None().into_bound(py))?;
+        Ok(standard.then_some(dict))
+    }
+
     impl Template {
         #[expect(
             clippy::too_many_lines,
@@ -2854,15 +2896,22 @@ pub mod django_rusty_templates {
                 .unwrap_or(false);
             let request = match request {
                 Some(request) => Some(request),
+                // `getattr_opt` skips building an `AttributeError` for the
+                // usual plain `Context`, which has neither attribute.
                 None if is_django_context => context
                     .as_ref()
-                    .and_then(|context| context.getattr("request").ok()),
+                    .and_then(|context| context.getattr_opt(intern!(py, "request")).ok().flatten()),
                 None => None,
             };
             let processor_index = if is_django_context {
                 context
                     .as_ref()
-                    .and_then(|context| context.getattr("_processors_index").ok())
+                    .and_then(|context| {
+                        context
+                            .getattr_opt(intern!(py, "_processors_index"))
+                            .ok()
+                            .flatten()
+                    })
                     .map(|index| index.extract::<usize>())
                     .transpose()?
             } else {
@@ -2879,7 +2928,15 @@ pub mod django_rusty_templates {
             // their existing path, and scoped tags on the native scope bridge.
             // Dense templates benefit from native lookup per variable; reserve
             // this path for at least eight bindings per rendering node.
+            // A plain `Context(dict)` is read lazily below, which beats both.
+            let plain_input = match &context {
+                Some(input) if is_django_context && !already_bound => {
+                    plain_context_dict(py, input, context_class)?.is_some()
+                }
+                _ => false,
+            };
             let flat_live_context = !already_bound
+                && !plain_input
                 && processor_index.is_none()
                 && request.is_none()
                 && self
@@ -3000,6 +3057,9 @@ pub mod django_rusty_templates {
                                 base_context.extend(dict?.extract::<HashMap<String, Py<PyAny>>>()?);
                             }
                         }
+                    } else if let Some(dict) = plain_context_dict(py, context, context_class)? {
+                        // Read the caller's dict lazily, as for a dict input.
+                        source = Some(dict);
                     } else {
                         base_context.extend(context.call_method0("flatten")?.extract::<HashMap<
                             String,
@@ -3035,8 +3095,8 @@ pub mod django_rusty_templates {
                     input.setattr("template_name", self.template_name.as_deref())?;
                 }
                 rendering_context.callback_input = Some(Gc::new(
-                    py.import("weakref")?
-                        .getattr("ref")?
+                    WEAKREF
+                        .import(py, "weakref", "ref")?
                         .call1((input,))?
                         .unbind(),
                 ));
