@@ -4,9 +4,6 @@ name = "django-rusty-templates"
 version = "2026.11.3"
 edition.workspace = true
 
-[package.metadata.cargo-shear]
-ignored = ["cargo-llvm-cov"]
-
 [workspace]
 members = ["dtl-benchmark", "dtl-lexer", "dtl-core", "dtl-browser"]
 resolver = "3"
@@ -102,8 +99,6 @@ unicode-normalization = "0.1.24"
 pyo3-build-config = "0.29.0"
 
 [dev-dependencies]
-cargo-llvm-cov = "0.9.0"
-
 proptest = "1.10.0"
 temp-env = "0.3.6"
 

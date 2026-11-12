@@ -72,12 +72,19 @@ impl BlockCallback {
 
     #[pyo3(name = "super")]
     fn render_super(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let output = self
+        // Render a copy outside the lock: the block may call back into
+        // `block.super` (or another callback sharing this context).
+        let mut context = self
             .context
             .lock_py_attached(py)
             .expect("context lock is not poisoned")
-            .render_super(py, &self.marker)
-            .map_err(|error| self.marker.entry.owner.render_error(error))?;
+            .clone_ref(py);
+        let output = context.render_super(py, &self.marker);
+        *self
+            .context
+            .lock_py_attached(py)
+            .expect("context lock is not poisoned") = context;
+        let output = output.map_err(|error| self.marker.entry.owner.render_error(error))?;
         Ok(py
             .import("django.utils.safestring")?
             .getattr("mark_safe")?

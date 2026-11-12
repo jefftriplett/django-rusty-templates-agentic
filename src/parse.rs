@@ -1850,6 +1850,20 @@ enum TagContext<'py> {
 
 type BuiltinFilterCache = [Option<Gc<Py<PyAny>>>; BuiltinFilter::COUNT];
 
+/// The free variables of the `compile_func` closure Django generates for
+/// `simple_tag`, `simple_block_tag` and `inclusion_tag`.
+const COMPILE_FUNC_CELLS: [&str; 9] = [
+    "defaults",
+    "func",
+    "function_name",
+    "kwonly",
+    "kwonly_defaults",
+    "params",
+    "takes_context",
+    "varargs",
+    "varkw",
+];
+
 pub struct Parser<'t, 'py> {
     py: Python<'py>,
     template: TemplateString<'t>,
@@ -3403,19 +3417,9 @@ impl<'t, 'py> Parser<'t, 'py> {
                                     .is_ok_and(|name| name == "compile_func")
                             }) && code.getattr("co_freevars").is_ok_and(|names| {
                                 names.extract::<Vec<String>>().is_ok_and(|names| {
-                                    [
-                                        "defaults",
-                                        "func",
-                                        "function_name",
-                                        "kwonly",
-                                        "kwonly_defaults",
-                                        "params",
-                                        "takes_context",
-                                        "varargs",
-                                        "varkw",
-                                    ]
-                                    .iter()
-                                    .all(|required| names.iter().any(|name| name == required))
+                                    COMPILE_FUNC_CELLS
+                                        .iter()
+                                        .all(|required| names.iter().any(|name| name == required))
                                 })
                             })
                         });
@@ -3608,19 +3612,9 @@ impl<'t, 'py> Parser<'t, 'py> {
             // Arbitrary compilers, including closures and callable objects, use
             // the compatible Python parser instead of indexing assumed cells.
             if tag_code.getattr("co_name")?.extract::<String>()? != "compile_func"
-                || ![
-                    "defaults",
-                    "func",
-                    "function_name",
-                    "kwonly",
-                    "kwonly_defaults",
-                    "params",
-                    "takes_context",
-                    "varargs",
-                    "varkw",
-                ]
-                .iter()
-                .all(|required| closure_names.iter().any(|name| name == required))
+                || !COMPILE_FUNC_CELLS
+                    .iter()
+                    .all(|required| closure_names.iter().any(|name| name == required))
             {
                 return self.register_opaque(name, tag);
             }
@@ -3631,21 +3625,30 @@ impl<'t, 'py> Parser<'t, 'py> {
 
             // Django 6.1 validates and removes implicit arguments at registration.
             let normalized_params = self.engine.django_series >= (6, 1);
+            // Cells are read by name: their positions follow the sorted free
+            // variable names, which a new Django variable would shift.
+            let cell = |name: &str| -> PyResult<&Bound<'py, PyAny>> {
+                let index = closure_names
+                    .iter()
+                    .position(|key| key == name)
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "Missing tag closure cell: {name}"
+                        ))
+                    })?;
+                Ok(&closure_values[index])
+            };
+            let defaults_count = get_defaults_count(cell("defaults")?)?;
+            let func = cell("func")?.clone();
+            let function_name: String = cell("function_name")?.extract()?;
+            let kwonly: Vec<String> = cell("kwonly")?.extract()?;
+            let kwonly_defaults = get_kwonly_defaults(cell("kwonly_defaults")?)?;
+            let params: Vec<String> = cell("params")?.extract()?;
+            let takes_context = cell("takes_context")?.is_truthy()?;
+            let varargs = !cell("varargs")?.is_none();
+            let varkw = !cell("varkw")?.is_none();
             if closure_names.contains(&"filename".to_string()) {
-                let cell = |name: &str| -> PyResult<&Bound<'py, PyAny>> {
-                    let index = closure_names
-                        .iter()
-                        .position(|key| key == name)
-                        .ok_or_else(|| {
-                            pyo3::exceptions::PyValueError::new_err(format!(
-                                "Missing inclusion tag closure cell: {name}"
-                            ))
-                        })?;
-                    Ok(&closure_values[index])
-                };
-                let takes_context = cell("takes_context")?.is_truthy()?;
-                let function_name: String = cell("function_name")?.extract()?;
-                let mut params: Vec<String> = cell("params")?.extract()?;
+                let mut params = params;
                 if takes_context && !normalized_params {
                     if params.first().is_none_or(|name| name != "context") {
                         return Err(ParseError::RequiresContext {
@@ -3659,28 +3662,19 @@ impl<'t, 'py> Parser<'t, 'py> {
                 TagContext::Inclusion {
                     filename: cell("filename")?.clone(),
                     context: SimpleTagContext {
-                        func: cell("func")?.clone(),
+                        func,
                         function_name,
                         takes_context,
                         params,
-                        defaults_count: get_defaults_count(cell("defaults")?)?,
-                        varargs: !cell("varargs")?.is_none(),
-                        kwonly: cell("kwonly")?.extract()?,
-                        kwonly_defaults: get_kwonly_defaults(cell("kwonly_defaults")?)?,
-                        varkw: !cell("varkw")?.is_none(),
+                        defaults_count,
+                        varargs,
+                        kwonly,
+                        kwonly_defaults,
+                        varkw,
                     },
                 }
             } else if closure_names.contains(&"end_name".to_string()) {
-                let defaults_count = get_defaults_count(&closure_values[0])?;
-                let end_tag_name: String = closure_values[1].extract()?;
-                let func = closure_values[2].clone();
-                let function_name = closure_values[3].extract()?;
-                let kwonly = closure_values[4].extract()?;
-                let kwonly_defaults = get_kwonly_defaults(&closure_values[5])?;
-                let params: Vec<String> = closure_values[6].extract()?;
-                let takes_context = closure_values[7].is_truthy()?;
-                let varargs = !closure_values[8].is_none();
-                let varkw = !closure_values[9].is_none();
+                let end_tag_name: String = cell("end_name")?.extract()?;
 
                 let params = if normalized_params {
                     params
@@ -3733,16 +3727,6 @@ impl<'t, 'py> Parser<'t, 'py> {
                     },
                 }
             } else {
-                let defaults_count = get_defaults_count(&closure_values[0])?;
-                let func = closure_values[1].clone();
-                let function_name = closure_values[2].extract()?;
-                let kwonly = closure_values[3].extract()?;
-                let kwonly_defaults = get_kwonly_defaults(&closure_values[4])?;
-                let params: Vec<String> = closure_values[5].extract()?;
-                let takes_context = closure_values[6].is_truthy()?;
-                let varargs = !closure_values[7].is_none();
-                let varkw = !closure_values[8].is_none();
-
                 let params = match takes_context && !normalized_params {
                     false => params,
                     true => {

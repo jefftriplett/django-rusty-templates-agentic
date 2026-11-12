@@ -1864,7 +1864,13 @@ pub(super) fn retrieve_context<'py>(
         // Only this function holds the wrapper, and no block callback holds
         // its state: swap the render back and keep the wrapper for next time.
         // SAFETY: `wrapper` is a live object, and reading a reference count is
-        // only a load.
+        // only a load. Reuse is sound because, on GIL builds (this block is
+        // compiled only there), no other thread can change the count while we
+        // hold the GIL: a count of 1 is our own handle, so no Python object,
+        // callback or retained reference can still reach the wrapper and
+        // observe its state being swapped out or the wrapper being pooled.
+        // Native handles (block callbacks) are ruled out by
+        // `is_sole_native_owner`.
         let refcount = unsafe { pyo3::ffi::Py_REFCNT(wrapper.as_ptr()) };
         if refcount == 1 && wrapper.borrow().context.is_sole_native_owner() {
             std::mem::swap(

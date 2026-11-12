@@ -1377,7 +1377,13 @@ impl PyContext {
             .context
             .lock_py_attached(py)
             .expect("Mutex should not be poisoned");
-        guard.insert(key, value)
+        // Keep the replaced value alive until the lock is released, so its
+        // `__del__` cannot re-enter this context while it is locked.
+        let replaced = guard.get(py, &key);
+        let result = guard.insert(key, value);
+        drop(guard);
+        drop(replaced);
+        result
     }
 
     /// Like Django's `Context.update()`. Django pushes a layer that stays

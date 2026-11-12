@@ -217,10 +217,13 @@ impl<T: Trace> Trace for OnceLock<T> {
 }
 
 /// A fallible Python initializer with a nonblocking, Python-free GC read path.
+///
+/// `init` runs without a lock, so an initializer that re-enters Python (or
+/// this cell) cannot deadlock. Threads that race each build a value and the
+/// first one stored wins; the others are dropped.
 #[derive(Debug)]
 pub struct GcOnceLock<T> {
     value: OnceLock<T>,
-    initializing: Mutex<()>,
 }
 
 impl<T> GcOnceLock<T> {
@@ -232,33 +235,27 @@ impl<T> GcOnceLock<T> {
     pub fn with_value(value: T) -> Self {
         Self {
             value: OnceLock::from(value),
-            initializing: Mutex::new(()),
         }
     }
 
     pub fn new() -> Self {
         Self {
             value: OnceLock::new(),
-            initializing: Mutex::new(()),
         }
     }
 
     pub fn get_or_try_init<E>(
         &self,
-        py: Python<'_>,
+        _py: Python<'_>,
         init: impl FnOnce() -> Result<T, E>,
     ) -> Result<&T, E> {
         if let Some(value) = self.value.get() {
             return Ok(value);
         }
-        let _guard = self
-            .initializing
-            .lock_py_attached(py)
-            .expect("initializer lock is not poisoned");
-        if let Some(value) = self.value.get() {
-            return Ok(value);
-        }
-        let _ = self.value.set(init()?);
+        let value = init()?;
+        // If another thread stored first, its value wins and this one is
+        // dropped here, while attached, since it may hold Python references.
+        let _ = self.value.set(value);
         Ok(self.value.get().expect("initialized native object"))
     }
 }
