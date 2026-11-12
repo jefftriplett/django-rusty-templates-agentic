@@ -34,6 +34,12 @@ A template that a tag renders with its context no longer sees the outer template
 
 In templates with a custom compiled tag, `{% for %}` loops that contain no custom tags or includes now render natively when no Python code can reach the Django `Context`, making a template with one custom tag about 2.5× faster and use about a third of the memory. ([#400](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/400))
 
+Parse templates that use a custom tag without `rusty_isolated_compiler` about 25% faster (102 → 75 µs against Django's 52) and keep about a quarter less memory per template, by deferring `{% for %}`/`{% if %}` arguments that Rust compiles anyway. ([#402](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/402))
+
+Render a loop with `{% with %}` inside about 6–10% faster by not re-attaching to Python for each loop and scope handle. ([#404](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/404))
+
+Internal cleanups with no change in behavior: one comparison path for every `{% if %}` operator, and `parse.rs` and `render/filters.rs` split into smaller files. ([#403](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/403), [#405](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/405), [#406](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/406))
+
 ## 2026.11.3
 
 Compile Django admin's inclusion tags, `get_admin_log` and `get_flatpages` natively, so all of Django's contrib templates, including the admin change form, change list and index, compile natively. ([#318](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/318))
