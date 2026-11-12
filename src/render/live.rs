@@ -18,6 +18,7 @@ static BASE_CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static CONTEXT_DICT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static REQUEST_CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static WEAKREF_COUNT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 /// Which of `BaseContext`'s `__getitem__` and `__setitem__` a context's type
 /// keeps, remembered for one context object.
@@ -162,4 +163,72 @@ pub fn flags(context: &Bound<'_, PyAny>) -> PyResult<(bool, Option<bool>, Option
         context.getattr(names.1)?.extract()?,
         context.getattr(names.2)?.extract()?,
     ))
+}
+
+/// How many strong references `object` has.
+pub fn reference_count(object: &Bound<'_, PyAny>) -> isize {
+    // SAFETY: `object` is a valid, live object, and holding `Bound` means
+    // we are attached to the interpreter.
+    unsafe { pyo3::ffi::Py_REFCNT(object.as_ptr()) }
+}
+
+fn weakly_referenced(object: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let count = WEAKREF_COUNT
+        .import(object.py(), "weakref", "getweakrefcount")?
+        .call1((object,))?;
+    Ok(count.extract::<usize>()? > 0)
+}
+
+/// How many references to `context` Python can't use to reach it, or `None`
+/// if Python might hold it beyond those.
+///
+/// Django's `push()` and `update()` add `ContextDict` layers that keep
+/// `self.context`. Such a layer, held only by `dicts`, which only the context
+/// holds, leads back to the context alone. A context that has weak
+/// references, or a layer or `dicts` list held elsewhere, gives `None`.
+pub fn self_references(context: &Bound<'_, PyAny>) -> PyResult<Option<isize>> {
+    let py = context.py();
+    if weakly_referenced(context)? {
+        return Ok(None);
+    }
+    let Some(dicts) = dicts(context)? else {
+        return Ok(None);
+    };
+    // The context's attribute, and `dicts` here.
+    if reference_count(dicts.as_any()) > 2 {
+        return Ok(None);
+    }
+    let context_dict = CONTEXT_DICT.import(py, "django.template.context", "ContextDict")?;
+    let mut count = 0;
+    for layer in dicts.iter() {
+        if !layer.get_type().is(context_dict) || !layer.getattr(intern!(py, "context"))?.is(context)
+        {
+            continue;
+        }
+        // The list's reference, and `layer` here.
+        if reference_count(&layer) > 2 || weakly_referenced(&layer)? {
+            return Ok(None);
+        }
+        count += 1;
+    }
+    Ok(Some(count))
+}
+
+/// How many references to `context` Python might use to reach it, or `None`
+/// if that can't be told. See `self_references`.
+pub fn outside_references(context: &Bound<'_, PyAny>) -> PyResult<Option<isize>> {
+    Ok(self_references(context)?.map(|inner| reference_count(context) - inner))
+}
+
+/// `context.push()`, leaving the new layer to the context alone, so the
+/// layer doesn't count as a way to reach it (see `self_references`).
+pub fn push(context: &Bound<'_, PyAny>) -> PyResult<()> {
+    context
+        .call_method0(intern!(context.py(), "push"))
+        .map(drop)
+}
+
+/// What `ContextDict.__exit__` does for a layer `push` added.
+pub fn pop(context: &Bound<'_, PyAny>) -> PyResult<()> {
+    context.call_method0(intern!(context.py(), "pop")).map(drop)
 }

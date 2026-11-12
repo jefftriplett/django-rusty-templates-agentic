@@ -2335,9 +2335,15 @@ pub mod django_rusty_templates {
                 } else {
                     Some(live.call_method0("flatten")?.extract()?)
                 };
+                // A Context made here is reachable from Python only through
+                // what it hands to callbacks, which raises this count.
+                if !direct_input {
+                    context.live_refs = crate::render::live::outside_references(&live)?;
+                }
                 context.formatting_context = Some(live.unbind());
                 let result =
                     self.render_body_with_owner_into(py, &self.nodes, context, output, owner);
+                context.live_refs = None;
                 let live = context
                     .formatting_context
                     .take()

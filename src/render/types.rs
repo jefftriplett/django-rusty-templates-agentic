@@ -184,6 +184,17 @@ impl Trace for ForLoop {
     }
 }
 
+/// A live render's Django `Context`, set aside while a callback-free loop
+/// renders natively. Python can't see the loop's scopes, so names bound since
+/// `names`/`loops` were the depths resolve natively; every other name is read
+/// from the live context, where callbacks may have changed it.
+#[derive(Debug)]
+struct Shadow {
+    live: Py<PyAny>,
+    names: usize,
+    loops: usize,
+}
+
 #[derive(Clone, Debug)]
 struct ScopeBindings {
     base: Gc<SharedBindings>,
@@ -208,6 +219,12 @@ pub struct Context {
     pub format_values: bool,
     pub instrument_render: bool,
     pub formatting_context: Option<Py<PyAny>>,
+    // Set while a callback-free loop of a live render runs on native scopes.
+    shadow: Option<Shadow>,
+    // For a live context this render created, how many references Python
+    // might use to reach it once installed (`live::outside_references`).
+    // While there are no more, only this render can reach it.
+    pub(crate) live_refs: Option<isize>,
     live_methods: Cell<Option<super::live::Methods>>,
     // Number formats of the active language, read on the first localized
     // number. `{% language %}` replaces it for its body. It holds only Rust
@@ -271,6 +288,9 @@ impl Trace for Context {
         self.loops.trace(visit)?;
         self.request.trace(visit)?;
         self.formatting_context.trace(visit)?;
+        if let Some(shadow) = &self.shadow {
+            shadow.live.trace(visit)?;
+        }
         // A collection can run while a format call holds the cache.
         if let Ok(date_cache) = self.date_cache.try_borrow() {
             date_cache.trace(visit)?;
@@ -339,6 +359,8 @@ impl Context {
             format_values: false,
             instrument_render: true,
             formatting_context: None,
+            shadow: None,
+            live_refs: None,
             live_methods: Cell::new(None),
             number_format: Arc::default(),
             callback_input: None,
@@ -429,6 +451,12 @@ impl Context {
             format_values: self.format_values,
             instrument_render: self.instrument_render,
             formatting_context: self.formatting_context.as_ref().map(|v| v.clone_ref(py)),
+            shadow: self.shadow.as_ref().map(|shadow| Shadow {
+                live: shadow.live.clone_ref(py),
+                names: shadow.names,
+                loops: shadow.loops,
+            }),
+            live_refs: None,
             live_methods: self.live_methods.clone(),
             number_format: Arc::clone(&self.number_format),
             callback_input: self.callback_input.clone(),
@@ -490,6 +518,8 @@ impl Context {
             });
         }
         let mut scoped = self.clone_ref(py);
+        // The parent's reference to a live context is Rust's own.
+        scoped.live_refs = self.live_refs.map(|refs| refs + 1);
         scoped
             .scope_bindings
             .as_mut()
@@ -731,6 +761,21 @@ impl Context {
             let methods = super::live::Methods::cached(&self.live_methods, context)?;
             return super::live::get(context, methods, &interned_name(py, key));
         }
+        if let Some(shadow) = &self.shadow {
+            if key == "forloop" {
+                if self.loops.len() > shadow.loops {
+                    return self.loop_dictionary(py, 0).map(Some);
+                }
+            } else if self.names[shadow.names..]
+                .iter()
+                .any(|names| names.contains(key))
+            {
+                return Ok(self.get(py, key));
+            }
+            let live = shadow.live.bind(py);
+            let methods = super::live::Methods::cached(&self.live_methods, live)?;
+            return super::live::get(live, methods, &interned_name(py, key));
+        }
         if key == "forloop" && !self.loops.is_empty() {
             return self.loop_dictionary(py, 0).map(Some);
         }
@@ -748,6 +793,61 @@ impl Context {
             version.get_item(0)?.extract()?,
             version.get_item(1)?.extract()?,
         ))
+    }
+
+    /// Render `render` on native scopes over this live render's Django
+    /// `Context`, for nodes that never hand the context to Python. Returns
+    /// `None` without calling `render` when Python might still reach the
+    /// context, so the caller renders on the live context as usual.
+    pub(crate) fn shadowed<T>(
+        &mut self,
+        py: Python<'_>,
+        render: impl FnOnce(&mut Self) -> T,
+    ) -> PyResult<Option<T>> {
+        let Some(live) = self.formatting_context.take_if(|live| {
+            Self::unreachable_from_python(py, live, self.live_refs).unwrap_or(false)
+        }) else {
+            return Ok(None);
+        };
+        if let Err(error) = self.refresh_live_flags(py, &live) {
+            self.formatting_context = Some(live);
+            return Err(error);
+        }
+        self.shadow = Some(Shadow {
+            live,
+            names: self.names.len(),
+            loops: self.loops.len(),
+        });
+        let result = render(self);
+        let shadow = self.shadow.take().expect("shadow set above");
+        self.formatting_context = Some(shadow.live);
+        Ok(Some(result))
+    }
+
+    /// Whether only this render holds `live`, so Python code that runs
+    /// meanwhile (a callable value, `__str__`, a filter) cannot reach it.
+    fn unreachable_from_python(
+        py: Python<'_>,
+        live: &Py<PyAny>,
+        live_refs: Option<isize>,
+    ) -> PyResult<bool> {
+        let Some(live_refs) = live_refs else {
+            return Ok(false);
+        };
+        Ok(super::live::outside_references(live.bind(py))?.is_some_and(|refs| refs <= live_refs))
+    }
+
+    fn refresh_live_flags(&mut self, py: Python<'_>, live: &Py<PyAny>) -> PyResult<()> {
+        (self.autoescape, self.use_l10n, self.use_tz) = super::live::flags(live.bind(py))?;
+        Ok(())
+    }
+
+    /// Whether `forloop` at `depth` (or the whole `{{ forloop }}`) belongs to
+    /// a loop outside the shadow, so it has to be read as a dict.
+    pub(crate) fn shadowed_loop(&self, depth: usize, whole: bool) -> bool {
+        self.shadow
+            .as_ref()
+            .is_some_and(|shadow| whole || self.loops.len() <= shadow.loops + depth)
     }
 
     pub fn refresh_formatting_flags(&mut self, py: Python<'_>) -> PyResult<()> {
@@ -1012,6 +1112,15 @@ impl Context {
         py: Python<'py>,
         depth: usize,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(shadow) = &self.shadow
+            && self.loops.len() <= shadow.loops + depth
+        {
+            // The innermost loop outside the shadow is the live `forloop`.
+            let live = shadow.live.bind(py);
+            let methods = super::live::Methods::cached(&self.live_methods, live)?;
+            return Ok(super::live::get(live, methods, intern!(py, "forloop"))?
+                .unwrap_or_else(|| PyDict::new(py).into_any()));
+        }
         let Some(loop_) = self.get_for_loop(depth) else {
             return Ok(self
                 .get(py, "forloop")
