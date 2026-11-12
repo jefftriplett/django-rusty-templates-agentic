@@ -18,10 +18,11 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt::Write;
+use std::sync::Mutex;
 
 use pyo3::exceptions::{PyAttributeError, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
+use pyo3::sync::{MutexExt, PyOnceLock};
 use pyo3::types::{
     PyDate, PyDateAccess, PyDateTime, PyDelta, PyDeltaAccess, PyDict, PyString, PyTime,
     PyTimeAccess, PyType, PyTzInfo, PyTzInfoAccess,
@@ -32,8 +33,8 @@ use crate::filters::TzConversion;
 use crate::gc::Trace;
 use crate::render::Content;
 use crate::render::common::gettext;
+use crate::render::language_cache::active_catalog;
 
-static GET_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DATEFORMAT_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DATEFORMAT_TIME_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static GET_CURRENT_TIMEZONE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -156,6 +157,69 @@ impl Name {
     }
 }
 
+/// Names fetched for one translation catalog.
+struct CatalogNames {
+    catalog: Py<PyAny>,
+    names: HashMap<Name, String>,
+}
+
+/// Catalogs whose names are kept at once, enough for interleaved languages.
+const NAME_CATALOGS: usize = 8;
+
+/// Names fetched in earlier renders. Fetching one is a lazy translation and a
+/// `str()` call, which was about half the cost of formatting a date. Entries
+/// are keyed by the catalog `gettext` uses, like [`CatalogCache`], so a newly
+/// activated language or reloaded translations miss instead of going stale.
+///
+/// [`CatalogCache`]: super::language_cache::CatalogCache
+static SHARED_NAMES: Mutex<Vec<CatalogNames>> = Mutex::new(Vec::new());
+
+impl Name {
+    /// The name for the active catalog, from earlier renders when possible.
+    fn fetch_shared(self, py: Python<'_>) -> PyResult<String> {
+        let Some(catalog) = active_catalog(py)? else {
+            return self.fetch(py);
+        };
+        let lock = || {
+            SHARED_NAMES
+                .lock_py_attached(py)
+                .expect("date name cache lock is not poisoned")
+        };
+        {
+            let entries = lock();
+            if let Some(name) = entries
+                .iter()
+                .find(|entry| entry.catalog.bind(py).is(&catalog))
+                .and_then(|entry| entry.names.get(&self))
+            {
+                return Ok(name.clone());
+            }
+        }
+        // Fetch without the lock: it runs Python code.
+        let name = self.fetch(py)?;
+        let mut entries = lock();
+        let index = match entries
+            .iter()
+            .position(|entry| entry.catalog.bind(py).is(&catalog))
+        {
+            Some(index) => index,
+            None => {
+                if entries.len() == NAME_CATALOGS {
+                    entries.remove(0);
+                }
+                entries.push(CatalogNames {
+                    catalog: catalog.unbind(),
+                    names: HashMap::new(),
+                });
+                entries.len() - 1
+            }
+        };
+        entries[index].names.insert(self, name.clone());
+        drop(entries);
+        Ok(name)
+    }
+}
+
 #[derive(Debug, Default)]
 struct Names(HashMap<Name, String>);
 
@@ -163,7 +227,7 @@ impl Names {
     fn get(&mut self, py: Python<'_>, name: Name) -> PyResult<&str> {
         Ok(match self.0.entry(name) {
             Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(name.fetch(py)?),
+            Entry::Vacant(entry) => entry.insert(name.fetch_shared(py)?),
         })
     }
 }
@@ -231,13 +295,7 @@ impl DateCache {
             return Ok(None);
         };
         if !self.formats.contains_key(format_name) {
-            let format = GET_FORMAT
-                .import(py, "django.utils.formats", "get_format")?
-                .call1((format_name,))?;
-            let format = match format.cast_exact::<PyString>() {
-                Ok(format) => Some(format.to_cow()?.into_owned()),
-                Err(_) => None,
-            };
+            let format = super::l10n::date_format(py, format_name)?;
             self.formats.insert(format_name.to_string(), format);
         }
         let Some(format) = &self.formats[format_name] else {

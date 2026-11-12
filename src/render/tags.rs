@@ -1662,7 +1662,7 @@ impl Include {
                 new_context.use_tz = context.use_tz;
                 new_context.format_values = context.format_values;
                 new_context.render_stack = context.render_stack;
-                new_context.number_format = context.number_format.clone();
+                new_context.number_format = std::sync::Arc::clone(&context.number_format);
                 render(&mut new_context)
             }
         }
@@ -2116,7 +2116,7 @@ impl InclusionTag {
         child.use_tz = context.use_tz;
         child.format_values = context.format_values;
         child.render_stack = context.render_stack;
-        child.number_format = context.number_format.clone();
+        child.number_format = std::sync::Arc::clone(&context.number_format);
         if let Some(template_name) = self.admin_template {
             // `InclusionAdminNode` lets each model or app override the template.
             let opts = context
