@@ -53,7 +53,7 @@ and conflict surface can be assessed together. Parser naming does not need it.
 | Filter arguments and scopes | Existing `ArgumentType` variants preserve ordinary/loop references; `tests/test_interop_fragments.py` verifies live loop, with-scope and fallback argument lookup. |
 | Safety, lazy values, numeric/date formatting | `Content::render` keeps subclass hooks and non-string Django formatting; filter/safety tests and interoperability formatting tests cover both engines. |
 | Django 6.1 double-dot lookup | Version-specific interoperability fallback from #50; a type refactor must retain it and its warnings. |
-| Callback mutation and object identity | `Context::resolve_root` reads live contexts; `tests/test_native_regions.py` checks mutations, loop dictionary identity and error cleanup. Do not substitute eager converted values here. |
+| Callback mutation and object identity | `Context::resolve_root` reads live contexts; `tests/test_native_regions.py` checks mutations, loop dictionary identity and error cleanup. Do not substitute eager converted values here. A callback-free `{% for %}` renders on native scopes only while no Python code can reach the live context (`live::outside_references`), reading names it didn't bind from that context; `tests/test_shadow_loops.py` covers it. |
 
 An open upstream issue is not evidence that these features are absent in this
 fork. Any future conversion or enum implementation must pass focused parity

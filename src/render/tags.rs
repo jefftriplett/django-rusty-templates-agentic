@@ -874,10 +874,9 @@ impl Render for Tag {
                             .map(|value| (name, value.unwrap_or_else(|| "".as_content()).to_py(py)))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let scope = if let Some(live) = &context.formatting_context {
-                    Some(live.bind(py).call_method0("push")?)
-                } else {
-                    None
+                let pushed = match &context.formatting_context {
+                    Some(live) => super::live::push(live.bind(py)).map(|()| true)?,
+                    None => false,
                 };
                 let local_names = values
                     .iter()
@@ -891,8 +890,8 @@ impl Render for Tag {
                     .and_then(|()| nodes.render_into(py, template, &mut scoped, output));
                 // Merge first: it hands back state the scope took from `context`.
                 let merged = context.merge_render_state(py, scoped, &local_names);
-                if let Some(scope) = scope {
-                    scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                if pushed && let Some(live) = &context.formatting_context {
+                    super::live::pop(live.bind(py))?;
                 }
                 merged?;
                 rendered
@@ -1406,14 +1405,23 @@ impl Render for For {
         context: &mut Context,
         output: &mut String,
     ) -> super::RenderIntoResult {
-        let scope = if let Some(django_context) = &context.formatting_context {
-            Some(django_context.bind(py).call_method0("push")?)
-        } else {
-            None
+        if self.callback_free
+            && context.formatting_context.is_some()
+            && let Some(result) = context.shadowed(py, |context| {
+                self.render_loop_into(py, template, context, output)
+            })?
+        {
+            return result;
+        }
+        // Keep no handle on the live context or its new layer while the loop
+        // renders: an inner loop may then render on native scopes.
+        let pushed = match &context.formatting_context {
+            Some(live) => super::live::push(live.bind(py)).map(|()| true)?,
+            None => false,
         };
         let result = self.render_loop_into(py, template, context, output);
-        if let Some(scope) = scope {
-            scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+        if pushed && let Some(live) = &context.formatting_context {
+            super::live::pop(live.bind(py))?;
         }
         result
     }

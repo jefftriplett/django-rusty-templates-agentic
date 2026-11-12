@@ -1061,6 +1061,9 @@ pub struct For {
     pub reversed: bool,
     pub body: Vec<TokenTree>,
     pub empty: Option<Vec<TokenTree>>,
+    /// No node in the body or empty branch can see a Django `Context`, so a
+    /// live render can run this loop on native scopes. See `callback_free`.
+    pub callback_free: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3996,14 +3999,47 @@ impl<'t, 'py> Parser<'t, 'py> {
             } => None,
             _ => unreachable!(),
         };
+        let callback_free = callback_free(&nodes) && empty.as_deref().is_none_or(callback_free);
         Ok(TokenTree::tag(Tag::For(For {
             iterable,
             variables,
             reversed,
             body: nodes,
             empty,
+            callback_free,
         })))
     }
+}
+
+/// Whether rendering `nodes` never hands a Django `Context` to Python.
+///
+/// Variables, filters and these built-in tags read the context only through
+/// native lookups, and only scope it with push/pop pairs that end inside
+/// them. Python can't observe their scopes, so they need no live layers.
+fn callback_free(nodes: &[TokenTree]) -> bool {
+    nodes.iter().all(|node| match node {
+        TokenTree::Text(_)
+        | TokenTree::LiteralText(_)
+        | TokenTree::TranslatedText(_)
+        | TokenTree::Int(_)
+        | TokenTree::Float(_)
+        | TokenTree::Variable(_)
+        | TokenTree::ForVariable(_)
+        | TokenTree::Filter(_) => true,
+        TokenTree::Tag(tag) => match tag.as_ref() {
+            Tag::If { truthy, falsey, .. } => {
+                callback_free(truthy) && falsey.as_deref().is_none_or(callback_free)
+            }
+            Tag::For(for_tag) => for_tag.callback_free,
+            Tag::With { nodes, .. }
+            | Tag::Autoescape { nodes, .. }
+            | Tag::FilterBlock { nodes, .. }
+            | Tag::Spaceless(nodes)
+            | Tag::Verbatim(nodes) => callback_free(nodes),
+            Tag::Comment(_) | Tag::Load | Tag::TemplateTag(_) | Tag::Lorem(_) => true,
+            _ => false,
+        },
+    })
 }
 
 fn get_defaults_count(defaults: &Bound<'_, PyAny>) -> PyResult<usize> {

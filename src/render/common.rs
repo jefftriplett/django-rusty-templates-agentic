@@ -427,6 +427,7 @@ impl Resolve for ForVariable {
         _failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
         if context.formatting_context.is_some()
+            || context.shadowed_loop(self.parent_count, self.variant == ForVariableName::Object)
             || context.loop_dictionary_cached(py, self.parent_count)
         {
             let Some(mut value) = context.resolve_root(py, "forloop")? else {
