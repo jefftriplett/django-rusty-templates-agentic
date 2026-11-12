@@ -111,11 +111,15 @@ impl<'t> ForLexer<'t> {
         }
     }
 
+    #[must_use]
     pub fn with_modern_syntax(mut self, modern: bool) -> Self {
         self.modern = modern;
         self
     }
 
+    /// # Panics
+    ///
+    /// Panics if called on an empty expression before any token was lexed.
     pub fn lex_expression(&mut self) -> Result<ForVariableToken, ForLexerError> {
         if self.rest.is_empty() {
             return Err(ForLexerError::MissingExpression {
@@ -125,7 +129,7 @@ impl<'t> ForLexer<'t> {
         let mut chars = self.rest.chars();
         let mut token = match chars.next().expect("self.rest is not empty") {
             '_' => {
-                if let Some('(') = chars.next() {
+                if chars.next() == Some('(') {
                     self.lex_translated(&mut chars)?
                 } else {
                     self.lex_variable()
@@ -216,6 +220,9 @@ impl<'t> ForLexer<'t> {
         }
     }
 
+    /// # Panics
+    ///
+    /// Panics if called on an empty expression before any token was lexed.
     pub fn lex_in(&mut self) -> Result<(), ForLexerInError> {
         if self.rest.is_empty() {
             return Err(ForLexerInError::MissingIn {
@@ -254,7 +261,7 @@ impl<'t> ForLexer<'t> {
         Err(ForLexerError::UnexpectedExpression { at: at.into() })
     }
 
-    fn check_invalid_variable_name(&mut self, index: usize, at: At) -> Result<(), ForLexerError> {
+    fn check_invalid_variable_name(&self, index: usize, at: At) -> Result<(), ForLexerError> {
         let name = &self.rest[..index];
 
         let (_, _, remainder) = lex_variable(0, name);

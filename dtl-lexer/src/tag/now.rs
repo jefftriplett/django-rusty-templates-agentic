@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_lex_format_missing() {
-        let template = r#"{% now %}"#;
+        let template = r"{% now %}";
         let parts = TagParts { at: (7, 0) };
         let mut lexer = NowLexer::new(template.into_template_string(), parts);
         assert!(matches!(
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn test_lex_format_missing_translated_string() {
-        let template = r#"{% now _() %}"#;
+        let template = r"{% now _() %}";
         let parts = TagParts { at: (7, 3) }; // _()
         let mut lexer = NowLexer::new(template.into_template_string(), parts);
         assert_eq!(lexer.lex_format().unwrap(), (7, 3));

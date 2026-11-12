@@ -61,7 +61,7 @@ impl<'t> TemplateContent<'t> for Tag {
 ///
 /// Both pieces are trimmed to have no leading or trailing whitespace.
 ///
-/// Returns a TagLexerError when the tag is empty or has an invalid name.
+/// Returns a `TagLexerError` when the tag is empty or has an invalid name.
 pub fn lex_tag(tag: &str, start: usize) -> Result<Tag, TagLexerError> {
     let rest = tag.trim_start();
     if rest.trim().is_empty() {
@@ -114,7 +114,7 @@ mod tests {
         let template = "{%  %}";
         let tag = trim_tag(template);
         let error = lex_tag(tag, START_TAG_LEN).unwrap_err();
-        assert_eq!(error, TagLexerError::EmptyTag { at: (0, 6).into() })
+        assert_eq!(error, TagLexerError::EmptyTag { at: (0, 6).into() });
     }
 
     #[test]
@@ -124,7 +124,7 @@ mod tests {
         let tag = lex_tag(tag, START_TAG_LEN).unwrap();
         assert_eq!(tag.at, (3, 9));
         assert_eq!(tag.content(template.into_template_string()), "csrftoken");
-        assert_eq!(tag.parts, TagParts { at: (12, 0) })
+        assert_eq!(tag.parts, TagParts { at: (12, 0) });
     }
 
     #[test]
@@ -132,7 +132,7 @@ mod tests {
         let template = "{% url'foo' %}";
         let tag = trim_tag(template);
         let error = lex_tag(tag, START_TAG_LEN).unwrap_err();
-        assert_eq!(error, TagLexerError::InvalidTagName { at: (3, 8).into() })
+        assert_eq!(error, TagLexerError::InvalidTagName { at: (3, 8).into() });
     }
 
     #[test]
@@ -140,7 +140,7 @@ mod tests {
         let template = "{% url'foo' bar %}";
         let tag = trim_tag(template);
         let error = lex_tag(tag, START_TAG_LEN).unwrap_err();
-        assert_eq!(error, TagLexerError::InvalidTagName { at: (3, 8).into() })
+        assert_eq!(error, TagLexerError::InvalidTagName { at: (3, 8).into() });
     }
 
     #[test]
@@ -150,7 +150,7 @@ mod tests {
         let tag = lex_tag(tag, START_TAG_LEN).unwrap();
         assert_eq!(tag.at, (3, 3));
         assert_eq!(tag.content(template.into_template_string()), "url");
-        assert_eq!(tag.parts, TagParts { at: (7, 8) })
+        assert_eq!(tag.parts, TagParts { at: (7, 8) });
     }
 
     #[test]

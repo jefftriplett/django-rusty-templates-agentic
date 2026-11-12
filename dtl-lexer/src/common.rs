@@ -164,7 +164,7 @@ pub fn lex_translated<'t>(
             return Err(LexerError::MissingTranslatedString { at: at.into() });
         }
     };
-    if let Some(')') = chars.next() {
+    if chars.next() == Some(')') {
         let byte = byte + END_TRANSLATE_LEN;
         let rest = &rest[END_TRANSLATE_LEN..];
         let at = (start, byte - start);
@@ -243,7 +243,6 @@ pub fn check_variable_attrs(variable: &str, start: usize) -> Result<(), LexerErr
         match var.chars().next() {
             Some(c) if c != '_' => {
                 offset += var.len() + 1;
-                continue;
             }
             _ => {
                 let at = (start + offset, var.len());
@@ -278,6 +277,10 @@ pub fn translated_text_content_at(at: At) -> At {
 
 /// Returns a new `At` representing the span from the beginning of `start`
 /// to the end of `end`.
+///
+/// # Panics
+///
+/// Panics if `end` starts before `start`.
 pub fn get_all_at(start: At, end: At) -> At {
     assert!(
         end.0 >= start.0,

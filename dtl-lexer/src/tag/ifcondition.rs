@@ -76,6 +76,7 @@ impl<'t> IfConditionLexer<'t> {
         }
     }
 
+    #[must_use]
     pub fn with_modern_syntax(mut self, modern: bool) -> Self {
         self.modern = modern;
         self
@@ -85,7 +86,7 @@ impl<'t> IfConditionLexer<'t> {
         let mut chars = self.rest.chars();
         let mut token = match chars.next().expect("self.rest is not empty") {
             '_' => {
-                if let Some('(') = chars.next() {
+                if chars.next() == Some('(') {
                     self.lex_translated(&mut chars)?
                 } else {
                     self.lex_variable()

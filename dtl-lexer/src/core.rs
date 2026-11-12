@@ -94,6 +94,7 @@ impl<'t> Lexer<'t> {
 
     /// Django 6.2 lexes `comment` and `verbatim` contents as raw text up to
     /// the closing tag, which may span lines.
+    #[must_use]
     pub fn with_modern_raw_blocks(mut self, enabled: bool) -> Self {
         self.modern_raw_blocks = enabled;
         self
@@ -102,6 +103,7 @@ impl<'t> Lexer<'t> {
     /// Django 6.2 lets `{% ... %}` tags span lines unless the engine sets
     /// the transitional `allow_multiline_tags` option to `False`.
     /// Variables and comments still end at a newline.
+    #[must_use]
     pub fn with_multiline_tags(mut self, enabled: bool) -> Self {
         self.multiline_tags = enabled;
         self
@@ -258,14 +260,13 @@ impl<'t> Lexer<'t> {
                 self.byte += tag_len;
                 self.rest = &self.rest[tag_len..];
                 return Token::tag(at);
-            } else {
-                // Stay in the raw block so the next call returns the closing
-                // tag, even one the normal lexer would treat as text.
-                self.rest = &self.rest[index..];
-                let at = (self.byte, index);
-                self.byte += index;
-                return Token::text(at);
             }
+            // Stay in the raw block so the next call returns the closing
+            // tag, even one the normal lexer would treat as text.
+            self.rest = &self.rest[index..];
+            let at = (self.byte, index);
+            self.byte += index;
+            return Token::text(at);
         }
     }
 }
@@ -298,7 +299,7 @@ impl Iterator for Lexer<'_> {
                             verbatim == "verbatim" || verbatim.starts_with("verbatim ")
                         };
                         if opens_verbatim {
-                            self.verbatim = Some(verbatim)
+                            self.verbatim = Some(verbatim);
                         }
                     }
                     tag
