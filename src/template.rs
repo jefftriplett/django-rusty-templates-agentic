@@ -353,7 +353,7 @@ pub mod django_rusty_templates {
             let loader = native_loader.extract::<PyRef<'_, Self>>()?;
             let template = if let Ok(native) = renderer.extract::<PyRef<'_, Template>>() {
                 let mut template = native.clone();
-                template.loader_path = loader.path[self.path.len()..].to_vec();
+                template.set_loader_path(loader.path[self.path.len()..].to_vec());
                 template
             } else {
                 Template {
@@ -363,6 +363,7 @@ pub mod django_rusty_templates {
                     has_inheritance: false,
                     has_python_callbacks: false,
                     interop_fragment: false,
+                    owner_handle: OwnerHandle::default(),
                     engine: self.engine.clone(),
                     template_name: Some(renderer.getattr("name")?.extract()?),
                     loader_path: loader.path[self.path.len()..].to_vec(),
@@ -397,7 +398,7 @@ pub mod django_rusty_templates {
             };
             let mut path = self.path.clone();
             path.extend(&template.loader_path);
-            template.loader_path = path;
+            template.set_loader_path(path);
             Ok(template)
         }
 
@@ -881,6 +882,7 @@ pub mod django_rusty_templates {
                 has_inheritance: false,
                 has_python_callbacks: false,
                 interop_fragment: false,
+                owner_handle: OwnerHandle::default(),
                 engine,
             });
         }
@@ -1388,6 +1390,7 @@ pub mod django_rusty_templates {
                 has_inheritance: false,
                 has_python_callbacks,
                 interop_fragment: true,
+                owner_handle: OwnerHandle::default(),
             })
         }
 
@@ -1779,6 +1782,41 @@ pub mod django_rusty_templates {
         }
     }
 
+    /// The GC handle a top-level render gives nodes as their owning template.
+    ///
+    /// Building one copies the template into a new GC container, which cost
+    /// a clone, an allocation and a deallocation on every render. It is now
+    /// built once and shared by later clones, such as each `get_template` from
+    /// a cached loader. The template inside the handle has an empty handle of
+    /// its own, so no template refers to itself.
+    struct OwnerHandle(GcOnceLock<Gc<Template>>);
+
+    impl Default for OwnerHandle {
+        fn default() -> Self {
+            Self(GcOnceLock::new())
+        }
+    }
+
+    impl Clone for OwnerHandle {
+        fn clone(&self) -> Self {
+            self.0.get().map_or_else(Self::default, |handle| {
+                Self(GcOnceLock::with_value(handle.clone()))
+            })
+        }
+    }
+
+    impl std::fmt::Debug for OwnerHandle {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("OwnerHandle")
+        }
+    }
+
+    impl Trace for OwnerHandle {
+        fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+            self.0.trace(visit)
+        }
+    }
+
     #[derive(Debug, Clone)]
     #[pyclass(skip_from_py_object)]
     pub struct Template {
@@ -1796,6 +1834,7 @@ pub mod django_rusty_templates {
         /// fragment's span for the interop node to map onto the full template,
         /// instead of debug data for the fragment's own source.
         interop_fragment: bool,
+        owner_handle: OwnerHandle,
     }
 
     impl Trace for Template {
@@ -1803,7 +1842,8 @@ pub mod django_rusty_templates {
             self.engine.trace(visit)?;
             self.nodes.trace(visit)?;
             self.caches.trace(visit)?;
-            self.python_renderer.trace(visit)
+            self.python_renderer.trace(visit)?;
+            self.owner_handle.trace(visit)
         }
     }
 
@@ -1957,6 +1997,7 @@ pub mod django_rusty_templates {
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
                 has_python_callbacks,
                 interop_fragment: false,
+                owner_handle: OwnerHandle::default(),
                 nodes: Gc::new(nodes),
                 engine,
             })
@@ -2058,6 +2099,25 @@ pub mod django_rusty_templates {
             result
         }
 
+        /// A different loader path is a different template to its renders.
+        pub(crate) fn set_loader_path(&mut self, path: Vec<usize>) {
+            self.loader_path = path;
+            self.owner_handle = OwnerHandle::default();
+        }
+
+        /// This template as a GC handle, built on first use.
+        pub(crate) fn owner_handle(&self, py: Python<'_>) -> &Gc<Self> {
+            let handle = self.owner_handle.0.get_or_try_init(py, || {
+                Ok::<_, std::convert::Infallible>(Gc::new(Self {
+                    owner_handle: OwnerHandle::default(),
+                    ..self.clone()
+                }))
+            });
+            match handle {
+                Ok(handle) => handle,
+            }
+        }
+
         pub(crate) fn is_native(&self) -> bool {
             self.python_renderer.is_none()
         }
@@ -2113,6 +2173,7 @@ pub mod django_rusty_templates {
                 has_python_callbacks: self.has_python_callbacks
                     && Self::nodes_have_callbacks(&nodes),
                 interop_fragment: self.interop_fragment,
+                owner_handle: OwnerHandle::default(),
                 nodes,
                 caches: TemplateCaches {
                     native_partials: self.caches.native_partials.clone(),
@@ -2342,7 +2403,10 @@ pub mod django_rusty_templates {
                 std::mem::replace(&mut context.python_blocks, python_blocks);
             // Includes and blocks already own GC-visible template handles.
             // Reuse them instead of allocating and cloning complete templates.
-            let owner = owner.cloned().unwrap_or_else(|| Gc::new(self.clone()));
+            let owner = match owner {
+                Some(owner) => owner.clone(),
+                None => self.owner_handle(py).clone(),
+            };
             if context.root_template.is_none() {
                 context.root_template = Some(owner.clone());
             }
