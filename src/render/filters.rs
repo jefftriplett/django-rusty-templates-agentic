@@ -236,9 +236,13 @@ impl ResolveFilter for AddFilter {
         let Some(variable) = variable else {
             return Ok(None);
         };
-        Ok(match (variable.to_bigint(), right.to_bigint()) {
-            (Some(variable), Some(right)) => Some(Content::Int(variable + right)),
-            _ => {
+        // Django gives up on `int()` after the first failure.
+        let integers = variable
+            .to_bigint()
+            .and_then(|left| Some((left, right.to_bigint()?)));
+        Ok(match integers {
+            Some((variable, right)) => Some(Content::Int(variable + right)),
+            None => {
                 let variable = variable.to_py(py);
                 let right = right.to_py(py);
                 variable.add(right).ok().map(Content::Py)
@@ -622,12 +626,20 @@ impl ResolveFilter for EscapeFilter {
                     }
                     Content::Int(n) => Cow::Owned(n.to_string()),
                     Content::Float(n) => Cow::Owned(python_float_str(n)),
+                    // `escape` is a `stringfilter`: `conditional_escape` sees
+                    // `str(value)`, which keeps a `SafeString` from `__str__`.
                     Content::Py(object) => {
-                        let escaped = py
-                            .import("django.utils.html")?
-                            .getattr("conditional_escape")?
-                            .call1((object,))?;
-                        Cow::Owned(escaped.extract::<String>()?)
+                        let text = object.str()?;
+                        if text.is_exact_instance_of::<PyString>() {
+                            let mut encoded = String::new();
+                            append_escaped(&text.to_cow()?, &mut encoded);
+                            Cow::Owned(encoded)
+                        } else {
+                            let escaped = CONDITIONAL_ESCAPE
+                                .import(py, "django.utils.html", "conditional_escape")?
+                                .call1((text,))?;
+                            Cow::Owned(escaped.extract::<String>()?)
+                        }
                     }
                     Content::Bool(true) => Cow::Borrowed("True"),
                     Content::Bool(false) => Cow::Borrowed("False"),

@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 
 use either::Either;
 use num_bigint::{BigInt, Sign};
-use num_traits::cast::ToPrimitive;
+use num_traits::cast::{FromPrimitive, ToPrimitive};
 use pyo3::exceptions::{
     PyAttributeError, PyException, PyKeyError, PyOverflowError, PyTypeError, PyValueError,
     PyZeroDivisionError,
@@ -42,7 +42,9 @@ static RENDER_FIRSTOF_VALUE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static FIRSTOF_SAFE_STRING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static QUERY_DICT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static QUERY_SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-static STRIP_SPACES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static GROUPED_RESULT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static DJANGO_CONTEXT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static MARK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DEBUG_NODE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static MARK_BLOCK_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -672,6 +674,65 @@ impl Evaluate for IfCondition {
     }
 }
 
+/// A Python `int` or `float` that converts to a float exactly, the only
+/// values `native_widthratio` takes.
+fn exact_float(value: &Bound<'_, PyAny>) -> Option<f64> {
+    if value.is_exact_instance_of::<PyFloat>() {
+        return value.extract().ok();
+    }
+    if value.is_exact_instance_of::<PyInt>() {
+        let number: i64 = value.extract().ok()?;
+        if number.unsigned_abs() <= 1 << 53 {
+            #[allow(clippy::cast_precision_loss)]
+            return Some(number as f64);
+        }
+    }
+    None
+}
+
+/// Django's `round((float(value) / float(max_value)) * int(max_width))` for
+/// plain numbers, with the same float operations. `None` leaves strings,
+/// subclasses, huge integers and results `round` rejects to Python.
+fn native_widthratio(values: &[Bound<'_, PyAny>]) -> Option<String> {
+    if !values[2].is_exact_instance_of::<PyInt>() {
+        return None;
+    }
+    let value = exact_float(&values[0])?;
+    let maximum = exact_float(&values[1])?;
+    let width = exact_float(&values[2])?;
+    if maximum == 0.0 {
+        return Some("0".to_string());
+    }
+    let ratio = (value / maximum) * width;
+    if !ratio.is_finite() {
+        return None;
+    }
+    BigInt::from_f64(ratio.round_ties_even()).map(|rounded| rounded.to_string())
+}
+
+/// Python's `str.isspace`, which `re`'s `\s` and `str.strip` use: Unicode
+/// whitespace plus the four information separators.
+fn is_python_space(c: char) -> bool {
+    c.is_whitespace() || ('\x1c'..='\x1f').contains(&c)
+}
+
+/// Django's `strip_spaces_between_tags(value.strip())`: `re.sub(r">\s+<",
+/// "><", value)`.
+fn spaceless(text: &str) -> String {
+    let mut rest = text.trim_matches(is_python_space);
+    let mut output = String::with_capacity(rest.len());
+    while let Some(position) = rest.find('>') {
+        output.push_str(&rest[..=position]);
+        rest = &rest[position + 1..];
+        let trimmed = rest.trim_start_matches(is_python_space);
+        if trimmed.len() < rest.len() && trimmed.starts_with('<') {
+            rest = trimmed;
+        }
+    }
+    output.push_str(rest);
+    output
+}
+
 fn render_widthratio(
     args: &[TagElement],
     py: Python<'_>,
@@ -690,6 +751,9 @@ fn render_widthratio(
             .map(|value| value.unwrap_or_else(|| "".as_content()).to_py(py))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(result) = native_widthratio(&values) {
+        return Ok(result);
+    }
     let builtins = BUILTINS
         .get_or_try_init(py, || {
             py.import("builtins")
@@ -983,9 +1047,11 @@ impl Render for Tag {
                         && let Some(lookup) = &group.lookup
                         && context.formatting_context.is_none()
                     {
-                        let grouped_result = py
-                            .import("django.template.defaulttags")?
-                            .getattr("GroupedResult")?;
+                        let grouped_result = GROUPED_RESULT.import(
+                            py,
+                            "django.template.defaulttags",
+                            "GroupedResult",
+                        )?;
                         let mut previous: Option<Bound<'_, PyAny>> = None;
                         let mut items = PyList::empty(py);
                         for item in target.try_iter()? {
@@ -1007,9 +1073,11 @@ impl Render for Tag {
                         let python_context = context.django_context(py)?;
                         let kwargs = PyDict::new(py);
                         kwargs.set_item("ignore_failures", true)?;
-                        let grouped_result = py
-                            .import("django.template.defaulttags")?
-                            .getattr("GroupedResult")?;
+                        let grouped_result = GROUPED_RESULT.import(
+                            py,
+                            "django.template.defaulttags",
+                            "GroupedResult",
+                        )?;
                         let mut previous: Option<Bound<'_, PyAny>> = None;
                         let mut items = PyList::empty(py);
                         for item in target.try_iter()? {
@@ -1097,12 +1165,7 @@ impl Render for Tag {
             }
             Self::Spaceless(nodes) => {
                 let output = nodes.render(py, template, context)?;
-                Cow::Owned(
-                    STRIP_SPACES
-                        .import(py, "django.utils.html", "strip_spaces_between_tags")?
-                        .call1((output.trim(),))?
-                        .extract()?,
-                )
+                Cow::Owned(spaceless(&output))
             }
             Self::Verbatim(nodes) => nodes.render(py, template, context)?,
             Self::Debug => {
@@ -1112,9 +1175,8 @@ impl Render for Tag {
                         values.del_item(name)?;
                     }
                 }
-                let ctx = py
-                    .import("django.template.context")?
-                    .getattr("Context")?
+                let ctx = DJANGO_CONTEXT
+                    .import(py, "django.template.context", "Context")?
                     .call1((values,))?;
                 Cow::Owned(
                     DEBUG_NODE
@@ -1883,6 +1945,20 @@ fn store_target_var_into(
 ) -> super::RenderIntoResult {
     match target_var {
         None => {
+            // `conditional_escape` of a plain `str` is `html.escape`, and of a
+            // `SafeString` its own text: both are done here without a call.
+            if content.is_exact_instance_of::<PyString>() {
+                return Ok(super::types::append_python_string(
+                    &content,
+                    context.autoescape,
+                    rendered,
+                )?);
+            }
+            if crate::render::filters::is_exact_safe_string(&content)? {
+                return Ok(super::types::append_python_string(
+                    &content, false, rendered,
+                )?);
+            }
             let output = if context.autoescape {
                 CONDITIONAL_ESCAPE
                     .import(content.py(), "django.utils.html", "conditional_escape")?
@@ -2262,9 +2338,8 @@ impl Render for SimpleBlockTag {
         let kwargs = build_kwargs(py, template, context, &self.kwargs)?;
 
         let content = self.nodes.render(py, template, context)?;
-        let content = py
-            .import("django.utils.safestring")?
-            .getattr("mark_safe")?
+        let content = MARK_SAFE
+            .import(py, "django.utils.safestring", "mark_safe")?
             .call1((&*content,))?;
         args.push_front(content);
 

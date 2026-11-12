@@ -7,12 +7,15 @@ use std::sync::Mutex;
 
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyList};
 
 use super::types::Context;
 use crate::parse::TokenTree;
 use crate::render::RenderResult;
 use crate::template::django_rusty_templates::{PyEngine, Template, TemplateSyntaxError};
+
+static MAKE_BLOCK: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 #[derive(Clone, Debug)]
 pub struct BlockEntry {
@@ -286,8 +289,8 @@ impl Context {
             for entry in entries {
                 let body = entry.owner.block_template(entry.nodes.clone());
                 stack.append(
-                    py.import("django_rusty_templates.inheritance")?
-                        .getattr("make_block")?
+                    MAKE_BLOCK
+                        .import(py, "django_rusty_templates.inheritance", "make_block")?
                         .call1((name, Py::new(py, body)?))?,
                 )?;
             }
