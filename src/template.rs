@@ -2885,7 +2885,14 @@ pub mod django_rusty_templates {
                     .context
                     .lock_py_attached(py)
                     .expect("Mutex should not be poisoned");
-                return self._render(py, &mut context);
+                // A tag rendering another template with its context starts a
+                // new render: Django pushes a fresh render context, so the
+                // caller's block table and extends history stay out of it.
+                return self
+                    .with_render_scope(py, &mut context, |context| {
+                        self.render_chain(py, context).map(Cow::into_owned)
+                    })
+                    .map_err(|error| self.render_error(error));
             }
             let context_class = DJANGO_CONTEXT.import(py, "django.template.context", "Context")?;
             let is_django_context = context
