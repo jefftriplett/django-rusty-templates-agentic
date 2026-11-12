@@ -410,6 +410,24 @@ impl Context {
         }
     }
 
+    /// A child scope the parent waits on, as `{% with %}` and `{% block %}`
+    /// render their bodies, ended by [`Self::merge_render_state`]. State the
+    /// merge hands back moves into the child instead of being copied: copying
+    /// the block table for every block made a child template quadratic in its
+    /// number of blocks.
+    pub(crate) fn enter_scope(&mut self, py: Python<'_>) -> Self {
+        let inheritance_blocks = std::mem::take(&mut self.inheritance_blocks);
+        let include_cache = std::mem::take(&mut self.include_cache);
+        let cycle_indices = std::mem::take(&mut self.cycle_indices);
+        let changed_states = std::mem::take(&mut self.changed_states);
+        let mut scoped = self.clone_scope(py);
+        scoped.inheritance_blocks = inheritance_blocks;
+        scoped.include_cache = include_cache;
+        scoped.cycle_indices = cycle_indices;
+        scoped.changed_states = changed_states;
+        scoped
+    }
+
     /// Freeze bindings once per render; child writes copy only the affected stack.
     /// Parent writes use copy-on-write so retained callback snapshots stay valid,
     /// and take the bindings back without copying once nothing else holds them.
@@ -1170,6 +1188,7 @@ impl Context {
                 self.insert_cycle(name.clone(), value)?;
             }
         }
+        self.inheritance_blocks = scoped.inheritance_blocks;
         self.cycle_indices = scoped.cycle_indices;
         self.changed_states = scoped.changed_states;
         self.include_cache = scoped.include_cache;

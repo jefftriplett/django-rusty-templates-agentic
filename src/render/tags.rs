@@ -810,8 +810,7 @@ impl Render for Tag {
                             .map(|value| (name, value.unwrap_or_else(|| "".as_content()).to_py(py)))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let mut scoped = context.clone_scope(py);
-                let scope = if let Some(live) = &scoped.formatting_context {
+                let scope = if let Some(live) = &context.formatting_context {
                     Some(live.bind(py).call_method0("push")?)
                 } else {
                     None
@@ -820,14 +819,18 @@ impl Render for Tag {
                     .iter()
                     .map(|(name, _)| (*name).clone())
                     .collect::<Vec<_>>();
-                for (name, value) in values {
-                    scoped.insert(name.clone(), value)?;
-                }
-                let rendered = nodes.render_into(py, template, &mut scoped, output);
+                let mut scoped = context.enter_scope(py);
+                let rendered = values
+                    .into_iter()
+                    .try_for_each(|(name, value)| scoped.insert(name.clone(), value))
+                    .map_err(Into::into)
+                    .and_then(|()| nodes.render_into(py, template, &mut scoped, output));
+                // Merge first: it hands back state the scope took from `context`.
+                let merged = context.merge_render_state(py, scoped, &local_names);
                 if let Some(scope) = scope {
                     scope.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
                 }
-                context.merge_render_state(py, scoped, &local_names)?;
+                merged?;
                 rendered
             }
             Self::Block { name, nodes } => {

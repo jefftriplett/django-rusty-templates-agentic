@@ -118,26 +118,36 @@ impl Context {
             .get_mut(&own.name)
             .and_then(Vec::pop);
         let selected = popped.as_ref().unwrap_or(&own).clone();
-        let mut scoped = self.clone_scope(py);
+        let mut scoped = self.enter_scope(py);
         let marker = BlockMarker {
             entry: selected.clone(),
             inherited,
         };
-        scoped.insert("block".to_string(), Bound::new(py, marker)?.into_any())?;
-        let result = selected.owner.render_body_with_owner_into(
-            py,
-            &selected.nodes,
-            &mut scoped,
-            output,
-            Some(&selected.owner),
-        );
+        let result = match Bound::new(py, marker) {
+            Ok(marker) => scoped
+                .insert("block".to_string(), marker.into_any())
+                .map_err(Into::into)
+                .and_then(|()| {
+                    selected.owner.render_body_with_owner_into(
+                        py,
+                        &selected.nodes,
+                        &mut scoped,
+                        output,
+                        Some(&selected.owner),
+                    )
+                }),
+            Err(error) => Err(error.into()),
+        };
+        // The merge hands the block table back, so the popped entry returns
+        // to it afterwards.
+        let merged = self.merge_render_state(py, scoped, &["block".to_string()]);
         if let Some(popped) = popped {
             self.inheritance_blocks
                 .entry(own.name)
                 .or_default()
                 .push(popped);
         }
-        self.merge_render_state(py, scoped, &["block".to_string()])?;
+        merged?;
         result
     }
 
