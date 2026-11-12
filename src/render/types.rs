@@ -443,7 +443,10 @@ impl Context {
                 .map(|(k, v)| (k.clone(), v.iter().map(|v| v.clone_ref(py)).collect()))
                 .collect(),
             source: self.source.as_ref().map(|source| source.clone_ref(py)),
-            scope_bindings: self.scope_bindings.clone(),
+            scope_bindings: self.scope_bindings.as_ref().map(|scope| ScopeBindings {
+                base: scope.base.clone_ref(py),
+                overlay: scope.overlay,
+            }),
             autoescape: self.autoescape,
             use_l10n: self.use_l10n,
             use_tz: self.use_tz,
@@ -459,16 +462,28 @@ impl Context {
             live_refs: None,
             live_methods: self.live_methods.clone(),
             number_format: Arc::clone(&self.number_format),
-            callback_input: self.callback_input.clone(),
+            callback_input: self.callback_input.as_ref().map(|v| v.clone_ref(py)),
             inheritance_blocks: self.inheritance_blocks.clone(),
             python_blocks: self.python_blocks.as_ref().map(|v| v.clone_ref(py)),
-            current_template: self.current_template.clone(),
-            root_template: self.root_template.clone(),
-            inheritance_history: self.inheritance_history.clone(),
+            current_template: self.current_template.as_ref().map(|v| v.clone_ref(py)),
+            root_template: self.root_template.as_ref().map(|v| v.clone_ref(py)),
+            inheritance_history: self
+                .inheritance_history
+                .iter()
+                .map(|v| v.clone_ref(py))
+                .collect(),
             django_context_base: RefCell::new(None),
             django_context_changes: HashSet::new(),
             string_if_invalid: self.string_if_invalid.clone(),
-            loops: self.loops.clone(),
+            loops: self
+                .loops
+                .iter()
+                .map(|loop_| ForLoop {
+                    count: loop_.count,
+                    len: loop_.len,
+                    dictionary: loop_.dictionary.clone_ref(py),
+                })
+                .collect(),
             names: self.names.clone(),
             include_cache: self.include_cache.clone(),
             cycle_indices: self.cycle_indices.clone(),
@@ -513,7 +528,10 @@ impl Context {
     pub(crate) fn clone_scope(&mut self, py: Python<'_>) -> Self {
         if self.scope_bindings.is_none() {
             self.scope_bindings = Some(ScopeBindings {
-                base: Gc::new(SharedBindings(Arc::new(std::mem::take(&mut self.context)))),
+                base: Gc::new_in(
+                    py,
+                    SharedBindings(Arc::new(std::mem::take(&mut self.context))),
+                ),
                 overlay: false,
             });
         }
@@ -1056,11 +1074,11 @@ impl Context {
         }
     }
 
-    pub fn push_for_loop(&mut self, len: usize) {
+    pub fn push_for_loop(&mut self, py: Python<'_>, len: usize) {
         self.loops.push(ForLoop {
             count: 0,
             len,
-            dictionary: Gc::new(GcOnceLock::new()),
+            dictionary: Gc::new_in(py, GcOnceLock::new()),
         });
         self.changed_states.push(HashMap::new());
     }

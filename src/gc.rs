@@ -66,8 +66,14 @@ pub struct Gc<T> {
 
 impl<T: Trace + Any + Send + Sync + Debug> Gc<T> {
     pub fn new(value: T) -> Self {
+        Python::attach(|py| Self::new_in(py, value))
+    }
+
+    /// `new` for callers already attached to Python, which skips attaching
+    /// again on hot paths.
+    pub fn new_in(py: Python<'_>, value: T) -> Self {
         let native_owners = usize::from(value.count_native_owners());
-        Python::attach(|py| Self {
+        Self {
             shared: Py::new(
                 py,
                 Shared {
@@ -77,7 +83,7 @@ impl<T: Trace + Any + Send + Sync + Debug> Gc<T> {
             )
             .expect("allocate shared native object"),
             marker: PhantomData,
-        })
+        }
     }
 
     /// Whether this is the only native handle to movable state.
@@ -94,16 +100,24 @@ impl<T: Trace + Any + Send + Sync + Debug> Gc<T> {
     }
 }
 
-impl<T> Clone for Gc<T> {
-    fn clone(&self) -> Self {
+impl<T> Gc<T> {
+    /// `clone` for callers already attached to Python, which skips
+    /// attaching again on hot paths.
+    pub fn clone_ref(&self, py: Python<'_>) -> Self {
         let owners = &self.shared.get().native_owners;
         if owners.load(Ordering::Relaxed) != 0 {
             owners.fetch_add(1, Ordering::Relaxed);
         }
-        Python::attach(|py| Self {
+        Self {
             shared: self.shared.clone_ref(py),
             marker: PhantomData,
-        })
+        }
+    }
+}
+
+impl<T> Clone for Gc<T> {
+    fn clone(&self) -> Self {
+        Python::attach(|py| self.clone_ref(py))
     }
 }
 

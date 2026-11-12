@@ -1084,7 +1084,7 @@ impl For {
         }
         let mut join = super::JoinResults::default();
         let scopes = context.scope_depth();
-        context.push_for_loop(list.len());
+        context.push_for_loop(py, list.len());
         let result = (|| {
             for (index, values) in list.into_iter().enumerate() {
                 let values = match values {
@@ -1151,7 +1151,7 @@ impl For {
         let mut join = super::JoinResults::default();
         let mut utf8 = [0; 4];
         let scopes = context.scope_depth();
-        context.push_for_loop(length);
+        context.push_for_loop(py, length);
         let result = (|| {
             for (index, c) in chars.enumerate() {
                 let c = PyString::new(py, c.encode_utf8(&mut utf8));
