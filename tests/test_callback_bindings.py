@@ -262,7 +262,8 @@ def test_dense_flat_templates_keep_native_context_import(monkeypatch, debug, val
     context = Context({"value": value, **{f"key{i}": i for i in range(1000)}})
     source = "{{ value }}" * 1000
     assert Engine(debug=debug).from_string(source).render(context) == str(value) * 1000
-    assert flattened == [context]
+    # A plain `Context(dict)` is read lazily, with no `flatten()` (#370).
+    assert flattened == []
 
 
 @pytest.mark.parametrize("debug", [False, True])
