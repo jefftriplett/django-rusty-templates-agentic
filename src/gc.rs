@@ -228,6 +228,14 @@ impl<T> GcOnceLock<T> {
         self.value.get()
     }
 
+    /// A lock that already holds `value`.
+    pub fn with_value(value: T) -> Self {
+        Self {
+            value: OnceLock::from(value),
+            initializing: Mutex::new(()),
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             value: OnceLock::new(),

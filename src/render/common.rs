@@ -187,8 +187,12 @@ fn lookup_part<'py>(
     let is_context = if exact_dict.is_some() {
         false
     } else {
+        // A type check, not `isinstance`: for every object that isn't a
+        // context, `isinstance` also reads `__class__`, which was most of the
+        // cost of a lookup. Only an object whose `__class__` claims to be a
+        // context without its type being one would differ.
         let base_context = BASE_CONTEXT.import(py, "django.template.context", "BaseContext")?;
-        variable.is_instance(base_context)?
+        variable.get_type().is_subclass(base_context)?
     };
     if !is_context || !variable.get_type().hasattr(name)? {
         match variable.getattr(name) {
