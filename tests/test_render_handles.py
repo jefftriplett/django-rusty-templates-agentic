@@ -59,7 +59,8 @@ def test_rendered_templates_are_freed():
 
     def render_many(count):
         for index in range(count):
-            rusty.from_string(f"{{{{ name }}}}{index}").render({"name": "x"})
+            rendered = rusty.from_string(f"{{{{ name }}}}{index}").render({"name": "x"})
+            assert rendered == f"x{index}"
 
     render_many(200)
     gc.collect()
