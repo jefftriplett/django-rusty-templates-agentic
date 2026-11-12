@@ -107,6 +107,13 @@ cargo-llvm-cov = "0.9.0"
 proptest = "1.10.0"
 temp-env = "0.3.6"
 
+# Rendering crosses crate and module boundaries on every node, so link-time
+# optimisation is worth 5-20% of render time. Unwinding stays on: a panic must
+# become a Python exception. Thin LTO measured the same as fat.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [profile.wasm]
 inherits = "release"
 opt-level = "s"
