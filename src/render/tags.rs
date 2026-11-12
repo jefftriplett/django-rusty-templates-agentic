@@ -1,10 +1,12 @@
 use crate::gc::Gc;
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 
 use either::Either;
-use num_bigint::{BigInt, Sign};
+use num_bigint::BigInt;
 use num_traits::cast::{FromPrimitive, ToPrimitive};
+use pyo3::basic::CompareOp;
 use pyo3::exceptions::{
     PyAttributeError, PyException, PyKeyError, PyOverflowError, PyTypeError, PyValueError,
     PyZeroDivisionError,
@@ -133,330 +135,115 @@ impl Resolve for Url {
     }
 }
 
+/// Django's `{% if %}` comparisons, which are Python's. A comparison that
+/// raises is false.
 trait PyCmp<T> {
-    fn eq(&self, other: &T) -> bool;
+    fn compare(&self, other: &T, op: CompareOp) -> bool;
+}
 
-    fn ne(&self, other: &T) -> bool;
+/// The operator Python tries on the right operand: `a < b` falls back to
+/// `b.__gt__(a)`.
+const fn reflected(op: CompareOp) -> CompareOp {
+    match op {
+        CompareOp::Eq => CompareOp::Eq,
+        CompareOp::Ne => CompareOp::Ne,
+        CompareOp::Lt => CompareOp::Gt,
+        CompareOp::Gt => CompareOp::Lt,
+        CompareOp::Le => CompareOp::Ge,
+        CompareOp::Ge => CompareOp::Le,
+    }
+}
 
-    fn lt(&self, other: &T) -> bool;
+/// Python's `!=` calls `__ne__`, which a class can define apart from
+/// `__eq__`, so every operator goes to Python as itself.
+fn python_compare(obj: &Bound<'_, PyAny>, other: &Content<'_, '_>, op: CompareOp) -> bool {
+    match other {
+        Content::Py(other) => obj.rich_compare(other, op),
+        Content::Float(other) => obj.rich_compare(other, op),
+        Content::Int(other) => obj.rich_compare(other, op),
+        Content::Bool(other) => obj.rich_compare(other, op),
+        Content::String(other) => obj.rich_compare(other.as_raw(), op),
+    }
+    .and_then(|result| result.is_truthy())
+    .unwrap_or(false)
+}
 
-    fn gt(&self, other: &T) -> bool;
+/// How two native values order, as Python orders them, or `None` when
+/// Python can't order them (different types, or a NaN).
+fn native_ordering(left: &Content<'_, '_>, right: &Content<'_, '_>) -> Option<Ordering> {
+    match (left, right) {
+        (Content::Float(left), Content::Float(right)) => left.partial_cmp(right),
+        (Content::Int(left), Content::Int(right)) => Some(left.cmp(right)),
+        (Content::Bool(left), Content::Bool(right)) => Some(left.cmp(right)),
+        (Content::Int(left), Content::Bool(right)) => {
+            Some(left.cmp(&BigInt::from(u8::from(*right))))
+        }
+        (Content::Bool(left), Content::Int(right)) => {
+            Some(BigInt::from(u8::from(*left)).cmp(right))
+        }
+        (Content::Float(left), Content::Bool(right)) => left.partial_cmp(&f64::from(*right)),
+        (Content::Bool(left), Content::Float(right)) => f64::from(*left).partial_cmp(right),
+        (Content::Float(left), Content::Int(right)) => float_int_ordering(*left, right),
+        (Content::Int(left), Content::Float(right)) => {
+            float_int_ordering(*right, left).map(Ordering::reverse)
+        }
+        (Content::String(left), Content::String(right)) => Some(left.as_raw().cmp(right.as_raw())),
+        _ => None,
+    }
+}
 
-    fn lte(&self, other: &T) -> bool;
+/// An int too large for a float lies beyond every finite float, but not
+/// beyond the infinity of the same sign.
+fn float_int_ordering(float: f64, int: &BigInt) -> Option<Ordering> {
+    if float.is_nan() {
+        return None;
+    }
+    match int.to_f64().expect("BigInt to f64 is always possible") {
+        f64::INFINITY if float == f64::INFINITY => Some(Ordering::Greater),
+        f64::INFINITY => Some(Ordering::Less),
+        f64::NEG_INFINITY if float == f64::NEG_INFINITY => Some(Ordering::Less),
+        f64::NEG_INFINITY => Some(Ordering::Greater),
+        int => float.partial_cmp(&int),
+    }
+}
 
-    fn gte(&self, other: &T) -> bool;
+fn holds(ordering: Option<Ordering>, op: CompareOp) -> bool {
+    match op {
+        CompareOp::Eq => ordering.is_some_and(Ordering::is_eq),
+        CompareOp::Ne => !ordering.is_some_and(Ordering::is_eq),
+        CompareOp::Lt => ordering.is_some_and(Ordering::is_lt),
+        CompareOp::Le => ordering.is_some_and(Ordering::is_le),
+        CompareOp::Gt => ordering.is_some_and(Ordering::is_gt),
+        CompareOp::Ge => ordering.is_some_and(Ordering::is_ge),
+    }
 }
 
 impl PyCmp<Content<'_, '_>> for Content<'_, '_> {
-    fn eq(&self, other: &Content<'_, '_>) -> bool {
+    fn compare(&self, other: &Content<'_, '_>, op: CompareOp) -> bool {
         match (self, other) {
-            (Self::Py(obj), Content::Py(other)) => obj.eq(other).unwrap_or(false),
-            (Self::Py(obj), Content::Float(other)) => obj.eq(other).unwrap_or(false),
-            (Self::Py(obj), Content::Int(other)) => obj.eq(other).unwrap_or(false),
-            (Self::Py(obj), Content::Bool(other)) => obj.eq(other).unwrap_or(false),
-            (Self::Py(obj), Content::String(other)) => obj.eq(other.as_raw()).unwrap_or(false),
-            (Self::Float(obj), Content::Py(other)) => other.eq(obj).unwrap_or(false),
-            (Self::Int(obj), Content::Py(other)) => other.eq(obj).unwrap_or(false),
-            (Self::String(obj), Content::Py(other)) => other.eq(obj.as_raw()).unwrap_or(false),
-            (Self::Bool(obj), Content::Py(other)) => other.eq(obj).unwrap_or(false),
-            (Self::Float(obj), Content::Float(other)) => obj == other,
-            (Self::Int(obj), Content::Int(other)) => obj == other,
-            (Self::Int(obj), Content::Bool(other)) => {
-                u8::try_from(obj).is_ok_and(|o| o == u8::from(*other))
-            }
-            (Self::Bool(obj), Content::Int(other)) => {
-                u8::try_from(other).is_ok_and(|o| o == u8::from(*obj))
-            }
-            (Self::Float(obj), Content::Int(other)) => {
-                match other.to_f64().expect("BigInt to f64 is always possible") {
-                    f64::INFINITY | f64::NEG_INFINITY => false,
-                    other => *obj == other,
-                }
-            }
-            (Self::Int(obj), Content::Float(other)) => {
-                match obj.to_f64().expect("BigInt to f64 is always possible") {
-                    f64::INFINITY | f64::NEG_INFINITY => false,
-                    obj => obj == *other,
-                }
-            }
-            (Self::Float(obj), Content::Bool(other)) => match other {
-                true => *obj == 1.0,
-                false => *obj == 0.0,
-            },
-            (Self::Bool(obj), Content::Float(other)) => match obj {
-                true => *other == 1.0,
-                false => *other == 0.0,
-            },
-            (Self::String(obj), Content::String(other)) => obj.as_raw() == other.as_raw(),
-            (Self::Bool(obj), Content::Bool(other)) => obj == other,
-            _ => false,
-        }
-    }
-
-    /// Python's `!=` calls `__ne__`, which a class can define apart from
-    /// `__eq__`, and is `False` like every operator when the call raises.
-    fn ne(&self, other: &Content<'_, '_>) -> bool {
-        match (self, other) {
-            (Self::Py(obj), Content::Py(other)) => obj.ne(other).unwrap_or(false),
-            (Self::Py(obj), Content::Float(other)) => obj.ne(other).unwrap_or(false),
-            (Self::Py(obj), Content::Int(other)) => obj.ne(other).unwrap_or(false),
-            (Self::Py(obj), Content::Bool(other)) => obj.ne(other).unwrap_or(false),
-            (Self::Py(obj), Content::String(other)) => obj.ne(other.as_raw()).unwrap_or(false),
-            // The Python object is on the right, so its reflected `__ne__`
-            // runs, as it would after `int.__ne__` returns `NotImplemented`.
-            (Self::Float(obj), Content::Py(other)) => other.ne(obj).unwrap_or(false),
-            (Self::Int(obj), Content::Py(other)) => other.ne(obj).unwrap_or(false),
-            (Self::String(obj), Content::Py(other)) => other.ne(obj.as_raw()).unwrap_or(false),
-            (Self::Bool(obj), Content::Py(other)) => other.ne(obj).unwrap_or(false),
-            _ => !self.eq(other),
-        }
-    }
-
-    fn lt(&self, other: &Content<'_, '_>) -> bool {
-        match (self, other) {
-            (Self::Py(obj), Content::Py(other)) => obj.lt(other).unwrap_or(false),
-            (Self::Py(obj), Content::Float(other)) => obj.lt(other).unwrap_or(false),
-            (Self::Py(obj), Content::Int(other)) => obj.lt(other).unwrap_or(false),
-            (Self::Py(obj), Content::Bool(other)) => obj.lt(other).unwrap_or(false),
-            (Self::Py(obj), Content::String(other)) => obj.lt(other.as_raw()).unwrap_or(false),
-            (Self::Float(obj), Content::Py(other)) => other.gt(obj).unwrap_or(false),
-            (Self::Int(obj), Content::Py(other)) => other.gt(obj).unwrap_or(false),
-            (Self::String(obj), Content::Py(other)) => other.gt(obj.as_raw()).unwrap_or(false),
-            (Self::Bool(obj), Content::Py(other)) => other.gt(obj).unwrap_or(false),
-            (Self::Float(obj), Content::Float(other)) => obj < other,
-            (Self::Int(obj), Content::Int(other)) => obj < other,
-            (Self::Int(obj), Content::Bool(other)) => match obj.sign() {
-                Sign::Minus => true,
-                _ => u8::try_from(obj).is_ok_and(|o| o < u8::from(*other)),
-            },
-            (Self::Bool(obj), Content::Int(other)) => match other.sign() {
-                Sign::Minus => false,
-                _ => u8::try_from(other).map_or(true, |o| o > u8::from(*obj)),
-            },
-            (Self::Float(obj), Content::Int(other)) => {
-                match other.to_f64().expect("BigInt to f64 is always possible") {
-                    f64::INFINITY => obj.is_finite() || *obj == f64::NEG_INFINITY,
-                    f64::NEG_INFINITY => *obj == f64::NEG_INFINITY,
-                    other => *obj < other,
-                }
-            }
-            (Self::Int(obj), Content::Float(other)) => {
-                match obj.to_f64().expect("BigInt to f64 is always possible") {
-                    f64::INFINITY => *other == f64::INFINITY,
-                    f64::NEG_INFINITY => other.is_finite() || *other == f64::INFINITY,
-                    obj => obj < *other,
-                }
-            }
-            (Self::Float(obj), Content::Bool(other)) => match other {
-                true => *obj < 1.0,
-                false => *obj < 0.0,
-            },
-            (Self::Bool(obj), Content::Float(other)) => match obj {
-                true => *other > 1.0,
-                false => *other > 0.0,
-            },
-            (Self::String(obj), Content::String(other)) => obj.as_raw() < other.as_raw(),
-            (Self::Bool(obj), Content::Bool(other)) => obj < other,
-            _ => false,
-        }
-    }
-
-    fn gt(&self, other: &Content<'_, '_>) -> bool {
-        match (self, other) {
-            (Self::Py(obj), Content::Py(other)) => obj.gt(other).unwrap_or(false),
-            (Self::Py(obj), Content::Float(other)) => obj.gt(other).unwrap_or(false),
-            (Self::Py(obj), Content::Int(other)) => obj.gt(other).unwrap_or(false),
-            (Self::Py(obj), Content::Bool(other)) => obj.gt(other).unwrap_or(false),
-            (Self::Py(obj), Content::String(other)) => obj.gt(other.as_raw()).unwrap_or(false),
-            (Self::Float(obj), Content::Py(other)) => other.lt(obj).unwrap_or(false),
-            (Self::Int(obj), Content::Py(other)) => other.lt(obj).unwrap_or(false),
-            (Self::String(obj), Content::Py(other)) => other.lt(obj.as_raw()).unwrap_or(false),
-            (Self::Bool(obj), Content::Py(other)) => other.lt(obj).unwrap_or(false),
-            (Self::Float(obj), Content::Float(other)) => obj > other,
-            (Self::Int(obj), Content::Int(other)) => obj > other,
-            (Self::Int(obj), Content::Bool(other)) => match obj.sign() {
-                Sign::Minus => false,
-                _ => u8::try_from(obj).map_or(true, |o| o > u8::from(*other)),
-            },
-            (Self::Bool(obj), Content::Int(other)) => match other.sign() {
-                Sign::Minus => true,
-                _ => u8::try_from(other).is_ok_and(|o| o < u8::from(*obj)),
-            },
-            (Self::Float(obj), Content::Int(other)) => {
-                match other.to_f64().expect("BigInt to f64 is always possible") {
-                    f64::INFINITY => *obj == f64::INFINITY,
-                    f64::NEG_INFINITY => obj.is_finite() || *obj == f64::INFINITY,
-                    other => *obj > other,
-                }
-            }
-            (Self::Int(obj), Content::Float(other)) => {
-                match obj.to_f64().expect("BigInt to f64 is always possible") {
-                    f64::INFINITY => other.is_finite() || *other == f64::NEG_INFINITY,
-                    f64::NEG_INFINITY => *other == f64::NEG_INFINITY,
-                    obj => obj > *other,
-                }
-            }
-            (Self::Float(obj), Content::Bool(other)) => match other {
-                true => *obj > 1.0,
-                false => *obj > 0.0,
-            },
-            (Self::Bool(obj), Content::Float(other)) => match obj {
-                true => *other < 1.0,
-                false => *other < 0.0,
-            },
-            (Self::String(obj), Content::String(other)) => obj.as_raw() > other.as_raw(),
-            (Self::Bool(obj), Content::Bool(other)) => obj > other,
-            _ => false,
-        }
-    }
-
-    fn lte(&self, other: &Content<'_, '_>) -> bool {
-        match (self, other) {
-            (Self::Py(obj), Content::Py(other)) => obj.le(other).unwrap_or(false),
-            (Self::Py(obj), Content::Float(other)) => obj.le(other).unwrap_or(false),
-            (Self::Py(obj), Content::Int(other)) => obj.le(other).unwrap_or(false),
-            (Self::Py(obj), Content::Bool(other)) => obj.le(other).unwrap_or(false),
-            (Self::Py(obj), Content::String(other)) => obj.le(other.as_raw()).unwrap_or(false),
-            (Self::Float(obj), Content::Py(other)) => other.ge(obj).unwrap_or(false),
-            (Self::Int(obj), Content::Py(other)) => other.ge(obj).unwrap_or(false),
-            (Self::Bool(obj), Content::Py(other)) => other.ge(obj).unwrap_or(false),
-            (Self::String(obj), Content::Py(other)) => other.ge(obj.as_raw()).unwrap_or(false),
-            (Self::Float(obj), Content::Float(other)) => obj <= other,
-            (Self::Int(obj), Content::Int(other)) => obj <= other,
-            (Self::Int(obj), Content::Bool(other)) => match obj.sign() {
-                Sign::Minus => true,
-                _ => u8::try_from(obj).is_ok_and(|o| o <= u8::from(*other)),
-            },
-            (Self::Bool(obj), Content::Int(other)) => match other.sign() {
-                Sign::Minus => false,
-                _ => u8::try_from(other).map_or(true, |o| o >= u8::from(*obj)),
-            },
-            (Self::Float(obj), Content::Int(other)) => {
-                match other.to_f64().expect("BigInt to f64 is always possible") {
-                    f64::INFINITY => obj.is_finite() || *obj == f64::NEG_INFINITY,
-                    f64::NEG_INFINITY => *obj == f64::NEG_INFINITY,
-                    other => *obj <= other,
-                }
-            }
-            (Self::Int(obj), Content::Float(other)) => {
-                match obj.to_f64().expect("BigInt to f64 is always possible") {
-                    f64::INFINITY => *other == f64::INFINITY,
-                    f64::NEG_INFINITY => other.is_finite() || *other == f64::INFINITY,
-                    obj => obj <= *other,
-                }
-            }
-            (Self::Float(obj), Content::Bool(other)) => match other {
-                true => *obj <= 1.0,
-                false => *obj <= 0.0,
-            },
-            (Self::Bool(obj), Content::Float(other)) => match obj {
-                true => *other >= 1.0,
-                false => *other >= 0.0,
-            },
-            (Self::String(obj), Content::String(other)) => obj.as_raw() <= other.as_raw(),
-            (Self::Bool(obj), Content::Bool(other)) => obj <= other,
-            _ => false,
-        }
-    }
-
-    fn gte(&self, other: &Content<'_, '_>) -> bool {
-        match (self, other) {
-            (Self::Py(obj), Content::Py(other)) => obj.ge(other).unwrap_or(false),
-            (Self::Py(obj), Content::Float(other)) => obj.ge(other).unwrap_or(false),
-            (Self::Py(obj), Content::Int(other)) => obj.ge(other).unwrap_or(false),
-            (Self::Py(obj), Content::Bool(other)) => obj.ge(other).unwrap_or(false),
-            (Self::Py(obj), Content::String(other)) => obj.ge(other.as_raw()).unwrap_or(false),
-            (Self::Float(obj), Content::Py(other)) => other.le(obj).unwrap_or(false),
-            (Self::Int(obj), Content::Py(other)) => other.le(obj).unwrap_or(false),
-            (Self::Bool(obj), Content::Py(other)) => other.le(obj).unwrap_or(false),
-            (Self::String(obj), Content::Py(other)) => other.le(obj.as_raw()).unwrap_or(false),
-            (Self::Float(obj), Content::Float(other)) => obj >= other,
-            (Self::Int(obj), Content::Int(other)) => obj >= other,
-            (Self::Int(obj), Content::Bool(other)) => match obj.sign() {
-                Sign::Minus => false,
-                _ => u8::try_from(obj).map_or(true, |o| o >= u8::from(*other)),
-            },
-            (Self::Bool(obj), Content::Int(other)) => match other.sign() {
-                Sign::Minus => true,
-                _ => u8::try_from(other).is_ok_and(|o| o <= u8::from(*obj)),
-            },
-            (Self::Float(obj), Content::Int(other)) => {
-                match other.to_f64().expect("BigInt to f64 is always possible") {
-                    f64::INFINITY => *obj == f64::INFINITY,
-                    f64::NEG_INFINITY => obj.is_finite() || *obj == f64::INFINITY,
-                    other => *obj >= other,
-                }
-            }
-            (Self::Int(obj), Content::Float(other)) => {
-                match obj.to_f64().expect("BigInt to f64 is always possible") {
-                    f64::INFINITY => other.is_finite() || *other == f64::NEG_INFINITY,
-                    f64::NEG_INFINITY => *other == f64::NEG_INFINITY,
-                    obj => obj >= *other,
-                }
-            }
-            (Self::Float(obj), Content::Bool(other)) => match other {
-                true => *obj >= 1.0,
-                false => *obj >= 0.0,
-            },
-            (Self::Bool(obj), Content::Float(other)) => match obj {
-                true => *other <= 1.0,
-                false => *other <= 0.0,
-            },
-            (Self::String(obj), Content::String(other)) => obj.as_raw() >= other.as_raw(),
-            (Self::Bool(obj), Content::Bool(other)) => obj >= other,
-            _ => false,
+            (Self::Py(obj), other) => python_compare(obj, other, op),
+            // The Python object is on the right, so its reflected method
+            // runs, as it would after the native type returns
+            // `NotImplemented`.
+            (_, Content::Py(other)) => python_compare(other, self, reflected(op)),
+            _ => holds(native_ordering(self, other), op),
         }
     }
 }
 
 impl PyCmp<Self> for Option<Content<'_, '_>> {
-    fn eq(&self, other: &Self) -> bool {
+    fn compare(&self, other: &Self, op: CompareOp) -> bool {
         match (self, other) {
-            (None, None) => true,
-            (Some(obj), Some(other)) => obj.eq(other),
-            (Some(obj), None) | (None, Some(obj)) => match obj {
-                Content::Py(obj) => obj.eq(PyNone::get(obj.py())).unwrap_or(false),
+            (Some(obj), Some(other)) => obj.compare(other, op),
+            (None, None) => matches!(op, CompareOp::Eq),
+            (Some(obj), None) | (None, Some(obj)) => match (op, obj) {
+                (CompareOp::Eq | CompareOp::Ne, Content::Py(obj)) => obj
+                    .rich_compare(PyNone::get(obj.py()), op)
+                    .and_then(|result| result.is_truthy())
+                    .unwrap_or(false),
+                (CompareOp::Ne, _) => true,
                 _ => false,
             },
-        }
-    }
-
-    fn ne(&self, other: &Self) -> bool {
-        match (self, other) {
-            (None, None) => false,
-            (Some(obj), Some(other)) => obj.ne(other),
-            (Some(obj), None) | (None, Some(obj)) => match obj {
-                Content::Py(obj) => obj.ne(PyNone::get(obj.py())).unwrap_or(false),
-                _ => true,
-            },
-        }
-    }
-
-    fn lt(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Some(obj), Some(other)) => obj.lt(other),
-            _ => false,
-        }
-    }
-
-    fn gt(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Some(obj), Some(other)) => obj.gt(other),
-            _ => false,
-        }
-    }
-
-    fn lte(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Some(obj), Some(other)) => obj.lte(other),
-            _ => false,
-        }
-    }
-
-    fn gte(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Some(obj), Some(other)) => obj.gte(other),
-            _ => false,
         }
     }
 }
@@ -586,27 +373,27 @@ impl IfCondition {
             Self::Not(inner) => !truth(inner.value(py, template, context)?.as_ref())?,
             Self::Equal(inner) => {
                 let (left, right) = Self::operands(inner, py, template, context)?;
-                left.eq(&right)
+                left.compare(&right, CompareOp::Eq)
             }
             Self::NotEqual(inner) => {
                 let (left, right) = Self::operands(inner, py, template, context)?;
-                left.ne(&right)
+                left.compare(&right, CompareOp::Ne)
             }
             Self::LessThan(inner) => {
                 let (left, right) = Self::operands(inner, py, template, context)?;
-                left.lt(&right)
+                left.compare(&right, CompareOp::Lt)
             }
             Self::GreaterThan(inner) => {
                 let (left, right) = Self::operands(inner, py, template, context)?;
-                left.gt(&right)
+                left.compare(&right, CompareOp::Gt)
             }
             Self::LessThanEqual(inner) => {
                 let (left, right) = Self::operands(inner, py, template, context)?;
-                left.lte(&right)
+                left.compare(&right, CompareOp::Le)
             }
             Self::GreaterThanEqual(inner) => {
                 let (left, right) = Self::operands(inner, py, template, context)?;
-                left.gte(&right)
+                left.compare(&right, CompareOp::Ge)
             }
             Self::In(inner) => match Self::operands(inner, py, template, context)? {
                 (left, Some(right)) => right.contains(left).unwrap_or(false),
