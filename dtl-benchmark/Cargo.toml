@@ -12,7 +12,7 @@ harness = false
 
 [dev-dependencies]
 # See https://codspeed.io/docs/benchmarks/rust/divan
-divan = { package = "codspeed-divan-compat", version = "*" }
+divan = { package = "codspeed-divan-compat", version = "5.0.2" }
 django-rusty-templates = { path = ".." }
 
 [lints]

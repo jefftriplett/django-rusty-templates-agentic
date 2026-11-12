@@ -694,14 +694,13 @@ pub mod django_rusty_templates {
 
     #[derive(Debug)]
     pub struct Engine {
-        #[allow(dead_code)]
         dirs: Mutex<Vec<PathBuf>>,
         app_dirs: bool,
         context_processors: Vec<String>,
         debug: AtomicBool,
         template_loaders: Mutex<Vec<Loader>>,
         string_if_invalid: String,
-        #[allow(dead_code)]
+        #[expect(dead_code, reason = "file_charset decoding is not wired up yet")]
         encoding: &'static Encoding,
         pub file_charset: String,
         configuration: Option<Py<PyDict>>,

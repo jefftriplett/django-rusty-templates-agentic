@@ -183,6 +183,7 @@ impl<'t> FilterLexer<'t> {
         }
     }
 
+    #[must_use]
     pub fn with_modern_syntax(mut self, modern: bool) -> Self {
         self.modern = modern;
         self
@@ -289,7 +290,7 @@ impl<'t> FilterLexer<'t> {
                 }
             }
             _ => {
-                let next = self.rest.find("|").unwrap_or(self.rest.len());
+                let next = self.rest.find('|').unwrap_or(self.rest.len());
                 let at = (self.byte, next);
                 self.rest = "";
                 Err(VariableLexerError::InvalidFilterName { at: at.into() })
@@ -298,10 +299,10 @@ impl<'t> FilterLexer<'t> {
     }
 
     fn lex_argument(&mut self) -> Result<Option<Argument>, VariableLexerError> {
-        let Some(a) = self.rest.find(":") else {
+        let Some(a) = self.rest.find(':') else {
             return Ok(None);
         };
-        let next = match self.rest.find("|") {
+        let next = match self.rest.find('|') {
             Some(f) if f < a => return Ok(None),
             _ => a + 1,
         };
@@ -317,7 +318,7 @@ impl<'t> FilterLexer<'t> {
         };
         Ok(Some(match first {
             '_' => {
-                if let Some('(') = chars.next() {
+                if chars.next() == Some('(') {
                     self.lex_translated(&mut chars)?
                 } else {
                     let end = self.rest.next_whitespace();
@@ -355,8 +356,8 @@ impl<'t> FilterLexer<'t> {
         }
     }
 
-    fn remainder_to_filter_or_argument(&mut self) -> (&'t str, usize) {
-        match (self.rest.find("|"), self.rest.find(":")) {
+    fn remainder_to_filter_or_argument(&self) -> (&'t str, usize) {
+        match (self.rest.find('|'), self.rest.find(':')) {
             (None, None) => (self.rest, self.rest.len()),
             (None, Some(a)) => (&self.rest[..a], a + 1),
             (Some(f), Some(a)) if a < f => (&self.rest[..a], a + 1),

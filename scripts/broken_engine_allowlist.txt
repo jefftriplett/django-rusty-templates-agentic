@@ -21,6 +21,7 @@ raise tests/test_django_suite_runner.py::test_new_fallbacks_fail_and_stale_entri
 raise tests/test_django_suite_runner.py::test_default_suites_include_admin_and_supported_csp_tests[[]*[]]  # tests the conformance runner
 raise tests/test_django_suite_runner.py::test_bootstrap_preserves_native_and_fallback_render_signals  # runs the bootstrap in a subprocess
 raise tests/test_simple_tag_escape_dispatch.py::test_repeated_tag_results_reuse_escape_callable  # renders in a subprocess
+raise tests/test_context_reentry.py::test_replaced_value_del_can_write_to_the_context  # renders in a subprocess so a deadlock times out
 raise tests/test_engine.py::test_import_libraries_*  # library import errors raise while building the engine
 raise tests/test_engine.py::test_invalid_loader_configurations[[]*[]]  # loader errors raise while building the engine
 raise tests/test_engine.py::test_invalid_loader_name_keeps_cause  # loader errors raise while building the engine

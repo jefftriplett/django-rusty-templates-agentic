@@ -89,20 +89,14 @@ impl Engine {
         let template = TemplateString(source);
         let tokens = Lexer::new(template)
             .map(|token| {
-                let content = token.content(template).trim().to_owned();
-                (token.token_type, content, token.at)
-            })
-            .collect::<Vec<_>>();
-        // Text must retain its original whitespace.
-        let tokens = tokens
-            .into_iter()
-            .map(|(kind, content, at)| {
-                let content = if kind == TokenType::Text {
+                let at = token.at;
+                // Text must retain its original whitespace.
+                let content = if token.token_type == TokenType::Text {
                     source[at.0..at.0 + at.1].to_owned()
                 } else {
-                    content
+                    token.content(template).trim().to_owned()
                 };
-                (kind, content, at.0)
+                (token.token_type, content, at.0)
             })
             .collect();
         let mut parser = Parser { tokens, cursor: 0 };
@@ -208,7 +202,7 @@ impl Engine {
                             .value
                             .as_str()
                             .map(str::to_owned)
-                            .ok_or("Parent name must be a string".into())
+                            .ok_or_else(|| "Parent name must be a string".into())
                     })
                     .and_then(|parent| relative_name(origin, &parent))
                     .map(Some)
@@ -587,8 +581,7 @@ fn split_words(text: &str) -> Result<Vec<String>> {
 
 fn valid_identifier(value: &str) -> bool {
     let mut chars = value.chars();
-    chars.next().is_some_and(|c| c.is_alphabetic())
-        && chars.all(|c| c.is_alphanumeric() || c == '_')
+    chars.next().is_some_and(char::is_alphabetic) && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 impl Atom {
@@ -852,6 +845,7 @@ impl Condition {
                 let right = engine
                     .resolve_expression(right, blocks, state, depth, true)?
                     .value;
+                #[expect(clippy::float_cmp, reason = "Django compares numbers exactly")]
                 let equal = left == right
                     || numeric(&left)
                         .zip(numeric(&right))
@@ -871,10 +865,10 @@ impl Condition {
                 Ok(match operator.as_str() {
                     "==" => equal,
                     "!=" => !equal,
-                    "<" => order.is_some_and(|o| o.is_lt()),
-                    ">" => order.is_some_and(|o| o.is_gt()),
-                    "<=" => order.is_some_and(|o| o.is_le()),
-                    ">=" => order.is_some_and(|o| o.is_ge()),
+                    "<" => order.is_some_and(std::cmp::Ordering::is_lt),
+                    ">" => order.is_some_and(std::cmp::Ordering::is_gt),
+                    "<=" => order.is_some_and(std::cmp::Ordering::is_le),
+                    ">=" => order.is_some_and(std::cmp::Ordering::is_ge),
                     "in" => contains(),
                     "not in" => !contains(),
                     _ => false,
