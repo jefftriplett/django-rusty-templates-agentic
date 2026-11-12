@@ -8,6 +8,12 @@ Make `{% if %}` follow Django: exceptions from a bare condition (such as a datab
 
 Match Django's output for `title` (`ab 'cd'`, non-ASCII text), `slugify` (leading underscores, number literals), `wordwrap` (non-ASCII text, runs of spaces, tabs), `last` on safe text, and float literals passed to string filters. ([#375](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/375))
 
+Render 35–80% faster: `Template.render` no longer calls `mark_safe` in Python, copies the caller's dict or hashes names with SipHash, dotted lookups such as `{{ o.owner.city }}` reuse interned names, and wheels build with link-time optimisation. A dict passed to `render` is now read live, as Django reads it. ([#383](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/383), [#384](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/384), [#387](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/387))
+
+Close a `{% for %}` loop's scope when it raises, so a tag that catches the error and keeps rendering no longer sees the failed loop's variables or `forloop`. ([#385](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/385))
+
+Compiled templates take less memory: a `{{ v }}` node drops from about 235 bytes to 66, and an empty template from 1.5 KB to 0.7 KB. ([#386](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/386))
+
 ## 2026.11.3
 
 Compile Django admin's inclusion tags, `get_admin_log` and `get_flatpages` natively, so all of Django's contrib templates, including the admin change form, change list and index, compile natively. ([#318](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/318))
