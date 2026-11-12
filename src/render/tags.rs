@@ -1437,6 +1437,10 @@ impl For {
             return self.empty.render_into(py, template, context, output);
         };
         match iterable {
+            // Django's `{% for %}` treats `None` as an empty sequence.
+            Content::Py(iterable) if iterable.is_none() => {
+                self.empty.render_into(py, template, context, output)
+            }
             Content::Py(iterable) => {
                 self.render_python_into(&iterable, py, template, context, output)
             }

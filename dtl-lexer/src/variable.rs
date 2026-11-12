@@ -121,6 +121,20 @@ pub fn lex_variable_or_filter_with_syntax(
     let end = content.len();
     let at = (start, end);
 
+    // Before Django 6.0 a number may not have a sign after its first
+    // character, so `1e-7` stops at `-`: "Could not parse the remainder".
+    if !modern
+        && let Some(sign) = content
+            .char_indices()
+            .skip(1)
+            .find(|(_, c)| matches!(c, '-' | '+'))
+            .map(|(index, _)| index)
+        && content.parse::<f64>().is_ok()
+    {
+        let at = (start + sign, rest.trim_end().len() - sign);
+        return Err(LexerError::InvalidRemainder { at: at.into() }.into());
+    }
+
     let token_type;
     if let Ok(num) = content.parse::<BigInt>() {
         token_type = VariableToken::Int(num);
