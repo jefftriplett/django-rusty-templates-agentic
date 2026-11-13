@@ -40,6 +40,8 @@ Render a loop with `{% with %}` inside about 6–10% faster by not re-attaching 
 
 Internal cleanups with no change in behavior: one comparison path for every `{% if %}` operator, and `parse.rs` and `render/filters.rs` split into smaller files. ([#403](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/403), [#405](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/405), [#406](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/406))
 
+Add an `isolated_tags` engine option so a project can mark third-party tags, such as crispy-forms' `crispy` or widget-tweaks' `render_field`, as isolated compilers from `TEMPLATES` instead of patching the packages; names that don't exist raise `ImproperlyConfigured`. ([#408](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/408))
+
 ## 2026.11.3
 
 Compile Django admin's inclusion tags, `get_admin_log` and `get_flatpages` natively, so all of Django's contrib templates, including the admin change form, change list and index, compile natively. ([#318](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/318))
