@@ -1,0 +1,172 @@
+{
+  "python": "3.15.0",
+  "platform": "macOS-26.4.1-arm64-arm-64bit-Mach-O",
+  "django": "5.2.17",
+  "rusty_version": "2026.11.3",
+  "rows": 200,
+  "number": 50,
+  "repeat": 7,
+  "results": [
+    {
+      "mode": "warm, cached loader",
+      "scenario": "tiny template",
+      "shows": "per-render overhead",
+      "django_us": 5.2,
+      "rusty_us": 0.9,
+      "speedup": 5.82
+    },
+    {
+      "mode": "warm, cached loader",
+      "scenario": "table with filters",
+      "shows": "200 rows of native filters",
+      "django_us": 5590.5,
+      "rusty_us": 332.6,
+      "speedup": 16.81
+    },
+    {
+      "mode": "warm, cached loader",
+      "scenario": "inheritance and includes",
+      "shows": "extends, blocks, 20 includes",
+      "django_us": 189.1,
+      "rusty_us": 20.0,
+      "speedup": 9.44
+    },
+    {
+      "mode": "warm, cached loader",
+      "scenario": "model-style objects",
+      "shows": "Python properties and methods",
+      "django_us": 1617.9,
+      "rusty_us": 132.6,
+      "speedup": 12.2
+    },
+    {
+      "mode": "warm, cached loader",
+      "scenario": "tiny template, 30 context keys",
+      "shows": "context conversion",
+      "django_us": 5.0,
+      "rusty_us": 0.8,
+      "speedup": 6.16
+    },
+    {
+      "mode": "warm, cached loader",
+      "scenario": "tiny template, 100 context keys",
+      "shows": "context conversion",
+      "django_us": 5.0,
+      "rusty_us": 0.8,
+      "speedup": 6.22
+    },
+    {
+      "mode": "warm, cached loader",
+      "scenario": "tiny template, 500 context keys",
+      "shows": "context conversion",
+      "django_us": 5.0,
+      "rusty_us": 0.8,
+      "speedup": 6.19
+    },
+    {
+      "mode": "warm, cached loader",
+      "scenario": "urlize on email addresses",
+      "shows": "links built natively",
+      "django_us": 2706.8,
+      "rusty_us": 238.9,
+      "speedup": 11.33
+    },
+    {
+      "mode": "warm, cached loader",
+      "scenario": "custom simple_tag per row",
+      "shows": "Python tag calls",
+      "django_us": 324.1,
+      "rusty_us": 44.5,
+      "speedup": 7.29
+    },
+    {
+      "mode": "warm, cached loader",
+      "scenario": "custom filter per row",
+      "shows": "Python filter calls",
+      "django_us": 344.7,
+      "rusty_us": 45.8,
+      "speedup": 7.52
+    },
+    {
+      "mode": "warm, cached loader",
+      "scenario": "mixed template",
+      "shows": "one custom Node tag, rest native",
+      "django_us": 1925.7,
+      "rusty_us": 253.8,
+      "speedup": 7.59
+    },
+    {
+      "mode": "load and render, no cached loader",
+      "scenario": "table with filters",
+      "shows": "200 rows of native filters",
+      "django_us": 5879.8,
+      "rusty_us": 357.4,
+      "speedup": 16.45
+    },
+    {
+      "mode": "load and render, no cached loader",
+      "scenario": "inheritance and includes",
+      "shows": "extends, blocks, 20 includes",
+      "django_us": 420.5,
+      "rusty_us": 83.9,
+      "speedup": 5.01
+    },
+    {
+      "mode": "load and render, no cached loader",
+      "scenario": "mixed template",
+      "shows": "one custom Node tag, rest native",
+      "django_us": 2022.9,
+      "rusty_us": 341.3,
+      "speedup": 5.93
+    },
+    {
+      "mode": "compile only, no cached loader",
+      "scenario": "tiny template",
+      "shows": "per-render overhead",
+      "django_us": 9.8,
+      "rusty_us": 0.9,
+      "speedup": 11.52
+    },
+    {
+      "mode": "compile only, no cached loader",
+      "scenario": "table with filters",
+      "shows": "200 rows of native filters",
+      "django_us": 114.5,
+      "rusty_us": 4.8,
+      "speedup": 23.9
+    },
+    {
+      "mode": "compile only, no cached loader",
+      "scenario": "inheritance and includes",
+      "shows": "extends, blocks, 20 includes",
+      "django_us": 51.4,
+      "rusty_us": 3.2,
+      "speedup": 15.91
+    },
+    {
+      "mode": "compile only, no cached loader",
+      "scenario": "mixed template",
+      "shows": "one custom Node tag, rest native",
+      "django_us": 48.2,
+      "rusty_us": 54.7,
+      "speedup": 0.88
+    },
+    {
+      "mode": "warm, debug=True",
+      "scenario": "table with filters",
+      "shows": "200 rows of native filters",
+      "django_us": 5592.4,
+      "rusty_us": 327.7,
+      "speedup": 17.07
+    },
+    {
+      "mode": "warm, debug=True",
+      "scenario": "mixed template",
+      "shows": "one custom Node tag, rest native",
+      "django_us": 1918.9,
+      "rusty_us": 252.9,
+      "speedup": 7.59
+    }
+  ],
+  "median_warm_speedup": 7.52
+}
