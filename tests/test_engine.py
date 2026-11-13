@@ -363,14 +363,15 @@ def test_invalid_loader_name_keeps_cause():
 
 
 def test_valid_file_charset():
-    RustyTemplates(
+    backend = RustyTemplates(
         {
-            "OPTIONS": {"file_charset": "utf-8"},
+            "OPTIONS": {"file_charset": "latin-1"},
             "NAME": "rust",
             "DIRS": [],
             "APP_DIRS": False,
         }
     )
+    assert backend.engine.file_charset == "latin-1"
 
 
 def test_invalid_file_charset(tmp_path):

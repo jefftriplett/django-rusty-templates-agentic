@@ -1,9 +1,34 @@
+import gc
+
 from django import VERSION
 import pytest
 from django.template import engines, TemplateSyntaxError
 from django.template.backends.django import DjangoTemplates
 
 from django_rusty_templates import RustyTemplates
+
+# Modules whose tests call `gc.collect()`.
+GC_MODULES = (
+    "test_memory_ownership.py",
+    "test_render_handles.py",
+    "test_scoped_binding_snapshots.py",
+)
+
+
+def pytest_collection_modifyitems(items):
+    """Run the tests that call `gc.collect()` first.
+
+    A collection walks every live object, and pytest keeps a report for each
+    finished test, so late in the session one collection takes about 50 ms.
+    """
+    items.sort(key=lambda item: item.path.name not in GC_MODULES)
+
+
+def pytest_collection_finish(session):
+    """Keep the collected test items out of every later garbage collection."""
+    gc.collect()
+    gc.freeze()
+
 
 all_engines = pytest.fixture(params=["rusty", "django"])
 all_engines_nocache = pytest.fixture(params=["rusty_nocache", "django_nocache"])

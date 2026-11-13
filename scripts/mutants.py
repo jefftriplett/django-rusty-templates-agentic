@@ -95,6 +95,9 @@ def run(command, cwd, env, timeout=None):
 
 class Worktree:
     def __init__(self, path):
+        # Commands run from inside the worktree, so a relative path (CI
+        # passes `--output target/mutants`) would point nowhere.
+        path = Path(path).resolve()
         self.path = path
         venv = path / ".venv"
         bin_dir = venv / ("Scripts" if os.name == "nt" else "bin")
@@ -204,6 +207,7 @@ def main():
             print(mutant["name"])
         return 0
 
+    args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     results_path = args.output / "results.jsonl"
     worktree = Worktree.create(args.output / "worktree")
