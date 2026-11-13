@@ -8,7 +8,7 @@ from django.template import engines, Context
 from django.template.engine import Engine
 from django.template.library import InvalidTemplateLibrary
 from django.template.exceptions import TemplateDoesNotExist
-from django_rusty_templates import RustyTemplates
+from django_rusty_templates import Engine as RustyEngine, RustyTemplates
 
 
 def test_import_libraries_import_error():
@@ -117,6 +117,37 @@ def test_select_template_errors(template_engine, template_list, expected_error):
         template_engine.engine.select_template(template_list)
 
     assert str(exc_info.value) == expected_error
+
+
+@pytest.mark.parametrize("engine_class", [RustyEngine, Engine], ids=["rusty", "django"])
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        # Any iterable works, and a string is one of characters. A name
+        # that fails more than once is reported once.
+        (lambda: "basic.txt", "bee"),
+        (lambda: ("missing", "b"), "bee"),
+        (lambda: iter(["missing", "basic.txt"]), "x"),
+        (lambda: "zzz", TemplateDoesNotExist("z")),
+        (lambda: "", TemplateDoesNotExist("No template names provided")),
+    ],
+)
+def test_select_template_iterates_its_argument(engine_class, names, expected):
+    engine = engine_class(
+        loaders=[
+            (
+                "django.template.loaders.locmem.Loader",
+                {"basic.txt": "x", "b": "bee"},
+            )
+        ]
+    )
+    context = {} if engine_class is RustyEngine else Context()
+    if isinstance(expected, TemplateDoesNotExist):
+        with pytest.raises(TemplateDoesNotExist) as info:
+            engine.select_template(names())
+        assert str(info.value) == str(expected)
+    else:
+        assert engine.select_template(names()).render(context) == expected
 
 
 def test_select_template_invalid(template_engine):
