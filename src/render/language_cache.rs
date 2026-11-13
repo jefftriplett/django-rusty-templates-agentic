@@ -5,6 +5,7 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
 use pyo3::types::{PyBool, PyDict, PyModule, PyString, PyType};
+use pyo3::{PyTraverseError, PyVisit};
 
 static GET_LANGUAGE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -192,6 +193,20 @@ impl CatalogCache {
         self.entries
             .lock_py_attached(py)
             .expect("Mutex should not be poisoned")
+    }
+}
+
+impl crate::gc::Trace for CatalogCache {
+    fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        // A collection can start while a render holds the lock; the entries
+        // are then reachable from that render.
+        if let Ok(entries) = self.entries.try_lock() {
+            for (catalog, value) in entries.iter() {
+                visit.call(catalog)?;
+                visit.call(value)?;
+            }
+        }
+        Ok(())
     }
 }
 
