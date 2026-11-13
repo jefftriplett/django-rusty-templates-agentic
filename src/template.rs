@@ -1018,7 +1018,11 @@ pub mod django_rusty_templates {
             match get_template(engine.clone(), py, Cow::Owned(template_name)) {
                 Ok(template) => return Ok(template),
                 Err(e) if e.is_instance_of::<TemplateDoesNotExist>(py) => {
-                    not_found.push(e.value(py).to_string());
+                    // Django lists each failed name once.
+                    let name = e.value(py).to_string();
+                    if !not_found.contains(&name) {
+                        not_found.push(name);
+                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -1065,7 +1069,7 @@ pub mod django_rusty_templates {
             string_if_invalid: String,
             file_charset: String,
             libraries: Option<Bound<'_, PyAny>>,
-            #[allow(unused_variables)] builtins: Option<Bound<'_, PyAny>>,
+            builtins: Option<Bound<'_, PyAny>>,
             autoescape: bool,
             allow_multiline_tags: Option<Bound<'_, PyAny>>,
             isolated_tags: Option<Bound<'_, PyAny>>,
@@ -1321,8 +1325,14 @@ pub mod django_rusty_templates {
                 }
                 return Ok(template);
             }
+            // Django iterates whatever it's given, so a string is tried one
+            // character at a time.
+            let names = names
+                .try_iter()?
+                .map(|name| name?.extract())
+                .collect::<PyResult<Vec<String>>>()?;
             slf.borrow()
-                .select_template_native(py, names.extract()?)?
+                .select_template_native(py, names)?
                 .into_pyobject(py)
                 .map(Bound::into_any)
         }
