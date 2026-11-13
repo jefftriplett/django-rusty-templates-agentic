@@ -151,33 +151,6 @@ pub enum IncludeTemplateKey {
 /// are short and come from template source, so a fast hash beats `SipHash`.
 type BindingMap = FxHashMap<String, Vec<Py<PyAny>>>;
 
-/// Bindings shared by a parent and its child scopes. The `Arc` lets the
-/// parent take them back without copying once no child or retained snapshot
-/// holds them. It never outlives its `Gc` container, so Python's GC still
-/// sees every reference.
-#[derive(Debug)]
-struct SharedBindings(Arc<BindingMap>);
-
-impl Trace for SharedBindings {
-    fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-        self.0.as_ref().trace(visit)
-    }
-}
-
-fn clone_bindings(bindings: &BindingMap) -> BindingMap {
-    Python::attach(|py| {
-        bindings
-            .iter()
-            .map(|(key, values)| {
-                (
-                    key.clone(),
-                    values.iter().map(|value| value.clone_ref(py)).collect(),
-                )
-            })
-            .collect()
-    })
-}
-
 impl Trace for ForLoop {
     fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.dictionary.trace(visit)
@@ -195,20 +168,13 @@ struct Shadow {
     loops: usize,
 }
 
-#[derive(Clone, Debug)]
-struct ScopeBindings {
-    base: Gc<SharedBindings>,
-    overlay: bool,
-}
-
 #[derive(Debug, Default)]
 pub struct Context {
     context: BindingMap,
     // The caller's context dict, read on lookup instead of being copied in.
     // A name is copied into `context` before its first write, so a name in
-    // `context` (or the scope base) always hides the same name here.
+    // `context` always hides the same name here.
     source: Option<Py<PyDict>>,
-    scope_bindings: Option<ScopeBindings>,
     loops: Vec<ForLoop>,
     pub request: Option<Py<PyAny>>,
     pub autoescape: bool,
@@ -249,9 +215,9 @@ pub struct Context {
     pub(crate) cycle_indices: HashMap<CycleId, usize>,
     changed_states: Vec<HashMap<CycleId, Py<PyAny>>>,
     assigned: HashSet<String>,
-    /// Names whose first binding is a copy of the caller's value, made when
-    /// a scope first shadowed it.
-    source_copies: HashSet<String>,
+    /// Names first bound by a scoped write, with how many values that write
+    /// found: a copy of the caller's value, or none.
+    scope_bases: FxHashMap<String, usize>,
     cycle_variables: HashSet<String>,
     // Created on first use: most renders never need them, and a smaller
     // `Context` is cheaper to move into and out of Python callbacks.
@@ -285,9 +251,6 @@ impl Trace for Context {
     fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.context.trace(visit)?;
         self.source.trace(visit)?;
-        if let Some(shared) = &self.scope_bindings {
-            shared.base.trace(visit)?;
-        }
         self.loops.trace(visit)?;
         self.request.trace(visit)?;
         self.formatting_context.trace(visit)?;
@@ -354,7 +317,6 @@ impl Context {
             request,
             context,
             source: None,
-            scope_bindings: None,
             autoescape,
             use_l10n: None,
             use_tz: None,
@@ -381,7 +343,7 @@ impl Context {
             cycle_indices: HashMap::new(),
             changed_states: vec![HashMap::new()],
             assigned: HashSet::new(),
-            source_copies: HashSet::new(),
+            scope_bases: FxHashMap::default(),
             cycle_variables: HashSet::new(),
             caches: None,
             render_stack: RenderStack::default(),
@@ -418,7 +380,6 @@ impl Context {
         };
         dicts.len() == 2
             && dicts.get_item(1).is_ok_and(|dict| dict.is(source.bind(py)))
-            && self.scope_bindings.is_none()
             && self.loops.is_empty()
             && self.names.is_empty()
             && self.assigned.is_empty()
@@ -447,10 +408,6 @@ impl Context {
                 .map(|(k, v)| (k.clone(), v.iter().map(|v| v.clone_ref(py)).collect()))
                 .collect(),
             source: self.source.as_ref().map(|source| source.clone_ref(py)),
-            scope_bindings: self.scope_bindings.as_ref().map(|scope| ScopeBindings {
-                base: scope.base.clone_ref(py),
-                overlay: scope.overlay,
-            }),
             autoescape: self.autoescape,
             use_l10n: self.use_l10n,
             use_tz: self.use_tz,
@@ -492,7 +449,7 @@ impl Context {
             include_cache: self.include_cache.clone(),
             cycle_indices: self.cycle_indices.clone(),
             assigned: self.assigned.clone(),
-            source_copies: self.source_copies.clone(),
+            scope_bases: self.scope_bases.clone(),
             cycle_variables: self.cycle_variables.clone(),
             changed_states: self
                 .changed_states
@@ -518,87 +475,8 @@ impl Context {
         other.caches = self.caches.take();
     }
 
-    /// A child scope the parent waits on, as `{% with %}` and `{% block %}`
-    /// render their bodies, ended by [`Self::merge_render_state`]. State the
-    /// merge hands back moves into the child instead of being copied: copying
-    /// the block table for every block made a child template quadratic in its
-    /// number of blocks.
-    pub(crate) fn enter_scope(&mut self, py: Python<'_>) -> Self {
-        let inheritance_blocks = std::mem::take(&mut self.inheritance_blocks);
-        let include_cache = std::mem::take(&mut self.include_cache);
-        let cycle_indices = std::mem::take(&mut self.cycle_indices);
-        let changed_states = std::mem::take(&mut self.changed_states);
-        let date_cache = std::mem::take(&mut self.date_cache);
-        let caches = self.caches.take();
-        let mut scoped = self.clone_scope(py);
-        scoped.date_cache = date_cache;
-        scoped.caches = caches;
-        scoped.inheritance_blocks = inheritance_blocks;
-        scoped.include_cache = include_cache;
-        scoped.cycle_indices = cycle_indices;
-        scoped.changed_states = changed_states;
-        scoped
-    }
-
-    /// Freeze bindings once per render; child writes copy only the affected stack.
-    /// Parent writes use copy-on-write so retained callback snapshots stay valid,
-    /// and take the bindings back without copying once nothing else holds them.
-    pub(crate) fn clone_scope(&mut self, py: Python<'_>) -> Self {
-        if self.scope_bindings.is_none() {
-            self.scope_bindings = Some(ScopeBindings {
-                base: Gc::new_in(
-                    py,
-                    SharedBindings(Arc::new(std::mem::take(&mut self.context))),
-                ),
-                overlay: false,
-            });
-        }
-        let mut scoped = self.clone_ref(py);
-        // The parent's reference to a live context is Rust's own.
-        scoped.live_refs = self.live_refs.map(|refs| refs + 1);
-        scoped
-            .scope_bindings
-            .as_mut()
-            .expect("scope initialized")
-            .overlay = true;
-        scoped
-    }
-
     fn visible_bindings(&self) -> impl Iterator<Item = (&String, &Vec<Py<PyAny>>)> {
-        self.scope_bindings
-            .as_ref()
-            .into_iter()
-            .flat_map(|shared| shared.base.0.iter())
-            .filter(|(key, _)| !self.context.contains_key(*key))
-            .chain(self.context.iter())
-    }
-
-    fn bindings_mut(&mut self) -> &mut BindingMap {
-        if let Some(shared) = self.scope_bindings.take_if(|shared| !shared.overlay) {
-            // Materialize parent writes while retained child snapshots keep
-            // their immutable GC-visible base. Dropping this handle frees the
-            // container when nothing else holds it, so the map moves back
-            // instead of being copied on every write after a child scope.
-            let map = Arc::clone(&shared.base.0);
-            drop(shared);
-            let mut bindings =
-                Arc::try_unwrap(map).unwrap_or_else(|shared| clone_bindings(&shared));
-            bindings.extend(std::mem::take(&mut self.context));
-            self.context = bindings;
-        }
-        &mut self.context
-    }
-
-    fn has_rust_binding(&self, key: &str) -> bool {
-        self.context.contains_key(key)
-            || self
-                .scope_bindings
-                .as_ref()
-                .is_some_and(|shared| shared.base.0.contains_key(key))
-    }
-
-    fn has_binding_key(&self, key: &str) -> bool {
-        self.has_rust_binding(key) || self.source_contains(key)
+        self.context.iter()
     }
 
     pub fn invalid_value<'py>(
@@ -776,13 +654,6 @@ impl Context {
         if let Some(values) = self.context.get(key) {
             return values.last().map(|value| value.bind(py).clone());
         }
-        if let Some(values) = self
-            .scope_bindings
-            .as_ref()
-            .and_then(|shared| shared.base.0.get(key))
-        {
-            return values.last().map(|value| value.bind(py).clone());
-        }
         let source = self.source.as_ref()?.bind(py);
         source.get_item(interned_name(py, key)).ok().flatten()
     }
@@ -921,36 +792,29 @@ impl Context {
         }
         let py = value.py();
         let value = value.unbind();
-        if let Some(values) = self.bindings_mut().get_mut(key) {
+        if let Some(values) = self.context.get_mut(key) {
             if replace {
                 values.pop();
             }
-            let replaced_all = values.is_empty();
+            let left = values.len();
             values.push(value);
-            if replaced_all {
-                self.source_copies.remove(key);
+            // The write replaced the copy of the caller's value.
+            if self.scope_bases.get(key).is_some_and(|base| left < *base) {
+                self.scope_bases.remove(key);
             }
             return;
         }
-        let inherited = self
-            .scope_bindings
-            .as_ref()
-            .filter(|shared| shared.overlay)
-            .and_then(|shared| shared.base.0.get(key))
-            .map(|values| values.iter().map(|value| value.clone_ref(py)).collect());
-        let mut values: Vec<_> = inherited
-            .or_else(|| {
-                // First write to a name from the caller's dict.
-                let source = self.source.as_ref()?.bind(py);
-                let value = source.get_item(key).ok().flatten()?;
-                if !replace {
-                    self.source_copies.insert(key.to_string());
-                }
-                Some(vec![value.unbind()])
-            })
-            .unwrap_or_default();
-        if replace {
-            values.pop();
+        // First write to this name. A scoped write keeps a copy of the
+        // caller's value below the new one, so the name still resolves if a
+        // later write replaces only the top.
+        let mut values = Vec::new();
+        if !replace {
+            if let Some(source) = &self.source
+                && let Some(value) = source.bind(py).get_item(key).ok().flatten()
+            {
+                values.push(value.unbind());
+            }
+            self.scope_bases.insert(key.to_string(), values.len());
         }
         values.push(value);
         self.context.insert(key.to_string(), values);
@@ -974,13 +838,7 @@ impl Context {
     }
 
     pub(crate) fn clear_variable(&mut self, key: &str) {
-        if self
-            .scope_bindings
-            .as_ref()
-            .is_some_and(|shared| shared.overlay)
-        {
-            self.context.entry(key.to_string()).or_default().clear();
-        } else if let Some(values) = self.bindings_mut().get_mut(key) {
+        if let Some(values) = self.context.get_mut(key) {
             values.clear();
         } else if self.source_contains(key) {
             // Hide the caller's value.
@@ -1066,15 +924,16 @@ impl Context {
         if self.django_context_base.get_mut().is_some() {
             self.django_context_changes.insert(name.to_string());
         }
-        let bindings = self.bindings_mut();
-        let values = bindings
+        let values = self
+            .context
             .get_mut(name)
             .expect("Variable should have been pushed before");
         values.pop();
-        // Only the copy of the caller's value is left, so read the caller's
-        // dict again: it may have changed since.
-        if values.len() == 1 && self.source_copies.remove(name) {
-            self.bindings_mut().remove(name);
+        // Back to what the first scoped write found, so the name is the
+        // caller's again: their dict may have changed since.
+        if self.scope_bases.get(name) == Some(&values.len()) {
+            self.scope_bases.remove(name);
+            self.context.remove(name);
         }
     }
 
@@ -1400,33 +1259,6 @@ impl Context {
             .map(|output| Cow::Owned(output.into_owned()));
         self.changed_states = previous;
         output
-    }
-
-    pub fn merge_render_state(
-        &mut self,
-        py: Python<'_>,
-        scoped: Self,
-        local_names: &[String],
-    ) -> PyResult<()> {
-        for name in &scoped.cycle_variables {
-            if !local_names.contains(name)
-                && self.has_binding_key(name)
-                && let Some(value) = scoped.get(py, name)
-            {
-                self.insert_cycle(name.clone(), value)?;
-            }
-        }
-        self.inheritance_blocks = scoped.inheritance_blocks;
-        self.cycle_indices = scoped.cycle_indices;
-        self.changed_states = scoped.changed_states;
-        self.include_cache = scoped.include_cache;
-        // The scope took the caches as well; see `move_caches_to`.
-        self.date_cache = scoped.date_cache;
-        self.caches = scoped.caches;
-        self.autoescape = scoped.autoescape;
-        self.use_l10n = scoped.use_l10n;
-        self.use_tz = scoped.use_tz;
-        Ok(())
     }
 
     pub fn next_cycle_index(
@@ -2245,64 +2077,6 @@ mod tests {
                     .unwrap(),
                 "caller"
             );
-        });
-    }
-
-    /// The address of the stored values for `name`, which moves with the map
-    /// but changes when the bindings are copied.
-    fn binding_address(context: &Context, name: &str) -> *const Py<PyAny> {
-        context.context.get(name).expect("binding present").as_ptr()
-    }
-
-    #[test]
-    fn test_parent_write_reclaims_bindings_from_finished_scope() {
-        Python::initialize();
-        Python::attach(|py| {
-            let mut context = Context::new(
-                HashMap::from([(
-                    "kept".to_string(),
-                    1_i64.into_pyobject(py).unwrap().into_any().unbind(),
-                )]),
-                None,
-                false,
-            );
-            let before = binding_address(&context, "kept");
-            let scoped = context.clone_scope(py);
-            context.merge_render_state(py, scoped, &[]).unwrap();
-            context
-                .insert(
-                    "new".to_string(),
-                    2_i64.into_pyobject(py).unwrap().into_any(),
-                )
-                .unwrap();
-            assert_eq!(binding_address(&context, "kept"), before);
-        });
-    }
-
-    #[test]
-    fn test_parent_write_copies_bindings_a_snapshot_still_holds() {
-        Python::initialize();
-        Python::attach(|py| {
-            let mut context = Context::new(
-                HashMap::from([(
-                    "kept".to_string(),
-                    1_i64.into_pyobject(py).unwrap().into_any().unbind(),
-                )]),
-                None,
-                false,
-            );
-            let before = binding_address(&context, "kept");
-            let retained = context.clone_scope(py);
-            context
-                .insert(
-                    "kept".to_string(),
-                    2_i64.into_pyobject(py).unwrap().into_any(),
-                )
-                .unwrap();
-            assert_ne!(binding_address(&context, "kept"), before);
-            // The retained scope still sees the value from before the write.
-            let value: i64 = retained.get(py, "kept").unwrap().extract().unwrap();
-            assert_eq!(value, 1);
         });
     }
 }
