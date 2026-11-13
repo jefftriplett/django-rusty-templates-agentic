@@ -1069,8 +1069,17 @@ impl For {
         context: &mut Context,
         rendered: &mut String,
     ) -> super::RenderIntoResult {
+        // Stop at the first error, as `list()` does: an iterator can keep
+        // raising forever.
         let mut list: Vec<_> = match iterable.try_iter() {
-            Ok(iterator) => iterator.collect(),
+            Ok(iterator) => match iterator.collect::<PyResult<_>>() {
+                Ok(list) => list,
+                Err(error) => {
+                    let error =
+                        error.annotate(py, self.iterable.at, "while iterating this", template);
+                    return Err(error.into());
+                }
+            },
             Err(error) => {
                 let error = error.annotate(py, self.iterable.at, "here", template);
                 return Err(error.into());
@@ -1087,14 +1096,6 @@ impl For {
         context.push_for_loop(py, list.len());
         let result = (|| {
             for (index, values) in list.into_iter().enumerate() {
-                let values = match values {
-                    Ok(values) => values,
-                    Err(error) => {
-                        let error =
-                            error.annotate(py, self.iterable.at, "while iterating this", template);
-                        return Err(error.into());
-                    }
-                };
                 context.push_variables(
                     &self.variables.names,
                     self.variables.at,

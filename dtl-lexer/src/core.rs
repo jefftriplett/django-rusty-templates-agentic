@@ -181,7 +181,12 @@ impl<'t> Lexer<'t> {
             EndTag::Tag => "%}",
             EndTag::Comment => "#}",
         };
-        let Some(n) = self.rest.find(end_str) else {
+        // The end marker can't share a character with the start marker:
+        // Django's `{%.*?%}` doesn't match `{%}`.
+        let Some(n) = self.rest[START_TAG_LEN..]
+            .find(end_str)
+            .map(|n| n + START_TAG_LEN)
+        else {
             return self.lex_text();
         };
         let multiline = matches!(end_tag, EndTag::Tag) && self.multiline_tags;

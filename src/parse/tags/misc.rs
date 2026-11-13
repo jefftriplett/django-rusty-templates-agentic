@@ -179,11 +179,10 @@ impl Parser<'_, '_> {
         // validation, so so do we. This will become unnecessary if Django
         // starts supporting variables in the now tag.
         // https://github.com/django/new-features/issues/115
-        let format = if raw.len() >= 2 {
-            &raw[1..raw.len() - 1]
-        } else {
-            ""
-        };
+        let mut chars = raw.chars();
+        chars.next();
+        chars.next_back();
+        let format = chars.as_str();
 
         Ok(Now {
             format: format.to_string(),
