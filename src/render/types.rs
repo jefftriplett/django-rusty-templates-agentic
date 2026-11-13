@@ -13,7 +13,7 @@ use html_escape::{encode_quoted_attribute, encode_quoted_attribute_to_string};
 use miette::SourceSpan;
 use num_bigint::{BigInt, ToBigInt};
 use num_traits::{ToPrimitive, Zero};
-use pyo3::exceptions::{PyAttributeError, PyKeyError, PyTypeError};
+use pyo3::exceptions::{PyAttributeError, PyKeyError, PyRuntimeError, PyTypeError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
@@ -99,6 +99,9 @@ pub struct ForLoop {
     /// How many values `forloop` had as a variable when the loop began.
     /// More than this means something in the body rebound the name.
     forloop_values: usize,
+    /// The scope holding the loop's variables, once an iteration began,
+    /// and whether the loop unpacks each item into several variables.
+    scope: Option<(usize, bool)>,
     count: usize,
     len: usize,
     dictionary: Gc<GcOnceLock<Py<PyDict>>>,
@@ -179,6 +182,19 @@ pub(crate) enum FilterChain {
     Skip,
 }
 
+/// The names in Django's first context layer.
+const BUILTIN_NAMES: [&str; 3] = ["True", "False", "None"];
+
+/// One of `Context.dicts`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layer {
+    Builtins,
+    /// The caller's values.
+    Base,
+    /// The scope at this index in `Context::names`.
+    Scope(usize),
+}
+
 /// Whether a render ever bound `forloop` as a variable. Until one does,
 /// the name inside a loop can only be the loop object.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -248,6 +264,10 @@ pub struct Context {
     scope_bases: FxHashMap<String, usize>,
     /// Whether anything ever bound the name `forloop` as a variable.
     forloop_name: ForloopName,
+    /// Names a tag wrote to `dicts[0]`, the built-ins layer.
+    builtins_layer: Vec<String>,
+    /// What `bind_template()` bound, on a context no template is rendering.
+    bound_template: Option<Py<PyAny>>,
     cycle_variables: HashSet<String>,
     // Created on first use: most renders never need them, and a smaller
     // `Context` is cheaper to move into and out of Python callbacks.
@@ -285,6 +305,7 @@ impl Trace for Context {
     fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.context.trace(visit)?;
         self.source.trace(visit)?;
+        self.bound_template.trace(visit)?;
         self.render_context.trace(visit)?;
         self.loops.trace(visit)?;
         self.request.trace(visit)?;
@@ -350,6 +371,8 @@ impl Context {
         let context = bindings;
         Self {
             forloop_name: ForloopName::Unbound,
+            builtins_layer: Vec::new(),
+            bound_template: None,
             request,
             context,
             source: None,
@@ -480,6 +503,7 @@ impl Context {
                 .iter()
                 .map(|loop_| ForLoop {
                     forloop_values: loop_.forloop_values,
+                    scope: loop_.scope,
                     count: loop_.count,
                     len: loop_.len,
                     dictionary: loop_.dictionary.clone_ref(py),
@@ -487,6 +511,8 @@ impl Context {
                 .collect(),
             names: self.names.clone(),
             forloop_name: self.forloop_name,
+            builtins_layer: self.builtins_layer.clone(),
+            bound_template: self.bound_template.as_ref().map(|v| v.clone_ref(py)),
             include_cache: self.include_cache.clone(),
             cycle_indices: self.cycle_indices.clone(),
             assigned: self.assigned.clone(),
@@ -902,6 +928,7 @@ impl Context {
             let mut names_set = HashSet::new();
             names_set.insert(name.clone());
             self.names.push(names_set);
+            self.note_loop_scope(false);
         }
         self._insert(&name, value, replace);
     }
@@ -960,6 +987,7 @@ impl Context {
         // unpacking leaves nothing for the loop's cleanup to pop.
         if !replace {
             self.names.push(names.iter().cloned().collect());
+            self.note_loop_scope(names.len() > 1);
         }
         Ok(())
     }
@@ -1012,6 +1040,155 @@ impl Context {
             self._insert(name, value, !first);
         }
         Ok(())
+    }
+
+    /// The newest loop's variables live in the scope just opened.
+    fn note_loop_scope(&mut self, unpacked: bool) {
+        let scope = self.names.len() - 1;
+        if let Some(loop_) = self.loops.last_mut() {
+            loop_.scope = Some((scope, unpacked));
+        }
+    }
+
+    /// Where `key`'s values sit in its stack: how many belong to no scope
+    /// (the caller's value, at the bottom), then the scopes that bind it.
+    fn placement(&self, key: &str) -> (usize, Vec<usize>) {
+        let values = self.context.get(key).map_or(0, Vec::len);
+        let mut holders: Vec<usize> = self
+            .names
+            .iter()
+            .enumerate()
+            .filter(|(_, names)| names.contains(key))
+            .map(|(scope, _)| scope)
+            .collect();
+        // A cleared name has scopes without values; keep the newest.
+        let extra = holders.len().saturating_sub(values);
+        holders.drain(..extra);
+        (values - holders.len(), holders)
+    }
+
+    /// Django's `Context.dicts`: the built-in names, the caller's values,
+    /// then one dict per open scope. A loop that unpacks its items has two,
+    /// `forloop` and then the variables, as Django pushes them.
+    fn layers<'py>(&self, py: Python<'py>) -> PyResult<Vec<(Layer, Bound<'py, PyDict>)>> {
+        let builtins = PyDict::new(py);
+        let base = match &self.source {
+            Some(source) => source.bind(py).copy()?,
+            None => PyDict::new(py),
+        };
+        let scopes: Vec<_> = self.names.iter().map(|_| PyDict::new(py)).collect();
+        for name in BUILTIN_NAMES {
+            if let Some(value) = self.context.get(name).and_then(|values| values.first()) {
+                builtins.set_item(name, value)?;
+            }
+        }
+        for (key, values) in &self.context {
+            let (below, holders) = self.placement(key);
+            if below > 0 {
+                let layer = if self.in_builtins_layer(key) {
+                    &builtins
+                } else {
+                    &base
+                };
+                layer.set_item(key, &values[below - 1])?;
+            } else if base.contains(key)? {
+                // A scope's value was written over the caller's, or cleared.
+                base.del_item(key)?;
+            }
+            for (scope, value) in holders.iter().zip(&values[below..]) {
+                scopes[*scope].set_item(key, value)?;
+            }
+        }
+        let mut loops: Vec<Option<(usize, bool)>> = vec![None; scopes.len()];
+        for (depth, loop_) in self.loops.iter().rev().enumerate() {
+            if let Some((scope, unpacked)) = loop_.scope
+                && let Some(entry) = loops.get_mut(scope)
+            {
+                *entry = Some((depth, unpacked));
+            }
+        }
+        let mut layers = vec![(Layer::Builtins, builtins), (Layer::Base, base)];
+        for (scope, (variables, loop_)) in scopes.into_iter().zip(loops).enumerate() {
+            let Some((depth, unpacked)) = loop_ else {
+                layers.push((Layer::Scope(scope), variables));
+                continue;
+            };
+            // Django binds `forloop` first, then the loop's variables.
+            let first = PyDict::new(py);
+            if !variables.contains("forloop")? {
+                first.set_item("forloop", self.loop_dictionary(py, depth)?)?;
+            }
+            if unpacked {
+                layers.push((Layer::Scope(scope), first));
+                layers.push((Layer::Scope(scope), variables));
+            } else {
+                first.update(variables.as_mapping())?;
+                layers.push((Layer::Scope(scope), first));
+            }
+        }
+        Ok(layers)
+    }
+
+    fn in_builtins_layer(&self, key: &str) -> bool {
+        BUILTIN_NAMES.contains(&key) || self.builtins_layer.iter().any(|name| name == key)
+    }
+
+    /// `context.dicts[n][key] = value`, for the layer `layers` put at `n`.
+    fn set_in_layer(&mut self, layer: Layer, key: &str, value: Bound<'_, PyAny>) {
+        let (below, holders) = self.placement(key);
+        if self.django_context_base.get_mut().is_some() {
+            self.django_context_changes.insert(key.to_string());
+        }
+        let scope = match layer {
+            Layer::Scope(scope) => scope,
+            Layer::Builtins | Layer::Base => {
+                let in_base =
+                    below > 0 || (!self.context.contains_key(key) && self.source_contains(key));
+                if layer == Layer::Builtins {
+                    if in_base && !self.in_builtins_layer(key) {
+                        // The caller's value hides one in the built-ins layer.
+                        return;
+                    }
+                    if !self.in_builtins_layer(key) {
+                        self.builtins_layer.push(key.to_string());
+                    }
+                } else {
+                    // One slot holds both layers' value; the caller's wins.
+                    self.builtins_layer.retain(|name| name != key);
+                }
+                // Later scope pops must leave this value in place.
+                self.scope_bases.remove(key);
+                match self.context.get_mut(key) {
+                    Some(values) if below > 0 => values[below - 1] = value.unbind(),
+                    Some(values) => values.insert(0, value.unbind()),
+                    None => {
+                        self.context.insert(key.to_string(), vec![value.unbind()]);
+                    }
+                }
+                return;
+            }
+        };
+        if scope >= self.names.len() {
+            // The layer's scope has closed.
+            return;
+        }
+        if key == "forloop" {
+            self.forloop_name = ForloopName::Bound;
+        }
+        let earlier = holders.iter().filter(|holder| **holder < scope).count();
+        if holders.contains(&scope) {
+            if let Some(values) = self.context.get_mut(key) {
+                values[below + earlier] = value.unbind();
+            }
+            return;
+        }
+        self.names[scope].insert(key.to_string());
+        if earlier == holders.len() {
+            // The newest binding: an ordinary scoped write.
+            self._insert(key, value, false);
+        } else if let Some(values) = self.context.get_mut(key) {
+            values.insert(below + earlier, value.unbind());
+        }
     }
 
     /// A `takes_context` tag is about to get this context.
@@ -1070,6 +1247,7 @@ impl Context {
         let forloop_values = self.forloop_values();
         self.loops.push(ForLoop {
             forloop_values,
+            scope: None,
             count: 0,
             len,
             dictionary: Gc::new_in(py, GcOnceLock::new()),
@@ -1469,40 +1647,70 @@ impl PyContext {
     /// Django's `Context.template`: the template whose render this is,
     /// which is how a tag reaches `context.template.engine`.
     #[getter]
-    fn template(&self, py: Python<'_>) -> Option<Template> {
+    fn template<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        if let Some(template) = self.rendering_template(py) {
+            return Ok(Some(Bound::new(py, template)?.into_any()));
+        }
         let guard = self
             .context
             .lock_py_attached(py)
             .expect("Mutex should not be poisoned");
-        let template = guard
-            .root_template
+        let bound = guard
+            .bound_template
             .as_ref()
-            .or(guard.current_template.as_ref())
-            .map(|template| Template::clone(template));
+            .map(|template| template.bind(py).clone());
         drop(guard);
-        template
+        Ok(bound)
+    }
+
+    /// Django's `Context.bind_template()`: a context manager that sets
+    /// `template` on a context no template is rendering, such as one from
+    /// `new()`.
+    fn bind_template(&self, template: Py<PyAny>) -> PyContextBinding {
+        PyContextBinding {
+            context: self.clone(),
+            template,
+        }
+    }
+
+    /// The layers, innermost first, as Django's `Context.__iter__` yields.
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.dicts(py)?.call_method0("__reversed__")
     }
 
     /// Django's `Context.template_name`: that template's name, `None` for
     /// one compiled from a string.
     #[getter]
     fn template_name(&self, py: Python<'_>) -> Option<String> {
-        self.template(py)?.template_name
+        self.rendering_template(py)?.template_name
     }
 
-    /// Django's `Context.dicts`, as a copy: the built-in names, then every
-    /// other variable in one layer. Writing to it changes nothing.
+    /// Django's `Context.dicts`: the built-in names, the caller's values,
+    /// then a dict per open scope. Assigning to a key of one writes to that
+    /// scope; the list itself is a copy.
     #[getter]
     fn dicts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let builtins = PyDict::new(py);
-        let values = self.flatten(py)?;
-        for name in ["True", "False", "None"] {
-            if let Some(value) = values.get_item(name)? {
-                builtins.set_item(name, value)?;
-                values.del_item(name)?;
-            }
+        let guard = self
+            .context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned");
+        let layers = guard.layers(py);
+        drop(guard);
+        let dicts = PyList::empty(py);
+        for (layer, values) in layers? {
+            let dict = Bound::new(
+                py,
+                ContextLayer {
+                    context: self.context.clone_ref(py),
+                    layer,
+                },
+            )?;
+            dict.as_any()
+                .cast::<PyDict>()?
+                .update(values.as_mapping())?;
+            dicts.append(dict)?;
         }
-        PyList::new(py, [builtins, values])
+        Ok(dicts)
     }
 
     /// Django's `Context`, or `RequestContext` when there is a request, so
@@ -1768,6 +1976,12 @@ impl PyContext {
         context.format_values = guard.format_values;
         context.render_stack = guard.render_stack;
         context.number_format = Arc::clone(&guard.number_format);
+        // Django's `new()` copies the context, so it stays bound.
+        context.root_template = guard
+            .root_template
+            .as_ref()
+            .or(guard.current_template.as_ref())
+            .map(|template| template.clone_ref(py));
         drop(guard);
         Ok(Self::new(context))
     }
@@ -1796,6 +2010,21 @@ impl PyContext {
 }
 
 impl PyContext {
+    /// The template whose render this is, if one is rendering.
+    fn rendering_template(&self, py: Python<'_>) -> Option<Template> {
+        let guard = self
+            .context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned");
+        let template = guard
+            .root_template
+            .as_ref()
+            .or(guard.current_template.as_ref())
+            .map(|template| Template::clone(template));
+        drop(guard);
+        template
+    }
+
     /// Open a scope on the render's context and remember where it began.
     fn open_scope(&self, py: Python<'_>) -> PyContextScope {
         let mut guard = self
@@ -1836,6 +2065,114 @@ impl PyContextScope {
             .lock_py_attached(py)
             .expect("Mutex should not be poisoned")
             .pop_scope_above(self.depth);
+    }
+}
+
+/// What `bind_template()` returns.
+#[pyclass]
+pub struct PyContextBinding {
+    context: PyContext,
+    template: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyContextBinding {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.context.context.trace(&visit)?;
+        visit.call(&self.template)
+    }
+
+    fn __enter__(&self, py: Python<'_>) -> PyResult<()> {
+        if self.context.template(py)?.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "Context is already bound to a template",
+            ));
+        }
+        self.context
+            .context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned")
+            .bound_template = Some(self.template.clone_ref(py));
+        Ok(())
+    }
+
+    #[pyo3(signature = (*_args))]
+    fn __exit__(&self, py: Python<'_>, _args: &Bound<'_, PyTuple>) {
+        let bound = self
+            .context
+            .context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned")
+            .bound_template
+            .take();
+        // Dropped after the lock: a finalizer may use the context.
+        drop(bound);
+    }
+}
+
+/// One of `context.dicts`: a dict of a layer's values whose item
+/// assignments also write to that layer of the render's context.
+#[pyclass(extends = PyDict)]
+pub struct ContextLayer {
+    context: Gc<Mutex<Context>>,
+    layer: Layer,
+}
+
+#[pymethods]
+impl ContextLayer {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.context.trace(&visit)
+    }
+
+    fn __setitem__(
+        slf: &Bound<'_, Self>,
+        key: Bound<'_, PyAny>,
+        value: Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let py = slf.py();
+        if let Ok(name) = key.extract::<String>() {
+            let layer = slf.borrow();
+            layer
+                .context
+                .lock_py_attached(py)
+                .expect("Mutex should not be poisoned")
+                .set_in_layer(layer.layer, &name, value.clone());
+        }
+        slf.as_any().cast::<PyDict>()?.set_item(key, value)
+    }
+
+    #[pyo3(signature = (other=None, **kwargs))]
+    fn update(
+        slf: &Bound<'_, Self>,
+        other: Option<Bound<'_, PyAny>>,
+        kwargs: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let values = PyDict::new(slf.py());
+        if let Some(other) = other {
+            values.call_method1("update", (other,))?;
+        }
+        if let Some(kwargs) = kwargs {
+            values.update(kwargs.as_mapping())?;
+        }
+        for (key, value) in values {
+            Self::__setitem__(slf, key, value)?;
+        }
+        Ok(())
+    }
+
+    #[pyo3(signature = (key, default=None))]
+    fn setdefault<'py>(
+        slf: &Bound<'py, Self>,
+        key: Bound<'py, PyAny>,
+        default: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let dict = slf.as_any().cast::<PyDict>()?;
+        if let Some(value) = dict.get_item(&key)? {
+            return Ok(value);
+        }
+        let default = default.unwrap_or_else(|| slf.py().None().into_bound(slf.py()));
+        Self::__setitem__(slf, key, default.clone())?;
+        Ok(default)
     }
 }
 

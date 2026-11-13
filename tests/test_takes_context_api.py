@@ -142,6 +142,45 @@ def build_library():
         builtins = sorted(context.dicts[0])
         return f"{builtins}|{merged['name']}|{merged == context.flatten()}"
 
+    def describe_layer(layer):
+        return sorted(
+            (key, "<object>" if key in ("forloop", "block") else value)
+            for key, value in layer.items()
+        )
+
+    @register.simple_tag(takes_context=True)
+    def all_layers(context):
+        return str([describe_layer(layer) for layer in context.dicts])
+
+    @register.simple_tag(takes_context=True)
+    def iterate(context):
+        return str([describe_layer(layer) for layer in context])
+
+    @register.simple_tag(takes_context=True)
+    def set_layer(context, layer, key, value):
+        context.dicts[layer][key] = value
+        return ""
+
+    @register.simple_tag(takes_context=True)
+    def update_layer(context, layer, **values):
+        context.dicts[layer].update(values)
+        return ""
+
+    @register.simple_tag(takes_context=True)
+    def default_layer(context, layer, key, value):
+        return str(context.dicts[layer].setdefault(key, value))
+
+    @register.simple_tag(takes_context=True)
+    def bind(context):
+        results = []
+        for target in (context, context.new({"u": 1})):
+            try:
+                with target.bind_template("other"):
+                    results.append("bound")
+            except RuntimeError as error:
+                results.append(type(error).__name__)
+        return "|".join(results)
+
     return register
 
 
@@ -279,3 +318,63 @@ def test_context_dicts_lists_the_variables():
     actual = rusty.from_string(source).render(Context(values()))
     assert actual == expected
     assert actual.endswith("|inner|True")
+
+
+LAYER_SOURCES = [
+    # One dict of built-ins, one of the caller's values, one per scope.
+    "{% all_layers %}",
+    "{% with a=1 %}{% all_layers %}{% endwith %}",
+    "{% with a=1 %}{% with a=2 b=3 %}{% all_layers %}{% endwith %}{% endwith %}",
+    "{% for i in items %}{% all_layers %}{% endfor %}",
+    "{% for i in items %}{% with name='w' %}{% all_layers %}{% endwith %}{% endfor %}",
+    # A loop that unpacks has a layer for `forloop` and one for its variables.
+    "{% with name='w' %}{% for i, j in pairs %}{% all_layers %}{% endfor %}{% endwith %}",
+    "{% firstof name as z %}{% all_layers %}",
+    "{% with a=1 %}{% firstof name as name %}{% firstof 'q' as a %}{% all_layers %}"
+    "{% endwith %}{% all_layers %}",
+    "{% block b %}{% all_layers %}{% endblock %}",
+    # Iterating yields the layers, innermost first.
+    "{% iterate %}",
+    "{% for i in items %}{% for j in items %}{% iterate %}{% endfor %}{% endfor %}",
+    # Assigning to a layer's key writes to that layer.
+    "{% set_layer 0 'g' 'G' %}{{ g }}{% with g=1 %}{{ g }}{% endwith %}{{ g }}"
+    "{% all_layers %}",
+    "{% set_layer 1 'g' 'G' %}{{ g }}{% all_layers %}",
+    "{% set_layer 0 'name' 'G' %}{{ name }}",
+    "{% set_layer 1 'name' 'G' %}{{ name }}{% with name='w' %}{{ name }}{% endwith %}"
+    "{{ name }}",
+    "{% with a=1 %}{% set_layer 0 'g' 'G' %}{{ g }}{% endwith %}{{ g }}",
+    "{% with a=1 %}{% set_layer 1 'a' 'B' %}{{ a }}{% endwith %}{{ a }}",
+    "{% with name='w' %}{% set_layer 1 'name' 'B' %}{{ name }}{% endwith %}{{ name }}"
+    "{% all_layers %}",
+    "{% with a=1 %}{% set_layer -1 'a' 'T' %}{{ a }}{% set_layer -1 'n' 'N' %}{{ n }}"
+    "{% endwith %}[{{ a }}{{ n }}]",
+    "{% with a=1 %}{% with b=2 %}{% set_layer 2 'b' 'low' %}{{ b }}{% endwith %}{{ b }}"
+    "{% endwith %}[{{ b }}]",
+    "{% with a=1 %}{% with b=2 %}{% set_layer 2 'name' 'low' %}{{ name }}{% endwith %}"
+    "{{ name }}{% endwith %}[{{ name }}]",
+    "{% for i in items %}{% set_layer -1 'i' 'x' %}{{ i }}{% set_layer 1 'seen' i %}"
+    "{% endfor %}{{ seen }}{{ i }}",
+    "{% for i in items %}{% set_layer -1 'forloop' 'F' %}{{ forloop }}{% endfor %}",
+    "{% with a=1 %}{% update_layer -1 a=5 c=6 %}{{ a }}{{ c }}{% update_layer 1 d=7 %}"
+    "{% endwith %}{{ a }}{{ c }}{{ d }}",
+    "{% default_layer 1 'name' 'x' %}{% default_layer 1 'fresh' 'x' %}{{ fresh }}"
+    "{% with a=1 %}{% default_layer -1 'q' 'Q' %}{{ q }}{% endwith %}{{ q }}",
+    # A context a template is rendering is already bound, and so is `new()`.
+    "{% bind %}",
+]
+
+
+@pytest.mark.parametrize("source", LAYER_SOURCES)
+def test_context_layers_match_django(source):
+    source = "{% load api %}" + source
+    options = {"libraries": {"api": MODULE}}
+    context = values() | {"pairs": [(1, 2)]}
+    expected = DjangoEngine(**options).from_string(source).render(Context(context))
+    assert Engine(**options).from_string(source).render(Context(context)) == expected
+
+
+def test_a_value_set_in_the_callers_layer_outlives_the_scope():
+    source = "{% load api %}{% with a=1 %}{% set_layer 1 'total' 9 %}{% endwith %}{{ total }}"
+    template = Engine(libraries={"api": MODULE}).from_string(source)
+    assert template.render(Context(values())) == "9"
