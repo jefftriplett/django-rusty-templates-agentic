@@ -1161,7 +1161,9 @@ impl For {
         })();
         // Leave the loop's scope on errors too: a caller that catches the
         // error may keep rendering with this context, as Django's does.
-        context.pop_variables_to(scopes);
+        // One scope, as Django pops one layer: if a tag in the body left
+        // its own open, that is the one that goes.
+        context.pop_scope_above(scopes);
         context.pop_for_loop();
         result.and_then(|()| join.finish(py))
     }
@@ -1212,7 +1214,7 @@ impl For {
             }
             Ok(())
         })();
-        context.pop_variables_to(scopes);
+        context.pop_scope_above(scopes);
         context.pop_for_loop();
         result.and_then(|()| join.finish(py))
     }
@@ -1675,6 +1677,7 @@ pub(super) fn build_pycontext<'py>(
     if let Some(live) = &context.formatting_context {
         return Ok(live.bind(py).clone());
     }
+    context.enter_callback();
     #[cfg(not(Py_GIL_DISABLED))]
     if let Some(wrapper) = spare_contexts::take() {
         let wrapper = wrapper.into_bound(py);
@@ -1732,6 +1735,7 @@ pub(super) fn retrieve_context<'py>(
                 context,
             );
             spare_contexts::give_back(wrapper.clone().unbind());
+            context.leave_callback();
             return;
         }
     }
@@ -1749,6 +1753,7 @@ pub(super) fn retrieve_context<'py>(
         .take_or_clone(py, |context| context.clone_ref(py));
     // Put the Context back in `context`
     let _ = std::mem::replace(context, inner_context);
+    context.leave_callback();
 }
 
 fn build_arg<'py>(
