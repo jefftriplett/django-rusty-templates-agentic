@@ -689,22 +689,19 @@ impl Render for Tag {
                     Some(live) => super::live::push(live.bind(py)).map(|()| true)?,
                     None => false,
                 };
-                let local_names = values
-                    .iter()
-                    .map(|(name, _)| (*name).clone())
-                    .collect::<Vec<_>>();
-                let mut scoped = context.enter_scope(py);
-                let rendered = values
+                // Django's `with context.push(**values)`: the names, and
+                // anything the body assigns, last until the scope closes.
+                let values = values
                     .into_iter()
-                    .try_for_each(|(name, value)| scoped.insert(name.clone(), value))
+                    .map(|(name, value)| (name.as_str(), value));
+                let rendered = context
+                    .push_bindings(py, values)
                     .map_err(Into::into)
-                    .and_then(|()| nodes.render_into(py, template, &mut scoped, output));
-                // Merge first: it hands back state the scope took from `context`.
-                let merged = context.merge_render_state(py, scoped, &local_names);
+                    .and_then(|()| nodes.render_into(py, template, context, output));
+                context.pop_variables();
                 if pushed && let Some(live) = &context.formatting_context {
                     super::live::pop(live.bind(py))?;
                 }
-                merged?;
                 rendered
             }
             Self::Block { name, nodes } => {
@@ -1552,7 +1549,13 @@ impl Include {
                 new_context.format_values = context.format_values;
                 new_context.render_stack = context.render_stack;
                 new_context.number_format = std::sync::Arc::clone(&context.number_format);
-                render(&mut new_context)
+                // Lend the caches: the isolated context has the same
+                // language and time zone, and an include in a loop would
+                // otherwise fill them again on every call.
+                context.move_caches_to(&mut new_context);
+                let rendered = render(&mut new_context);
+                new_context.move_caches_to(context);
+                rendered
             }
         }
     }
