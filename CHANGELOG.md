@@ -60,6 +60,14 @@ The context a `takes_context` simple tag receives gains `push`, `pop`, `update` 
 
 The test suite runs in about 37 seconds instead of 83, the broken-engine check runs its two modes together, and the weekly mutation workflow builds its baseline again. ([#422](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/422))
 
+A loop variable or assignment named `forloop` replaces the loop object, digits of other scripts are numbers (`{{ ١٢ }}` is 12), and a custom filter given `_("text")` receives a lazy translation, all as in Django. A backend template now raises Django's `TypeError` when given a `Context` instead of a dict. ([#431](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/431))
+
+A `takes_context` simple tag can read `context.template`, `context.template_name` and `context.dicts`, and `isinstance(context, Context)` is true, so tags that call `context.template.engine.get_template(...)` or check the type before `flatten()` work. ([#432](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/432))
+
+`title` on accented text, `striptags` and the HTML truncation filters on text with `&amp;`-style references, and `naturaltime` for dates over a day away no longer call Django's Python code: they are 4 to 37 times faster. Each `{% extends %}` level is about 15% cheaper. ([#433](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/433), [#434](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/434))
+
+Tracing template nodes for Python's garbage collector now names every field, so a new field can't be left untraced by accident; the translation cache on `{% translate %}` and `{% blocktranslate %}` is traced too. ([#435](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/435))
+
 ## 2026.11.3
 
 Compile Django admin's inclusion tags, `get_admin_log` and `get_flatpages` natively, so all of Django's contrib templates, including the admin change form, change list and index, compile natively. ([#318](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/318))
