@@ -450,11 +450,11 @@ fn is_same(
             object.is(PyBool::new(py, *value).as_any())
         }
         (Some(Content::Int(left)), Some(Content::Int(right))) => {
-            left == right && int_object(py, left).is(&int_object(py, right))
+            left == right && int_object(py, left).is(int_object(py, right))
         }
         (Some(Content::Int(number)), Some(Content::Py(object)))
         | (Some(Content::Py(object)), Some(Content::Int(number))) => {
-            object.is(&int_object(py, number))
+            object.is(int_object(py, number))
         }
         _ => false,
     }
