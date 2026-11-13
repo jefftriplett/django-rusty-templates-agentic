@@ -164,24 +164,26 @@ class Unprintable:
 
 
 @pytest.mark.parametrize(
-    "template",
+    ("template", "expected"),
     [
-        "{{ row.missing }}",
-        "{{ row.missing.deeper }}",
-        "{{ row.missing|default:'-' }}",
-        "{% if row.missing %}y{% endif %}",
-        "{% if row.missing == 1 %}y{% endif %}",
-        "{% firstof row.missing 'x' %}",
-        "{% with y=row.missing %}{{ y }}{% endwith %}",
-        "{% for x in row.missing %}{{ x }}{% endfor %}",
+        ("[{{ row.missing }}]", "[]"),
+        ("[{{ row.missing.deeper }}]", "[]"),
+        ("{{ row.missing|default:'-' }}", "-"),
+        ("{% if row.missing %}y{% else %}n{% endif %}", "n"),
+        ("{% if row.missing == 1 %}y{% else %}n{% endif %}", "n"),
+        ("{% firstof row.missing 'x' %}", "x"),
+        ("{% with y=row.missing %}[{{ y }}]{% endwith %}", "[]"),
+        ("{% for x in row.missing %}{{ x }}{% empty %}none{% endfor %}", "none"),
     ],
 )
-def test_a_missing_attribute_doesnt_print_the_object(template_engine, template):
+def test_a_missing_attribute_doesnt_print_the_object(
+    template_engine, template, expected
+):
     calls = []
     template = template_engine.from_string(template)
-    template.render({"row": Counted(calls)})
+    assert template.render({"row": Counted(calls)}) == expected
     assert calls == []
-    template.render({"row": Unprintable()})
+    assert template.render({"row": Unprintable()}) == expected
 
 
 def test_a_reported_missing_attribute_names_the_object():
