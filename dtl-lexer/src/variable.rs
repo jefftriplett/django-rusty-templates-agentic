@@ -4,9 +4,9 @@ use thiserror::Error;
 use unicode_xid::UnicodeXID;
 
 use crate::common::{
-    LexerError, NextChar, check_variable_attrs, check_variable_attrs_modern, lex_numeric,
-    lex_numeric_modern, lex_text, lex_translated, lex_variable_argument, trim_variable,
-    trim_variable_modern,
+    LexerError, NextChar, Number, check_variable_attrs, check_variable_attrs_modern, lex_numeric,
+    lex_numeric_modern, lex_text, lex_translated, lex_variable_argument, python_number,
+    trim_variable, trim_variable_modern,
 };
 use crate::types::{At, TemplateString};
 use crate::{END_TRANSLATE_LEN, QUOTE_LEN, START_TRANSLATE_LEN, TemplateContent};
@@ -109,6 +109,9 @@ pub fn lex_variable_or_filter_with_syntax(
     let start = start + variable.len() - rest.len();
     let content = if modern {
         trim_variable_modern(rest)
+    } else if let Some(unsigned) = rest.strip_prefix('+') {
+        // Before Django 6.0 a plus sign may only start a number.
+        &rest[..=trim_variable(unsigned).len()]
     } else {
         trim_variable(rest)
     };
@@ -135,14 +138,25 @@ pub fn lex_variable_or_filter_with_syntax(
         return Err(LexerError::InvalidRemainder { at: at.into() }.into());
     }
 
-    let token_type;
-    if let Ok(num) = content.parse::<BigInt>() {
-        token_type = VariableToken::Int(num);
-    } else if let Ok(num) = content.parse::<f64>()
-        && (num.is_finite() || (modern && content.bytes().any(|byte| byte.is_ascii_digit())))
-        && (!modern || !content.ends_with('.'))
+    // Before Django 6.0 its pattern for a number is a sign, then a digit:
+    // `-.5`, `-x` and a lone `-` match nothing.
+    if !modern
+        && content.starts_with(['-', '+'])
+        && !content[1..].starts_with(|c: char| c.is_ascii_digit())
     {
-        token_type = VariableToken::Float(num);
+        let at = (start, rest.trim_end().len());
+        return Err(VariableLexerError::InvalidVariableName { at: at.into() });
+    }
+
+    let token_type;
+    if let Some(number) = python_number(content) {
+        token_type = match number {
+            Number::Int(number) => VariableToken::Int(number),
+            Number::Float(number) => VariableToken::Float(number),
+        };
+    } else if content.starts_with(['-', '+']) {
+        let at = (start, rest.trim_end().len());
+        return Err(VariableLexerError::InvalidVariableName { at: at.into() });
     } else {
         if modern {
             check_variable_attrs_modern(content, start)?;
@@ -296,6 +310,14 @@ impl<'t> FilterLexer<'t> {
                         let argument = self.lex_argument()?;
                         Ok(FilterToken { at, argument })
                     }
+                    // Whitespace may come before the next pipe, though not
+                    // before an argument's colon.
+                    space
+                        if space.trim().is_empty()
+                            && !self.rest[space.len()..].starts_with(':') =>
+                    {
+                        Ok(FilterToken { at, argument: None })
+                    }
                     _ => {
                         let at = (self.byte, remainder.trim().len());
                         self.rest = "";
@@ -392,6 +414,16 @@ impl Iterator for FilterLexer<'_> {
             Ok(token) => token,
         };
         let (remainder, start_next) = self.remainder_to_filter_or_argument();
+        // A pipe needs a filter after it.
+        if remainder.trim().is_empty()
+            && start_next > 0
+            && self.rest[..start_next].ends_with('|')
+            && self.rest[start_next..].trim().is_empty()
+        {
+            let at = (self.byte + start_next - 1, 1);
+            self.rest = "";
+            return Some(Err(LexerError::InvalidRemainder { at: at.into() }.into()));
+        }
         Some(self.lex_remainder(token, remainder, start_next))
     }
 }

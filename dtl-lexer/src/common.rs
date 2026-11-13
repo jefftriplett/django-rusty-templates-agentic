@@ -1,4 +1,5 @@
 use miette::{Diagnostic, SourceSpan};
+use num_bigint::BigInt;
 use thiserror::Error;
 use unicode_xid::UnicodeXID;
 
@@ -48,6 +49,60 @@ pub enum LexerError {
         #[label("here")]
         at: SourceSpan,
     },
+}
+
+/// A numeric literal.
+#[derive(Debug, PartialEq)]
+pub enum Number {
+    Int(BigInt),
+    Float(f64),
+}
+
+/// Digits, with single underscores allowed between them, as Python's
+/// `int()` and `float()` accept.
+fn is_digits(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .split('_')
+            .all(|group| !group.is_empty() && group.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// A number as Django's `Variable` reads one.
+///
+/// That is Python's `float()` when the text has a `.` or an `e`, and `int()`
+/// otherwise. So `1_000` is a number, `1_` and `2.` aren't, and `1e309` is
+/// infinity. Python also accepts digits outside ASCII, which this doesn't.
+#[must_use]
+pub fn python_number(text: &str) -> Option<Number> {
+    let unsigned = text.strip_prefix(['-', '+']).unwrap_or(text);
+    if !text.contains(['.', 'e', 'E']) {
+        if !is_digits(unsigned) {
+            return None;
+        }
+        let digits = text.trim_start_matches('+').replace('_', "");
+        return digits.parse().ok().map(Number::Int);
+    }
+    // Django rejects a trailing dot, which `float()` would accept.
+    if text.ends_with('.') {
+        return None;
+    }
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
+        None => (unsigned, None),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if whole.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    let valid = (whole.is_empty() || is_digits(whole))
+        && (fraction.is_empty() || is_digits(fraction))
+        && exponent.is_none_or(|exponent| {
+            is_digits(exponent.strip_prefix(['-', '+']).unwrap_or(exponent))
+        });
+    if !valid {
+        return None;
+    }
+    text.replace('_', "").parse().ok().map(Number::Float)
 }
 
 pub fn lex_variable(byte: usize, rest: &str) -> (At, usize, &str) {
@@ -178,7 +233,7 @@ pub fn lex_translated<'t>(
 /// Django 6 accepts signed exponents and plus signs in numeric expressions.
 pub fn lex_numeric_modern(byte: usize, rest: &str) -> (At, usize, &str) {
     let end = rest
-        .find(|c: char| !(c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E')))
+        .find(|c: char| !(c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E' | '_')))
         .unwrap_or(rest.len());
     ((byte, end), byte + end, &rest[end..])
 }
@@ -205,7 +260,7 @@ pub fn check_variable_attrs_modern(variable: &str, start: usize) -> Result<(), L
 
 pub fn lex_numeric(byte: usize, rest: &str) -> (At, usize, &str) {
     let end = rest
-        .find(|c: char| !(c.is_ascii_digit() || c == '-' || c == '.' || c == 'e'))
+        .find(|c: char| !(c.is_ascii_digit() || matches!(c, '-' | '.' | 'e' | '_')))
         .unwrap_or(rest.len());
     let content = &rest[..end];
     // Match django bug
@@ -240,15 +295,13 @@ pub fn check_variable_attrs(variable: &str, start: usize) -> Result<(), LexerErr
             return Err(LexerError::InvalidVariableName { at: at.into() });
         }
 
-        match var.chars().next() {
-            Some(c) if c != '_' => {
-                offset += var.len() + 1;
-            }
-            _ => {
-                let at = (start + offset, var.len());
-                return Err(LexerError::InvalidVariableName { at: at.into() });
-            }
+        // An empty part, as in `a..b` or `a.`, is a lookup that finds
+        // nothing, as it is in Django.
+        if var.starts_with('_') {
+            let at = (start + offset, var.len());
+            return Err(LexerError::InvalidVariableName { at: at.into() });
         }
+        offset += var.len() + 1;
     }
     Ok(())
 }
