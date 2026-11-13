@@ -1466,6 +1466,65 @@ impl PyContext {
             .use_tz
     }
 
+    /// Django's `Context.template`: the template whose render this is,
+    /// which is how a tag reaches `context.template.engine`.
+    #[getter]
+    fn template(&self, py: Python<'_>) -> Option<Template> {
+        let guard = self
+            .context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned");
+        let template = guard
+            .root_template
+            .as_ref()
+            .or(guard.current_template.as_ref())
+            .map(|template| Template::clone(template));
+        drop(guard);
+        template
+    }
+
+    /// Django's `Context.template_name`: that template's name, `None` for
+    /// one compiled from a string.
+    #[getter]
+    fn template_name(&self, py: Python<'_>) -> Option<String> {
+        self.template(py)?.template_name
+    }
+
+    /// Django's `Context.dicts`, as a copy: the built-in names, then every
+    /// other variable in one layer. Writing to it changes nothing.
+    #[getter]
+    fn dicts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let builtins = PyDict::new(py);
+        let values = self.flatten(py)?;
+        for name in ["True", "False", "None"] {
+            if let Some(value) = values.get_item(name)? {
+                builtins.set_item(name, value)?;
+                values.del_item(name)?;
+            }
+        }
+        PyList::new(py, [builtins, values])
+    }
+
+    /// Django's `Context`, or `RequestContext` when there is a request, so
+    /// `isinstance(context, Context)` holds for code that checks before
+    /// calling `flatten()`. `type(context)` is still this class.
+    #[getter(__class__)]
+    fn class<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let has_request = self
+            .context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned")
+            .request
+            .is_some();
+        let name = if has_request {
+            intern!(py, "RequestContext")
+        } else {
+            intern!(py, "Context")
+        };
+        py.import(intern!(py, "django.template.context"))?
+            .getattr(name)
+    }
+
     #[getter]
     fn request<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
         let guard = self

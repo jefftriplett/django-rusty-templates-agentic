@@ -7,7 +7,8 @@ import sys
 from types import ModuleType
 
 import pytest
-from django.template import Context, Engine as DjangoEngine, Library
+from django.template import Context, Engine as DjangoEngine, Library, RequestContext
+from django.test import RequestFactory
 from django.template.context import ContextPopException
 
 from django_rusty_templates import Engine
@@ -118,6 +119,29 @@ def build_library():
             return "refused"
         return "popped"
 
+    @register.simple_tag(takes_context=True)
+    def describe_template(context):
+        template = context.template
+        inline = template.engine.from_string("[{{ name }}]").render(context)
+        loaded = template.engine.get_template("included.html").render(context)
+        return f"{context.template_name}|{template.name}|{inline}|{loaded}"
+
+    @register.simple_tag(takes_context=True)
+    def context_kind(context):
+        is_context = isinstance(context, Context)
+        is_request = isinstance(context, RequestContext)
+        # The check packages make before rendering a backend template.
+        values = context.flatten() if is_context else context
+        return f"{is_context}|{is_request}|{type(values).__name__}"
+
+    @register.simple_tag(takes_context=True)
+    def layers(context):
+        merged = {}
+        for layer in context.dicts:
+            merged.update(layer)
+        builtins = sorted(context.dicts[0])
+        return f"{builtins}|{merged['name']}|{merged == context.flatten()}"
+
     return register
 
 
@@ -198,3 +222,60 @@ def test_a_tag_cant_pop_scopes_it_didnt_push(source, expected):
     # values. Rusty refuses at the first pop the tag didn't push.
     template = Engine(libraries={"api": MODULE}).from_string("{% load api %}" + source)
     assert template.render(values()) == expected
+
+
+TEMPLATES = {
+    "page.html": "{% load api %}{% describe_template %}{% include 'child.html' %}",
+    "child.html": "{% load api %} child:{% describe_template %}",
+    "included.html": "<{{ name }}>",
+}
+
+
+def template_engines():
+    options = {
+        "libraries": {"api": MODULE},
+        "loaders": [("django.template.loaders.locmem.Loader", TEMPLATES)],
+    }
+    return DjangoEngine(**options), Engine(**options)
+
+
+def test_context_template_is_the_template_being_rendered():
+    django, rusty = template_engines()
+    expected = django.get_template("page.html").render(Context(values()))
+    actual = rusty.get_template("page.html").render(Context(values()))
+    assert actual == expected
+    assert actual == (
+        "page.html|page.html|[caller]|&lt;caller&gt;"
+        " child:page.html|page.html|[caller]|&lt;caller&gt;"
+    )
+
+
+def test_context_template_of_a_string_template_has_no_name():
+    django, rusty = template_engines()
+    source = "{% load api %}{% describe_template %}"
+    expected = django.from_string(source).render(Context(values()))
+    actual = rusty.from_string(source).render(Context(values()))
+    assert actual == expected == "None|None|[caller]|&lt;caller&gt;"
+
+
+@pytest.mark.parametrize("with_request", [False, True])
+def test_context_is_an_instance_of_djangos_context(with_request):
+    def context():
+        if with_request:
+            return RequestContext(RequestFactory().get("/"), values())
+        return Context(values())
+
+    django, rusty = template_engines()
+    source = "{% load api %}{% context_kind %}"
+    expected = django.from_string(source).render(context())
+    actual = rusty.from_string(source).render(context())
+    assert actual == expected == f"True|{with_request}|dict"
+
+
+def test_context_dicts_lists_the_variables():
+    django, rusty = template_engines()
+    source = "{% load api %}{% with name='inner' %}{% layers %}{% endwith %}"
+    expected = django.from_string(source).render(Context(values()))
+    actual = rusty.from_string(source).render(Context(values()))
+    assert actual == expected
+    assert actual.endswith("|inner|True")
