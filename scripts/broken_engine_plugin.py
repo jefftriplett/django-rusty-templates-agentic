@@ -24,7 +24,15 @@ from django_rusty_templates import RustyTemplates
 MODE = os.environ["BROKEN_ENGINE"]
 JUNK = "\x00broken engine\x00"
 RENDER_METHODS = {"render", "_render", "_render_fragment"}
-COMPILE_METHODS = {"from_string", "get_template", "select_template", "_from_string"}
+COMPILE_METHODS = {
+    "from_string",
+    "get_template",
+    "select_template",
+    "_from_string",
+    # What the `RustyTemplates` backend calls.
+    "_backend_from_string",
+    "_backend_get_template",
+}
 # Engine methods that render straight to a string, and native-only inspection.
 ENGINE_RENDER_METHODS = {"render_to_string", "render_json"}
 INSPECT_METHODS = {"explain_template"}
@@ -89,7 +97,10 @@ class EngineProxy:
         return self
 
     def __getattr__(self, name):
-        attr = getattr(self._engine, name)
+        # The backend wraps a proxied template in Django's backend template,
+        # which renders it with a Context, so it needs the engine-level one.
+        real = "get_template" if name == "_backend_get_template" else name
+        attr = getattr(self._engine, real)
         if name in COMPILE_METHODS:
 
             def compile_template(*args, **kwargs):

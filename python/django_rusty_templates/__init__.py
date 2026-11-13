@@ -29,11 +29,11 @@ class RustyTemplates(DjangoTemplates):
         self.engine = Engine(self.dirs, self.app_dirs, **options)
 
     def from_string(self, template_code):
-        return self.engine.from_string(template_code)
+        return self.engine._backend_from_string(template_code)
 
     def get_template(self, template_name):
         try:
-            template = self.engine.get_template(template_name)
+            template = self.engine._backend_get_template(template_name)
             if isinstance(template, Template):
                 return template
             return BackendTemplate(template, self)

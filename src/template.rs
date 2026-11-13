@@ -364,6 +364,7 @@ pub mod django_rusty_templates {
                     has_inheritance: false,
                     has_python_callbacks: false,
                     interop_fragment: false,
+                    api: Api::Engine,
                     owner_handle: OwnerHandle::default(),
                     engine: self.engine.clone(),
                     template_name: Some(renderer.getattr("name")?.extract()?),
@@ -943,6 +944,7 @@ pub mod django_rusty_templates {
                 has_inheritance: false,
                 has_python_callbacks: false,
                 interop_fragment: false,
+                api: Api::Engine,
                 owner_handle: OwnerHandle::default(),
                 engine,
             });
@@ -1255,6 +1257,35 @@ pub mod django_rusty_templates {
                 .map(Bound::into_any)
         }
 
+        /// `get_template` for the `RustyTemplates` backend: a native
+        /// template comes back as a backend template, which renders a dict.
+        fn _backend_get_template<'py>(
+            slf: Bound<'py, Self>,
+            template_name: Bound<'py, PyAny>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let py = slf.py();
+            if slf.getattr("__dict__")?.contains("find_template")?
+                || slf.borrow().engine.django_series >= (6, 0)
+            {
+                // This template may be the loader cache's own object.
+                let template = Self::get_template(slf, Some(template_name))?;
+                return match template.extract::<PyRef<'_, Template>>() {
+                    Ok(native) => native._for_backend().into_pyobject(py).map(Bound::into_any),
+                    Err(_) => Ok(template),
+                };
+            }
+            let mut template = slf.borrow().get_template_native(py, Some(template_name))?;
+            template.api = Api::Backend;
+            template.into_pyobject(py).map(Bound::into_any)
+        }
+
+        /// `from_string` for the `RustyTemplates` backend.
+        fn _backend_from_string(&self, template_code: Bound<'_, PyString>) -> PyResult<Template> {
+            let mut template = self.from_string(template_code)?;
+            template.api = Api::Backend;
+            Ok(template)
+        }
+
         #[pyo3(signature = (template_name))]
         pub fn get_template_native(
             &self,
@@ -1460,6 +1491,7 @@ pub mod django_rusty_templates {
             let has_python_callbacks =
                 parser.compiler_parser.is_some() || !parser.python_nodes.is_empty();
             Ok(Template {
+                api: Api::Engine,
                 template: Arc::from(source),
                 filename,
                 template_name,
@@ -1898,6 +1930,15 @@ pub mod django_rusty_templates {
         }
     }
 
+    /// Which of Django's two template APIs a `Template` serves.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Api {
+        /// `Engine.get_template`: renders a `Context`.
+        Engine,
+        /// The `RustyTemplates` backend: renders a dict.
+        Backend,
+    }
+
     #[derive(Debug, Clone)]
     #[pyclass(skip_from_py_object)]
     pub struct Template {
@@ -1915,6 +1956,9 @@ pub mod django_rusty_templates {
         /// fragment's span for the interop node to map onto the full template,
         /// instead of debug data for the fragment's own source.
         interop_fragment: bool,
+        /// Handed out by the `RustyTemplates` backend, whose templates take
+        /// a dict, as Django's backend templates do.
+        api: Api,
         owner_handle: OwnerHandle,
     }
 
@@ -2078,6 +2122,7 @@ pub mod django_rusty_templates {
                 has_inheritance: Self::nodes_have_inheritance(&nodes),
                 has_python_callbacks,
                 interop_fragment: false,
+                api: Api::Engine,
                 owner_handle: OwnerHandle::default(),
                 nodes: Gc::new(nodes),
                 engine,
@@ -2254,6 +2299,7 @@ pub mod django_rusty_templates {
                 has_python_callbacks: self.has_python_callbacks
                     && Self::nodes_have_callbacks(&nodes),
                 interop_fragment: self.interop_fragment,
+                api: self.api,
                 owner_handle: OwnerHandle::default(),
                 nodes,
                 caches: TemplateCaches {
@@ -2653,6 +2699,30 @@ pub mod django_rusty_templates {
             self.trace(&visit)
         }
 
+        /// This template as the `RustyTemplates` backend hands it out.
+        fn _for_backend(&self) -> Self {
+            Self {
+                api: Api::Backend,
+                ..self.clone()
+            }
+        }
+
+        /// The engine-level template inside a backend template, as on
+        /// Django's backend `Template`. `{% include %}` unwraps one with it,
+        /// and it takes a `Context`.
+        #[getter]
+        fn template(&self) -> PyResult<Self> {
+            if self.api == Api::Engine {
+                return Err(PyAttributeError::new_err(
+                    "'Template' object has no attribute 'template'",
+                ));
+            }
+            Ok(Self {
+                api: Api::Engine,
+                ..self.clone()
+            })
+        }
+
         #[getter]
         fn _is_native(&self) -> bool {
             self.python_renderer.is_none()
@@ -2947,6 +3017,17 @@ pub mod django_rusty_templates {
             context: Option<Bound<'_, PyAny>>,
             request: Option<Bound<'_, PyAny>>,
         ) -> PyResult<String> {
+            if self.api == Api::Backend
+                && let Some(context) = &context
+                && !context.is_none()
+                && !context.is_instance_of::<PyDict>()
+            {
+                // As `django.template.context.make_context` reports it.
+                return Err(PyTypeError::new_err(format!(
+                    "context must be a dict rather than {}.",
+                    context.get_type().name()?
+                )));
+            }
             if let Some(renderer) = &self.python_renderer {
                 renderer
                     .bind(py)

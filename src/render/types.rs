@@ -96,6 +96,9 @@ fn formatting_flag_index(flag: Option<bool>) -> usize {
 
 #[derive(Clone)]
 pub struct ForLoop {
+    /// How many values `forloop` had as a variable when the loop began.
+    /// More than this means something in the body rebound the name.
+    forloop_values: usize,
     count: usize,
     len: usize,
     dictionary: Gc<GcOnceLock<Py<PyDict>>>,
@@ -176,6 +179,15 @@ pub(crate) enum FilterChain {
     Skip,
 }
 
+/// Whether a render ever bound `forloop` as a variable. Until one does,
+/// the name inside a loop can only be the loop object.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ForloopName {
+    #[default]
+    Unbound,
+    Bound,
+}
+
 #[derive(Debug, Default)]
 pub struct Context {
     context: BindingMap,
@@ -234,6 +246,8 @@ pub struct Context {
     /// Names first bound by a scoped write, with how many values that write
     /// found: a copy of the caller's value, or none.
     scope_bases: FxHashMap<String, usize>,
+    /// Whether anything ever bound the name `forloop` as a variable.
+    forloop_name: ForloopName,
     cycle_variables: HashSet<String>,
     // Created on first use: most renders never need them, and a smaller
     // `Context` is cheaper to move into and out of Python callbacks.
@@ -335,6 +349,7 @@ impl Context {
         }
         let context = bindings;
         Self {
+            forloop_name: ForloopName::Unbound,
             request,
             context,
             source: None,
@@ -464,12 +479,14 @@ impl Context {
                 .loops
                 .iter()
                 .map(|loop_| ForLoop {
+                    forloop_values: loop_.forloop_values,
                     count: loop_.count,
                     len: loop_.len,
                     dictionary: loop_.dictionary.clone_ref(py),
                 })
                 .collect(),
             names: self.names.clone(),
+            forloop_name: self.forloop_name,
             include_cache: self.include_cache.clone(),
             cycle_indices: self.cycle_indices.clone(),
             assigned: self.assigned.clone(),
@@ -696,7 +713,7 @@ impl Context {
             return super::live::get(context, methods, &interned_name(py, key));
         }
         if let Some(shadow) = &self.shadow {
-            if key == "forloop" {
+            if key == "forloop" && !self.forloop_rebound() {
                 if self.loops.len() > shadow.loops {
                     return self.loop_dictionary(py, 0).map(Some);
                 }
@@ -710,7 +727,7 @@ impl Context {
             let methods = super::live::Methods::cached(&self.live_methods, live)?;
             return super::live::get(live, methods, &interned_name(py, key));
         }
-        if key == "forloop" && !self.loops.is_empty() {
+        if key == "forloop" && !self.loops.is_empty() && !self.forloop_rebound() {
             return self.loop_dictionary(py, 0).map(Some);
         }
         Ok(self.get(py, key))
@@ -816,6 +833,9 @@ impl Context {
         // mutations only after the first conversion has captured a base.
         if self.django_context_base.get_mut().is_some() {
             self.django_context_changes.insert(key.to_string());
+        }
+        if key == "forloop" {
+            self.forloop_name = ForloopName::Bound;
         }
         let py = value.py();
         let value = value.unbind();
@@ -1047,7 +1067,9 @@ impl Context {
     }
 
     pub fn push_for_loop(&mut self, py: Python<'_>, len: usize) {
+        let forloop_values = self.forloop_values();
         self.loops.push(ForLoop {
+            forloop_values,
             count: 0,
             len,
             dictionary: Gc::new_in(py, GcOnceLock::new()),
@@ -1074,6 +1096,62 @@ impl Context {
         self.loops
             .pop()
             .expect("Called when exiting an active for loop");
+    }
+
+    fn forloop_values(&self) -> usize {
+        if self.forloop_name == ForloopName::Unbound {
+            return 0;
+        }
+        self.context.get("forloop").map_or(0, Vec::len)
+    }
+
+    /// Whether the innermost loop's body bound `forloop` itself, as a loop
+    /// variable or an assignment. The name is then that variable, as in
+    /// Django, where the binding replaces the loop object in the same dict.
+    pub(crate) fn forloop_rebound(&self) -> bool {
+        self.forloop_name == ForloopName::Bound
+            && self
+                .loops
+                .last()
+                .is_some_and(|loop_| self.forloop_values() > loop_.forloop_values)
+    }
+
+    /// The variable `forloop` that the loop at `depth` found bound inside
+    /// the loop around it. Django makes that the loop's `parentloop`.
+    fn variable_parent<'py>(&self, py: Python<'py>, depth: usize) -> Option<Bound<'py, PyAny>> {
+        if self.forloop_name == ForloopName::Unbound {
+            return None;
+        }
+        let values = self.get_for_loop(depth)?.forloop_values;
+        let outer = self.get_for_loop(depth + 1)?.forloop_values;
+        if values <= outer {
+            return None;
+        }
+        let value = self.context.get("forloop")?.get(values - 1)?;
+        Some(value.bind(py).clone())
+    }
+
+    /// The variable `forloop` as the outermost loop found it.
+    pub(crate) fn forloop_before_loops<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
+        let values = self.loops.first()?.forloop_values;
+        match values.checked_sub(1) {
+            Some(index) => Some(self.context.get("forloop")?.get(index)?.bind(py).clone()),
+            None if self.forloop_name == ForloopName::Bound => None,
+            None => self.get(py, "forloop"),
+        }
+    }
+
+    /// Whether any of the `count` innermost loops has a variable for its
+    /// `parentloop`, so the loop can't be read from the native counters.
+    pub(crate) fn forloop_parent_is_variable(&self, count: usize) -> bool {
+        self.forloop_name == ForloopName::Bound
+            && (0..count).any(|depth| {
+                let Some(inner) = self.get_for_loop(depth) else {
+                    return false;
+                };
+                self.get_for_loop(depth + 1)
+                    .is_some_and(|outer| inner.forloop_values > outer.forloop_values)
+            })
     }
 
     pub fn get_for_loop(&self, depth: usize) -> Option<&ForLoop> {
@@ -1121,7 +1199,11 @@ impl Context {
             .get_or_try_init(py, || {
                 let dict = PyDict::new(py);
                 // Django's key order: parentloop, length (6.0+), then counters.
-                dict.set_item("parentloop", self.loop_dictionary(py, depth + 1)?)?;
+                let parent = match self.variable_parent(py, depth) {
+                    Some(parent) => parent,
+                    None => self.loop_dictionary(py, depth + 1)?,
+                };
+                dict.set_item("parentloop", parent)?;
                 if self.django_series(py)? >= (6, 0) {
                     dict.set_item("length", loop_.length())?;
                 }
