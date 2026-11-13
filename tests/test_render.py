@@ -70,12 +70,6 @@ class TestUserFacingTemplateRenderRequiresDict:
     """
 
     def test_render_shortcut_requires_dict(self, template_engine):
-        if template_engine.name == "rusty":
-            pytest.skip(
-                "Rusty engine currently fails with `argument 'context': 'Context' object cannot be cast as 'dict'`"
-                "We should refine the error to match django"
-            )
-
         template = "basic.txt"
         request = RequestFactory().get("/")
         context = Context({"foo": "bar"})
@@ -92,12 +86,6 @@ class TestUserFacingTemplateRenderRequiresDict:
             render(request, template, request_context, using=template_engine.name)
 
     def test_template_render_requires_dict(self, template_engine):
-        if template_engine.name == "rusty":
-            pytest.skip(
-                "Rusty engine currently fails with `argument 'context': 'Context' object cannot be cast as 'dict'`"
-                "We should refine the error to match django"
-            )
-
         template = template_engine.from_string("{{ foo }}")
         context = Context({"foo": "bar"})
         with pytest.raises(
@@ -112,12 +100,6 @@ class TestUserFacingTemplateRenderRequiresDict:
             template.render(request_context)
 
     def test_simple_template_response_requires_dict(self, template_engine):
-        if template_engine.name == "rusty":
-            pytest.skip(
-                "Rusty engine currently fails with `argument 'context': 'Context' object cannot be cast as 'dict'`"
-                "We should refine the error to match django"
-            )
-
         template = template_engine.from_string("{{ foo }}")
         context = Context({"foo": "bar"})
 
@@ -135,12 +117,6 @@ class TestUserFacingTemplateRenderRequiresDict:
             response.render()
 
     def test_template_response_requires_dict(self, template_engine):
-        if template_engine.name == "rusty":
-            pytest.skip(
-                "Rusty engine currently fails with `argument 'context': 'Context' object cannot be cast as 'dict'`"
-                "We should refine the error to match django"
-            )
-
         request = RequestFactory().get("/")
         template = template_engine.from_string("{{ foo }}")
         context = Context({"foo": "bar"})

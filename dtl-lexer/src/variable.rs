@@ -4,9 +4,9 @@ use thiserror::Error;
 use unicode_xid::UnicodeXID;
 
 use crate::common::{
-    LexerError, NextChar, Number, check_variable_attrs, check_variable_attrs_modern, lex_numeric,
-    lex_numeric_modern, lex_text, lex_translated, lex_variable_argument, python_number,
-    trim_variable, trim_variable_modern,
+    LexerError, NextChar, Number, check_variable_attrs, check_variable_attrs_modern, decimal_digit,
+    lex_numeric, lex_numeric_modern, lex_text, lex_translated, lex_variable_argument,
+    python_number, trim_variable, trim_variable_modern,
 };
 use crate::types::{At, TemplateString};
 use crate::{END_TRANSLATE_LEN, QUOTE_LEN, START_TRANSLATE_LEN, TemplateContent};
@@ -142,7 +142,7 @@ pub fn lex_variable_or_filter_with_syntax(
     // `-.5`, `-x` and a lone `-` match nothing.
     if !modern
         && content.starts_with(['-', '+'])
-        && !content[1..].starts_with(|c: char| c.is_ascii_digit())
+        && !content[1..].starts_with(|c: char| decimal_digit(c).is_some())
     {
         let at = (start, rest.trim_end().len());
         return Err(VariableLexerError::InvalidVariableName { at: at.into() });

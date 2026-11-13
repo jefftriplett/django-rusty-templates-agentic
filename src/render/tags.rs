@@ -1432,6 +1432,12 @@ impl Include {
                 if let Some(render) = content.getattr_opt(intern!(py, "render"))?
                     && render.is_callable()
                 {
+                    // A backend template renders a dict; Django includes
+                    // the engine-level template inside it.
+                    let render = match content.getattr_opt(intern!(py, "template"))? {
+                        Some(inner) => inner.getattr(intern!(py, "render"))?,
+                        None => render,
+                    };
                     Ok(IncludeTemplate::Callable(render))
                 } else if content.is_instance_of::<PyString>() {
                     let template_path = content

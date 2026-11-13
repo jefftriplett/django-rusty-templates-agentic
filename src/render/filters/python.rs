@@ -11,12 +11,16 @@ use super::date::format_date;
 use super::{MARK_FILTER_SAFE, ResolveFilter, SAFEDATA};
 use crate::error::PyRenderError;
 use crate::filters::{DjangoFilter, ExternalFilter, PprintFilter};
+use crate::render::common::unescape_literal;
 use crate::render::dateformat::{Formatter, template_localtime};
 use crate::render::types::{AsBorrowedContent, Content, ContentString, Context};
 use crate::render::{Resolve, ResolveFailures, ResolveResult};
+use crate::types::ArgumentType;
 use dtl_lexer::types::TemplateString;
 
 static TIME_FILTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static SAFE_STRING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static GETTEXT_LAZY: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 impl ResolveFilter for ExternalFilter {
     fn resolve<'t, 'py>(
@@ -26,7 +30,25 @@ impl ResolveFilter for ExternalFilter {
         template: TemplateString<'t>,
         context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
-        let argument = resolve_django_argument(self.argument.as_ref(), py, template, context)?;
+        let argument = match self
+            .argument
+            .as_ref()
+            .map(|argument| &argument.argument_type)
+        {
+            // A custom filter can tell a lazy string from a `str`, so it
+            // gets the lazy translation Django's `Variable` resolves to.
+            Some(ArgumentType::TranslatedText(text)) => {
+                let literal = unescape_literal(template.content(text.at)).replace('%', "%%");
+                let safe = SAFE_STRING
+                    .import(py, "django.utils.safestring", "SafeString")?
+                    .call1((literal,))?;
+                let lazy = GETTEXT_LAZY
+                    .import(py, "django.utils.translation", "gettext_lazy")?
+                    .call1((safe,))?;
+                ResolvedArgument::Present(Some(Content::Py(lazy)))
+            }
+            _ => resolve_django_argument(self.argument.as_ref(), py, template, context)?,
+        };
         call_django_filter(self.filter.bind(py), variable, argument, py, context)
     }
 }

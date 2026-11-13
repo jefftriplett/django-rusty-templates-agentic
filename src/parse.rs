@@ -68,10 +68,21 @@ trait Parse<R> {
 impl Parse<Argument> for ArgumentToken {
     fn parse(&self, parser: &Parser) -> Result<Argument, ParseError> {
         Ok(match *self {
-            Self::Variable(at) => Argument {
-                at,
-                argument_type: parser.parse_variable_reference(at).into(),
-            },
+            Self::Variable(at) => {
+                let content = parser.template.content(at);
+                // A number written with another script's digits, such as `١٢`.
+                let number = if content.is_ascii() {
+                    None
+                } else {
+                    python_number(content)
+                };
+                let argument_type = match number {
+                    Some(Number::Int(n)) => ArgumentType::Int(n),
+                    Some(Number::Float(f)) => ArgumentType::Float(f),
+                    None => parser.parse_variable_reference(at).into(),
+                };
+                Argument { at, argument_type }
+            }
             Self::Text(at) => Argument {
                 at,
                 argument_type: ArgumentType::Text(Text::new(self.content_at())),

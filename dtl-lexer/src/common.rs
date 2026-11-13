@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use miette::{Diagnostic, SourceSpan};
 use num_bigint::BigInt;
 use thiserror::Error;
@@ -58,6 +60,49 @@ pub enum Number {
     Float(f64),
 }
 
+/// The zero of each run of ten decimal digits (category Nd) outside ASCII,
+/// from Unicode 17. Python's `int()`, `float()` and `\d` take any of them; a
+/// Python built on an older Unicode knows a few fewer.
+const DIGIT_ZEROS: [u32; 76] = [
+    0x660, 0x6F0, 0x7C0, 0x966, 0x9E6, 0xA66, 0xAE6, 0xB66, 0xBE6, 0xC66, 0xCE6, 0xD66, 0xDE6,
+    0xE50, 0xED0, 0xF20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0, 0x1A80, 0x1A90, 0x1B50,
+    0x1BB0, 0x1C40, 0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0, 0xA9F0, 0xAA50, 0xABF0, 0xFF10,
+    0x104A0, 0x10D30, 0x10D40, 0x11066, 0x110F0, 0x11136, 0x111D0, 0x112F0, 0x11450, 0x114D0,
+    0x11650, 0x116C0, 0x116D0, 0x116DA, 0x11730, 0x118E0, 0x11950, 0x11BF0, 0x11C50, 0x11D50,
+    0x11DA0, 0x11DE0, 0x11F50, 0x16130, 0x16A60, 0x16AC0, 0x16B50, 0x16D70, 0x1CCF0, 0x1D7CE,
+    0x1D7D8, 0x1D7E2, 0x1D7EC, 0x1D7F6, 0x1E140, 0x1E2F0, 0x1E4F0, 0x1E5F1, 0x1E950, 0x1FBF0,
+];
+
+/// The value of a decimal digit in any script, as Python's `int()` reads it.
+#[must_use]
+pub fn decimal_digit(character: char) -> Option<u8> {
+    if character.is_ascii() {
+        return character.is_ascii_digit().then(|| character as u8 - b'0');
+    }
+    let code = u32::from(character);
+    let run = DIGIT_ZEROS
+        .partition_point(|zero| *zero <= code)
+        .checked_sub(1)?;
+    u8::try_from(code - DIGIT_ZEROS[run])
+        .ok()
+        .filter(|digit| *digit < 10)
+}
+
+/// `text` with digits of other scripts written in ASCII.
+fn ascii_digits(text: &str) -> Cow<'_, str> {
+    if text.is_ascii() {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(
+        text.chars()
+            .map(|character| match decimal_digit(character) {
+                Some(digit) => char::from(b'0' + digit),
+                None => character,
+            })
+            .collect(),
+    )
+}
+
 /// Digits, with single underscores allowed between them, as Python's
 /// `int()` and `float()` accept.
 fn is_digits(text: &str) -> bool {
@@ -71,9 +116,10 @@ fn is_digits(text: &str) -> bool {
 ///
 /// That is Python's `float()` when the text has a `.` or an `e`, and `int()`
 /// otherwise. So `1_000` is a number, `1_` and `2.` aren't, and `1e309` is
-/// infinity. Python also accepts digits outside ASCII, which this doesn't.
+/// infinity. Digits of any script count, so `١٢` is 12.
 #[must_use]
 pub fn python_number(text: &str) -> Option<Number> {
+    let text = &*ascii_digits(text);
     let unsigned = text.strip_prefix(['-', '+']).unwrap_or(text);
     if !text.contains(['.', 'e', 'E']) {
         if !is_digits(unsigned) {

@@ -205,6 +205,21 @@ fn in_dir(variable: &Bound<'_, PyAny>, name: &Bound<'_, PyString>) -> PyResult<b
     Ok(false)
 }
 
+/// `int(part)` for a lookup such as `items.0`, as Django indexes with it:
+/// digits of any script, and underscores between them.
+fn python_index(part: &str) -> Option<isize> {
+    if let Ok(index) = part.parse() {
+        return Some(index);
+    }
+    if !part.starts_with(|first| dtl_lexer::common::decimal_digit(first).is_some()) {
+        return None;
+    }
+    match dtl_lexer::common::python_number(part)? {
+        dtl_lexer::common::Number::Int(index) => num_traits::ToPrimitive::to_isize(&index),
+        dtl_lexer::common::Number::Float(_) => None,
+    }
+}
+
 fn lookup_part<'py>(
     variable: Bound<'py, PyAny>,
     part: &str,
@@ -214,7 +229,7 @@ fn lookup_part<'py>(
     // attribute named by digits, so Django ends up indexing it. Go there
     // directly instead of raising and catching two errors and calling dir().
     if (variable.is_exact_instance_of::<PyList>() || variable.is_exact_instance_of::<PyTuple>())
-        && let Ok(index) = part.parse::<isize>()
+        && let Some(index) = python_index(part)
     {
         return match variable.get_item(index) {
             Ok(value) => Ok(Some(value)),
@@ -269,7 +284,7 @@ fn lookup_part<'py>(
             Err(error) => return Err(error),
         }
     }
-    let Ok(index) = part.parse::<isize>() else {
+    let Some(index) = python_index(part) else {
         return Ok(None);
     };
     match variable.get_item(index) {
@@ -426,12 +441,17 @@ impl Resolve for ForVariable {
     fn resolve<'t, 'py>(
         &self,
         py: Python<'py>,
-        _template: TemplateString<'t>,
+        template: TemplateString<'t>,
         context: &mut Context,
-        _failures: ResolveFailures,
+        failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
+        if context.forloop_rebound() {
+            return Variable::new(self.at).resolve(py, template, context, failures);
+        }
+        let whole = self.variant == ForVariableName::Object;
         if context.formatting_context.is_some()
-            || context.shadowed_loop(self.parent_count, self.variant == ForVariableName::Object)
+            || context.forloop_parent_is_variable(self.parent_count + usize::from(whole))
+            || context.shadowed_loop(self.parent_count, whole)
             || context.loop_dictionary_cached(py, self.parent_count)
         {
             let Some(mut value) = context.resolve_root(py, "forloop")? else {
@@ -468,7 +488,11 @@ impl Resolve for ForVariable {
             return Ok(None);
         }
         let Some(for_loop) = context.get_for_loop(self.parent_count) else {
-            return Ok(Some("{}".as_content()));
+            // The outermost loop's parent is whatever `forloop` was before it.
+            return Ok(Some(match context.forloop_before_loops(py) {
+                Some(value) => Content::Py(value),
+                None => "{}".as_content(),
+            }));
         };
         Ok(Some(match self.variant {
             ForVariableName::Length => Content::Int(for_loop.length().into()),
@@ -490,7 +514,7 @@ impl Resolve for ForVariable {
     }
 }
 
-fn unescape_literal(text: &str) -> Cow<'_, str> {
+pub(crate) fn unescape_literal(text: &str) -> Cow<'_, str> {
     if !text.contains('\\') {
         return Cow::Borrowed(text);
     }
@@ -634,6 +658,12 @@ impl Render for TokenTree {
                     value.render_into(context, output)?;
                 }
             }
+            Self::ForVariable(variable) if context.forloop_rebound() => {
+                let variable = Variable::new(variable.at);
+                if let Some(value) = resolve_output_variable(&variable, py, template, context)? {
+                    value.render_into(context, output)?;
+                }
+            }
             Self::ForVariable(variable) => {
                 return variable.render_into(py, template, context, output);
             }
@@ -660,6 +690,13 @@ impl Render for TokenTree {
             Self::Tag(tag) => tag.render(py, template, context),
             Self::Variable(variable) => {
                 match resolve_output_variable(variable, py, template, context)? {
+                    Some(value) => value.render(context).map_err(Into::into),
+                    None => Ok(Cow::Borrowed("")),
+                }
+            }
+            Self::ForVariable(variable) if context.forloop_rebound() => {
+                let variable = Variable::new(variable.at);
+                match resolve_output_variable(&variable, py, template, context)? {
                     Some(value) => value.render(context).map_err(Into::into),
                     None => Ok(Cow::Borrowed("")),
                 }
