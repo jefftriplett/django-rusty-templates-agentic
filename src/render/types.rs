@@ -168,6 +168,14 @@ struct Shadow {
     loops: usize,
 }
 
+/// Whether the filters of the expression being resolved still apply.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum FilterChain {
+    #[default]
+    Run,
+    Skip,
+}
+
 #[derive(Debug, Default)]
 pub struct Context {
     context: BindingMap,
@@ -220,6 +228,9 @@ pub struct Context {
     callback_floors: Vec<usize>,
     /// Django's `RenderContext` for this render, made when a tag asks.
     render_context: Option<Py<PyAny>>,
+    /// `Skip` while a filter chain unwinds from a missing variable that
+    /// `string_if_invalid` replaces; see `Filter::resolve`.
+    pub(crate) filter_chain: FilterChain,
     /// Names first bound by a scoped write, with how many values that write
     /// found: a copy of the caller's value, or none.
     scope_bases: FxHashMap<String, usize>,
@@ -351,6 +362,7 @@ impl Context {
             assigned: HashSet::new(),
             callback_floors: Vec::new(),
             render_context: None,
+            filter_chain: FilterChain::Run,
             scope_bases: FxHashMap::default(),
             cycle_variables: HashSet::new(),
             caches: None,
@@ -459,6 +471,7 @@ impl Context {
             assigned: self.assigned.clone(),
             callback_floors: self.callback_floors.clone(),
             render_context: self.render_context.as_ref().map(|v| v.clone_ref(py)),
+            filter_chain: FilterChain::Run,
             scope_bases: self.scope_bases.clone(),
             cycle_variables: self.cycle_variables.clone(),
             changed_states: self
@@ -2134,27 +2147,29 @@ impl<'t, 'py> Content<'t, 'py> {
             },
             Self::Py(obj) => match obj.extract::<BigInt>() {
                 Ok(n) => resolve_bigint(n, argument_at),
+                // Django calls `int(arg)`: a float or `Decimal` truncates, a
+                // string is parsed, and anything else raises Python's error.
                 Err(_) => {
-                    let argument = obj.to_string();
-                    let argument_at = argument_at.into();
-                    match obj.extract::<f64>() {
-                        Ok(_) => Err(RenderError::InvalidArgumentFloat {
-                            argument,
-                            argument_at,
-                        }
-                        .into()),
-                        Err(_) => Err(RenderError::InvalidArgumentInteger {
-                            argument,
-                            argument_at,
-                        }
-                        .into()),
-                    }
+                    let number = PyType::new::<PyInt>(obj.py()).call1((&obj,))?;
+                    resolve_bigint(number.extract()?, argument_at)
                 }
             },
             Self::Bool(true) => Ok(1),
             Self::Bool(false) => Ok(0),
         }
     }
+    /// A float infinity, native or from the context. Python's `int()`
+    /// raises `OverflowError` for one.
+    pub fn is_infinite(&self) -> bool {
+        match self {
+            Self::Float(number) => number.is_infinite(),
+            Self::Py(object) if object.is_exact_instance_of::<pyo3::types::PyFloat>() => {
+                object.extract::<f64>().is_ok_and(f64::is_infinite)
+            }
+            _ => false,
+        }
+    }
+
     pub fn to_bool(&self) -> PyResult<bool> {
         Ok(match self {
             Self::Bool(b) => *b,

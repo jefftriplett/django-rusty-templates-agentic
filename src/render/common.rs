@@ -94,8 +94,10 @@ fn resolve_callable<'py>(
     if flags.is_set(intern!(py, "do_not_call_in_templates"))? {
         return Ok(Some(variable));
     }
+    // Django's value for a callable it won't call, or can't call without
+    // arguments, is the engine's `string_if_invalid` as written.
     if flags.is_set(intern!(py, "alters_data"))? {
-        return Ok(None);
+        return Ok(Some(context.invalid_value(py, None)?));
     }
     match context.call_variable(py, &variable) {
         Ok(value) => Ok(Some(value)),
@@ -105,11 +107,13 @@ fn resolve_callable<'py>(
                 .call1((&variable,));
             match signature {
                 Err(signature_error) if signature_error.is_instance_of::<PyValueError>(py) => {
-                    Ok(None)
+                    Ok(Some(context.invalid_value(py, None)?))
                 }
                 Err(signature_error) => Err(signature_error),
                 Ok(signature) => match signature.call_method0("bind") {
-                    Err(bind_error) if bind_error.is_instance_of::<PyTypeError>(py) => Ok(None),
+                    Err(bind_error) if bind_error.is_instance_of::<PyTypeError>(py) => {
+                        Ok(Some(context.invalid_value(py, None)?))
+                    }
                     Err(bind_error) => Err(bind_error),
                     Ok(_) => Err(error),
                 },

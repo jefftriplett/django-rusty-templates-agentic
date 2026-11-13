@@ -312,9 +312,6 @@ impl Parser<'_, '_> {
                 }
             }
         }
-        if !args.is_empty() && !kwargs.is_empty() {
-            return Err(ParseError::MixedArgsKwargs { at: at.into() });
-        }
         let url = Url {
             at,
             view_name,

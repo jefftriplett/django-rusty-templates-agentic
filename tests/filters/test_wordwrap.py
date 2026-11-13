@@ -292,14 +292,16 @@ def test_wordwrap_width_from_python_variable(assert_render_error):
         django_message=snapshot(
             "invalid literal for int() with base 10: 'not a number'"
         ),
-        rusty_message=snapshot("""\
-  × Couldn't convert argument (not a number) to integer
+        rusty_message=snapshot(
+            """\
+  × invalid literal for int() with base 10: 'not a number'
    ╭────
  1 │ {{ text|wordwrap:width }}
    ·                  ──┬──
    ·                    ╰── argument
    ╰────
-"""),
+"""
+        ),
     )
 
 

@@ -1,7 +1,6 @@
 from inline_snapshot import snapshot
 import pytest
 from django.template import engines
-from django.template.exceptions import TemplateSyntaxError
 from django.test import RequestFactory
 from django.urls import resolve, NoReverseMatch
 
@@ -127,30 +126,16 @@ def test_render_url_current_app_resolver_match(assert_render):
     assert_render(template=template, context={}, request=request, expected=expected)
 
 
-def test_parse_url_args_and_kwargs(template_engine):
-    template = "{% url 'users:user' 'Alice' username='lily' %}"
+def test_url_args_and_kwargs(template_engine):
+    # `reverse()` refuses the mix when the tag renders, so both engines
+    # compile the template.
+    template = template_engine.from_string(
+        "{% url 'users:user' 'Alice' username='lily' %}"
+    )
+    with pytest.raises(ValueError) as exc_info:
+        template.render({})
 
-    django_message = snapshot("Don't mix *args and **kwargs in call to reverse()!")
-    rusty_message = snapshot("""\
-  × Cannot mix positional and keyword arguments
-   ╭────
- 1 │ {% url 'users:user' 'Alice' username='lily' %}
-   · ───────────────────────┬──────────────────────
-   ·                        ╰── here
-   ╰────
-""")
-
-    if template_engine.name == "rusty":
-        with pytest.raises(TemplateSyntaxError) as exc_info:
-            template_engine.from_string(template)
-
-        assert str(exc_info.value) == rusty_message
-    else:
-        template = template_engine.from_string(template)
-        with pytest.raises(ValueError) as exc_info:
-            template.render({})
-
-        assert str(exc_info.value) == django_message
+    assert str(exc_info.value) == "Don't mix *args and **kwargs in call to reverse()!"
 
 
 def test_render_url_view_name_error():

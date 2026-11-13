@@ -94,6 +94,21 @@ impl Resolve for Url {
         };
         let reverse = REVERSE.import(py, "django_rusty_templates.diagnostics", "render_url")?;
 
+        // Django resolves every argument, then `reverse()` refuses the mix.
+        if !self.args.is_empty() && !self.kwargs.is_empty() {
+            for argument in self
+                .args
+                .iter()
+                .chain(self.kwargs.iter().map(|(_, value)| value))
+            {
+                argument.resolve(py, template, context, failures)?;
+            }
+            return Err(PyValueError::new_err(
+                "Don't mix *args and **kwargs in call to reverse()!",
+            )
+            .into());
+        }
+
         let current_app = current_app(py, context.request.as_ref())?;
         let url = if self.kwargs.is_empty() {
             let py_args = PyList::empty(py);
@@ -965,8 +980,16 @@ impl Render for Tag {
                 for filter in filters {
                     value = filter.resolve(value, py, template, context)?;
                 }
+                // Django returns the filtered value as the node's output, so
+                // one that isn't a string fails when the nodes are joined.
                 match value {
-                    Some(value) => Cow::Owned(value.to_py(py).str()?.extract::<String>()?),
+                    Some(value) => {
+                        let value = value.to_py(py);
+                        if !value.is_instance_of::<PyString>() {
+                            return Err(PyRenderError::InvalidTagResult(value.unbind()));
+                        }
+                        Cow::Owned(value.str()?.extract::<String>()?)
+                    }
                     None => Cow::Borrowed(""),
                 }
             }
@@ -1829,6 +1852,10 @@ fn inclusion_values<'py>(
     if let Ok(values) = result.extract() {
         return Ok(values);
     }
+    // `Context.new(None)` is an empty context.
+    if result.is_none() {
+        return Ok(HashMap::new());
+    }
     INCLUSION_VALUES
         .import(py, "django_rusty_templates.stock", "inclusion_values")?
         .call1((result,))?
@@ -2322,6 +2349,13 @@ impl Render for Lorem {
             context,
             ResolveFailures::IgnoreVariableDoesNotExist,
         )?;
+        // Django catches `ValueError` and `TypeError` from `int(count)`,
+        // but not the `OverflowError` an infinity raises.
+        if count_content.as_ref().is_some_and(Content::is_infinite) {
+            return Err(
+                PyOverflowError::new_err("cannot convert float infinity to integer").into(),
+            );
+        }
         let val = count_content
             .and_then(|c| c.to_bigint())
             .and_then(|n| n.to_i64())

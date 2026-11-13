@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use html_escape::encode_quoted_attribute_to_string;
+use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use pyo3::exceptions::{PyAttributeError, PyTypeError};
 use pyo3::intern;
@@ -15,7 +16,7 @@ use super::number::python_float_str;
 use super::python::ResolvedArgument;
 use super::truncate::is_python_whitespace;
 use super::{
-    ResolveFilter, SAFEDATA, SAFESTRING, Text, integer_argument, string_argument,
+    ResolveFilter, SAFEDATA, SAFESTRING, Text, integer_argument, is_lazy_string, string_argument,
     string_filter_result, string_filter_text,
 };
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
@@ -34,6 +35,19 @@ use crate::render::urlize::{UrlizeRules, handle_word};
 use crate::render::{Resolve, ResolveFailures, ResolveResult};
 use dtl_lexer::types::TemplateString;
 use unicode_normalization::UnicodeNormalization;
+
+/// Point Python's own `int(arg)` error at the argument.
+fn annotate_argument(
+    error: PyRenderError,
+    py: Python<'_>,
+    at: dtl_lexer::types::At,
+    template: TemplateString<'_>,
+) -> PyRenderError {
+    match error {
+        PyRenderError::PyErr(error) => error.annotate(py, at, "argument", template).into(),
+        error => error,
+    }
+}
 
 impl ResolveFilter for AddSlashesFilter {
     fn resolve<'t, 'py>(
@@ -134,7 +148,9 @@ impl ResolveFilter for CenterFilter {
         // value unchanged.
         let size = match integer_argument(&arg) {
             Some(width) => usize::try_from(width).unwrap_or(0),
-            None => arg.resolve_usize(self.argument.at)?,
+            None => arg
+                .resolve_usize(self.argument.at)
+                .map_err(|error| annotate_argument(error, py, self.argument.at, template))?,
         };
 
         if size <= length {
@@ -1456,9 +1472,8 @@ impl ResolveFilter for WordwrapFilter {
         // `textwrap` checks the width when it wraps a line, and empty text
         // has no lines.
         if !text.as_raw().is_empty()
-            && let Some(bigint) = arg.to_bigint()
-            && let Some(n) = bigint.to_isize()
-            && n <= 0
+            && let Some(n) = arg.to_bigint()
+            && n <= BigInt::ZERO
         {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "invalid width {n} (must be > 0)"
@@ -1470,7 +1485,7 @@ impl ResolveFilter for WordwrapFilter {
         let width = match arg.resolve_usize(self.argument.at) {
             Ok(w) => w,
             Err(PyRenderError::RenderError(RenderError::OverflowError { .. })) => usize::MAX,
-            Err(e) => return Err(e),
+            Err(e) => return Err(annotate_argument(e, py, self.argument.at, template)),
         };
 
         let wrapped = wordwrap(text.as_raw(), width);
@@ -1495,6 +1510,10 @@ impl ResolveFilter for YesnoFilter {
                     // Django uses its default for an argument of `None`.
                     Content::Py(value) if value.is_none() => {
                         Cow::Owned(gettext(py, "yes,no,maybe")?)
+                    }
+                    // `arg.split(",")` works on a lazy string too.
+                    Content::Py(value) if is_lazy_string(&value)? => {
+                        Cow::Owned(value.str()?.extract()?)
                     }
                     arg_content => {
                         string_argument(arg_content, context, (py, arg.at, template), |name| {

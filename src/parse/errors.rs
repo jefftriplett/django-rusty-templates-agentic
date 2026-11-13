@@ -119,8 +119,11 @@ pub enum ParseError {
         #[label("here")]
         at: SourceSpan,
     },
-    #[error("Invalid divisibility check: cannot divide by zero")]
-    DivisibleByZero {
+    #[error("{name} requires {required} arguments, {provided} provided")]
+    FilterArguments {
+        name: String,
+        required: usize,
+        provided: usize,
         #[label("here")]
         at: SourceSpan,
     },
