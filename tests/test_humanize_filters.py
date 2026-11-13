@@ -126,6 +126,16 @@ TIMES = {
     "hours_ago": NOW - datetime.timedelta(hours=23, minutes=59),
     "day_ago": NOW - datetime.timedelta(days=1, hours=2),
     "months_ago": NOW - datetime.timedelta(days=70),
+    "week_ago": NOW - datetime.timedelta(days=7, seconds=5),
+    "month_and_week_ago": NOW - datetime.timedelta(days=38),
+    "year_ago": NOW - datetime.timedelta(days=365),
+    "years_ago": NOW - datetime.timedelta(days=900, hours=5),
+    "leap_day_ago": datetime.datetime(2024, 2, 29, 12, tzinfo=datetime.UTC),
+    "day_ahead": NOW + datetime.timedelta(days=1, minutes=1),
+    "weeks_ahead": NOW + datetime.timedelta(days=17),
+    "years_ahead": NOW + datetime.timedelta(days=800),
+    "naive_days_ago": NAIVE_NOW - datetime.timedelta(days=5, hours=3),
+    "naive_months_ahead": NAIVE_NOW + datetime.timedelta(days=95),
     "second_ahead": NOW + datetime.timedelta(seconds=1),
     "minutes_ahead": NOW + datetime.timedelta(minutes=5, seconds=3),
     "hours_ahead": NOW + datetime.timedelta(hours=3),
@@ -264,3 +274,31 @@ def test_patched_datetime_reaches_naturaltime():
     with mock.patch.object(humanize, "datetime", MockDateTime):
         django, rusty = render_both(source)
     assert rusty == django == "5\xa0hours ago"
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("day_ago", "1\xa0day, 2\xa0hours ago"),
+        ("month_and_week_ago", "1\xa0month, 1\xa0week ago"),
+        ("years_ago", "2\xa0years, 5\xa0months ago"),
+        ("weeks_ahead", "2\xa0weeks, 3\xa0days from now"),
+        ("naive_days_ago", "5\xa0days, 3\xa0hours ago"),
+    ],
+)
+def test_naturaltime_spans_of_a_day_or_more(name, expected):
+    source = "{% load humanize %}{{ " + name + "|naturaltime }}"
+    with time_machine.travel(NOW, tick=False), translation.override("en"):
+        django, rusty = render_both(source)
+    assert rusty == django == expected
+
+
+@pytest.mark.parametrize("language", ["ru", "pl", "ar", "fr"])
+def test_naturaltime_spans_use_the_languages_plural_forms(language):
+    source = (
+        "{% load humanize %}{{ day_ago|naturaltime }}|{{ years_ago|naturaltime }}"
+        "|{{ weeks_ahead|naturaltime }}|{{ years_ahead|naturaltime }}"
+    )
+    with time_machine.travel(NOW, tick=False), translation.override(language):
+        django, rusty = render_both(source)
+    assert rusty == django

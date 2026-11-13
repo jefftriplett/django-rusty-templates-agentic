@@ -34,6 +34,7 @@ use crate::render::filters::{
     floatformat, format_localtime, integer_argument, is_exact_safe_string, number_format,
     python_float_repr,
 };
+use crate::render::timesince::{TimeSince, TimeStrings, UnitStrings, timesince};
 use crate::render::types::{Content, ContentString, Context};
 use dtl_lexer::types::TemplateString;
 
@@ -158,6 +159,15 @@ impl NaturalTime {
     }
 }
 
+/// A translated `"%(delta)s ago"` or `"%(delta)s from now"`.
+#[derive(Clone, Debug)]
+enum SpanTemplate {
+    /// The text before and after `%(delta)s`.
+    Around(String, String),
+    /// The string has other `%`s, which Python formats.
+    Python,
+}
+
 /// The `humanize` filters' translated strings for one language.
 #[derive(Clone, Debug, Default)]
 pub struct HumanizeStrings {
@@ -171,9 +181,55 @@ pub struct HumanizeStrings {
     intwords: HashMap<(usize, i64), ValueTemplate>,
     /// `gettext("today")`, `gettext("tomorrow")` and `gettext("yesterday")`.
     natural_days: [Option<String>; 3],
+    /// `naturaltime`'s units for spans of a day or more, past then future.
+    natural_units: Option<Box<[TimeStrings; 2]>>,
+    /// `time_strings["past-day"]` and `["future-day"]`.
+    natural_spans: [Option<SpanTemplate>; 2],
 }
 
 impl HumanizeStrings {
+    /// `naturaltime` for a span of a day or more. `None` when the
+    /// translation needs Python's `%` formatting.
+    fn natural_span(
+        &mut self,
+        py: Python<'_>,
+        module: &Bound<'_, PyModule>,
+        past: bool,
+        partials: Option<[i64; 6]>,
+    ) -> PyResult<Option<String>> {
+        let index = usize::from(!past);
+        let around = match &mut self.natural_spans[index] {
+            Some(around) => around,
+            vacant @ None => {
+                let key = if past { "past-day" } else { "future-day" };
+                let template: String = module
+                    .getattr(intern!(py, "NaturalTimeFormatter"))?
+                    .getattr(intern!(py, "time_strings"))?
+                    .get_item(key)?
+                    .str()?
+                    .extract()?;
+                let around = template
+                    .split_once("%(delta)s")
+                    .filter(|(before, after)| !before.contains('%') && !after.contains('%'))
+                    .map_or(SpanTemplate::Python, |(before, after)| {
+                        SpanTemplate::Around(before.to_owned(), after.to_owned())
+                    });
+                vacant.insert(around)
+            }
+        };
+        let SpanTemplate::Around(before, after) = around else {
+            return Ok(None);
+        };
+        let units = self.natural_units.get_or_insert_with(|| {
+            Box::new([
+                TimeStrings::of(UnitStrings::NaturalPast),
+                TimeStrings::of(UnitStrings::NaturalFuture),
+            ])
+        });
+        let delta = units[index].format(py, partials)?;
+        Ok(Some(format!("{before}{delta}{after}")))
+    }
+
     fn intword(
         &mut self,
         module: &Bound<'_, PyModule>,
@@ -549,8 +605,21 @@ fn naturaltime<'t, 'py>(
     };
     let delta = delta.cast_into::<PyDelta>()?;
     if delta.get_days() != 0 {
-        // Longer spans use `timesince` with custom strings; left to Django.
-        return Ok(None);
+        // `time_strings["past-day"] % {"delta": timesince(value, now,
+        // time_strings=past_substrings)}`, or `timeuntil` for the future.
+        let Some(TimeSince::Partials(partials)) = timesince(value, Some(&now), !past)? else {
+            return Ok(None);
+        };
+        let Some(strings) = context
+            .caches()
+            .humanize_strings
+            .get_or_try_init(py, |_| Ok(HumanizeStrings::default()))?
+        else {
+            return Ok(None);
+        };
+        return strings
+            .natural_span(py, module, past, partials)
+            .map(|formatted| formatted.map(|formatted| text(formatted, false)));
     }
     let seconds = delta.get_seconds();
     let (key, count) = match (past, seconds) {

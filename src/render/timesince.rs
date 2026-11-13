@@ -28,6 +28,8 @@ static DATETIME: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static FIXED_OFFSET: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static ZONE_INFO: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static TIME_STRINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static NATURAL_TIME_FORMATTER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+const HUMANIZE: &str = "django.contrib.humanize.templatetags.humanize";
 static AVOID_WRAPPING: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 /// `TIME_CHUNKS` in microseconds: a week, a day, an hour and a minute.
@@ -80,9 +82,22 @@ impl Unit {
 /// Years, months, weeks, days, hours and minutes, in [`Unit::ALL`] order.
 type Partials = [i64; 6];
 
+/// Which `time_strings` a [`TimeStrings`] formats its units with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnitStrings {
+    /// `django.utils.timesince.TIME_STRINGS`, for `timesince` and `timeuntil`.
+    #[default]
+    TimeSince,
+    /// `NaturalTimeFormatter.past_substrings`, for `naturaltime`.
+    NaturalPast,
+    /// `NaturalTimeFormatter.future_substrings`.
+    NaturalFuture,
+}
+
 /// Formatted units and the list separator of one language.
 #[derive(Clone, Debug, Default)]
 pub struct TimeStrings {
+    source: UnitStrings,
     /// `avoid_wrapping(TIME_STRINGS[unit] % {"num": count})`.
     units: HashMap<(Unit, i64), String>,
     /// `gettext(", ")`.
@@ -90,16 +105,31 @@ pub struct TimeStrings {
 }
 
 impl TimeStrings {
+    pub fn of(source: UnitStrings) -> Self {
+        Self {
+            source,
+            ..Self::default()
+        }
+    }
+
     fn unit(&mut self, py: Python<'_>, unit: Unit, count: i64) -> PyResult<&str> {
         Ok(match self.units.entry((unit, count)) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
                 let num = PyDict::new(py);
                 num.set_item("num", count)?;
-                let text = TIME_STRINGS
-                    .import(py, "django.utils.timesince", "TIME_STRINGS")?
-                    .get_item(unit.key())?
-                    .rem(num)?;
+                let strings = match self.source {
+                    UnitStrings::TimeSince => TIME_STRINGS
+                        .import(py, "django.utils.timesince", "TIME_STRINGS")?
+                        .clone(),
+                    UnitStrings::NaturalPast => NATURAL_TIME_FORMATTER
+                        .import(py, HUMANIZE, "NaturalTimeFormatter")?
+                        .getattr("past_substrings")?,
+                    UnitStrings::NaturalFuture => NATURAL_TIME_FORMATTER
+                        .import(py, HUMANIZE, "NaturalTimeFormatter")?
+                        .getattr("future_substrings")?,
+                };
+                let text = strings.get_item(unit.key())?.rem(num)?;
                 entry.insert(
                     AVOID_WRAPPING
                         .import(py, "django.utils.html", "avoid_wrapping")?

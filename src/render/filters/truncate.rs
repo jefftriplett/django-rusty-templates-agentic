@@ -236,7 +236,8 @@ const VOID_ELEMENTS: [&str; 16] = [
 
 /// A piece of HTML as Python's `HTMLParser` reports it.
 enum HtmlToken<'a> {
-    Data(&'a str),
+    /// Text between tags, with its character references replaced.
+    Data(Cow<'a, str>),
     /// `raw` is `get_starttag_text()`; `name` is lowercased.
     StartTag {
         raw: &'a str,
@@ -339,17 +340,116 @@ fn strict_end_tag(text: &str) -> Option<(usize, String)> {
     (bytes.get(index) == Some(&b'>')).then(|| (index + 1, name.to_ascii_lowercase()))
 }
 
-/// `text` as `HTMLParser` tokenizes it, or `None` for text with entities,
-/// comments, a bare `<` or tags that aren't strictly well formed.
-fn html_tokens(text: &str) -> Option<Vec<HtmlToken<'_>>> {
-    if text.contains('&') {
+/// Named references `unescape_data` replaces. Python's `html.unescape`
+/// knows over two thousand, and matches some without their `;`.
+const NAMED_REFERENCES: [(&str, char); 24] = [
+    ("amp", '&'),
+    ("lt", '<'),
+    ("gt", '>'),
+    ("quot", '"'),
+    ("apos", '\''),
+    ("nbsp", '\u{a0}'),
+    ("copy", '©'),
+    ("reg", '®'),
+    ("trade", '™'),
+    ("hellip", '…'),
+    ("mdash", '—'),
+    ("ndash", '–'),
+    ("lsquo", '‘'),
+    ("rsquo", '’'),
+    ("ldquo", '“'),
+    ("rdquo", '”'),
+    ("laquo", '«'),
+    ("raquo", '»'),
+    ("bull", '•'),
+    ("middot", '·'),
+    ("euro", '€'),
+    ("pound", '£'),
+    ("deg", '°'),
+    ("times", '×'),
+];
+
+/// `html.unescape(data)` for the text between two tags, as `HTMLParser`
+/// hands it to `handle_data`, or `None` to leave the text to Python.
+///
+/// Handled: a complete reference to a name in `NAMED_REFERENCES`, a
+/// complete numeric reference to a printable character, and an `&` that
+/// can't start a reference. `last` says `data` ends the input, where the
+/// parser holds back a trailing `&` in a way that varies by version.
+fn unescape_data(data: &str, last: bool) -> Option<Cow<'_, str>> {
+    let Some(first) = data.find('&') else {
+        return Some(Cow::Borrowed(data));
+    };
+    if last
+        && let Some(position) = data.rfind('&')
+        && !data[position..].contains(|c: char| c == ';' || is_python_whitespace(c))
+    {
         return None;
     }
+    let mut output = String::with_capacity(data.len());
+    output.push_str(&data[..first]);
+    let mut rest = &data[first..];
+    while let Some(after) = rest.strip_prefix('&') {
+        let (replacement, length) = match after.bytes().next() {
+            // `&` before one of these is no reference.
+            None | Some(b'\t' | b'\n' | b'\x0c' | b' ' | b'<' | b'&' | b';') => ('&', 0),
+            Some(b'#') => {
+                let digits = &after[1..];
+                let (radix, digits) = match digits.strip_prefix(['x', 'X']) {
+                    Some(hex) => (16, hex),
+                    None => (10, digits),
+                };
+                let length = digits
+                    .bytes()
+                    .take_while(|byte| char::from(*byte).is_digit(radix))
+                    .count();
+                if length == 0 {
+                    // `&#` and `&#x` without digits stay as they are, but
+                    // `&#x` could be a name to Python: only `&#` is plain.
+                    if radix == 16 {
+                        return None;
+                    }
+                    ('&', 0)
+                } else {
+                    if digits.as_bytes().get(length) != Some(&b';') {
+                        return None;
+                    }
+                    let code = u32::from_str_radix(&digits[..length], radix).ok()?;
+                    // Python remaps or drops control and invalid characters.
+                    if !matches!(code, 0x20..=0x7E | 0xA0..=0xD7FF) {
+                        return None;
+                    }
+                    let consumed = after.len() - digits.len() + length + 1;
+                    (char::from_u32(code)?, consumed)
+                }
+            }
+            Some(_) => {
+                let end = after.find(';')?;
+                let name = &after[..end];
+                let (_, character) = NAMED_REFERENCES
+                    .iter()
+                    .find(|(reference, _)| *reference == name)?;
+                (*character, end + 1)
+            }
+        };
+        output.push(replacement);
+        rest = &after[length..];
+        let next = rest.find('&').unwrap_or(rest.len());
+        output.push_str(&rest[..next]);
+        rest = &rest[next..];
+    }
+    Some(Cow::Owned(output))
+}
+
+/// `text` as `HTMLParser` tokenizes it, or `None` for text with comments, a
+/// bare `<`, tags that aren't strictly well formed or character references
+/// `unescape_data` leaves to Python.
+fn html_tokens(text: &str) -> Option<Vec<HtmlToken<'_>>> {
     let mut tokens = Vec::new();
     let mut rest = text;
     while let Some(start) = rest.find('<') {
         if start > 0 {
-            tokens.push(HtmlToken::Data(&rest[..start]));
+            tokens.push(HtmlToken::Data(unescape_data(&rest[..start], false)?));
         }
         rest = &rest[start..];
         if rest.starts_with("</") {
@@ -367,7 +467,7 @@ fn html_tokens(text: &str) -> Option<Vec<HtmlToken<'_>>> {
         }
     }
     if !rest.is_empty() {
-        tokens.push(HtmlToken::Data(rest));
+        tokens.push(HtmlToken::Data(unescape_data(rest, true)?));
     }
     Some(tokens)
 }
@@ -457,6 +557,7 @@ fn truncate_html(text: &str, mut mode: HtmlTruncation<'_>) -> Option<String> {
             }
             HtmlToken::EndTag(name) => end_tag(&name, &mut output, &mut written, &mut tags),
             HtmlToken::Data(data) => {
+                let data: &str = &data;
                 let completed = match &mut mode {
                     HtmlTruncation::Chars {
                         length,
