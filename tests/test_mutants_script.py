@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import pytest
 
-from scripts.mutants import apply_mutant, shard
+from scripts.mutants import Worktree, apply_mutant, shard
 
 
 def mutant(start, end, replacement):
@@ -54,3 +56,14 @@ def test_resume_ignores_results_from_other_commits(tmp_path):
     )
     assert set(load_done(path, "new")) == {"a"}
     assert load_done(tmp_path / "missing.jsonl", "new") == {}
+
+
+def test_worktree_paths_are_absolute(tmp_path, monkeypatch):
+    # CI passes `--output target/mutants`, and every command runs from
+    # inside the worktree.
+    monkeypatch.chdir(tmp_path)
+    worktree = Worktree(Path("target/mutants/worktree"))
+    assert worktree.path == tmp_path.resolve() / "target/mutants/worktree"
+    for name in ("VIRTUAL_ENV", "PYO3_PYTHON"):
+        assert Path(worktree.env[name]).is_absolute()
+    assert Path(worktree.env["PATH"].split(":")[0]).is_absolute()

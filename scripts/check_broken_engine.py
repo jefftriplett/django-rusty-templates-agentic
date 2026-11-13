@@ -20,6 +20,7 @@ so the list shrinks as tests get fixed.
 """
 
 import argparse
+import concurrent.futures
 import fnmatch
 import json
 import os
@@ -93,7 +94,6 @@ def run_pytest(mode, pytest_args):
             "broken_engine_plugin",
             *pytest_args,
         ]
-        print(f"==> {mode}: {' '.join(command[2:])}", flush=True)
         completed = subprocess.run(
             command,
             cwd=PROJECT_DIR,
@@ -107,7 +107,7 @@ def run_pytest(mode, pytest_args):
             text=True,
         )
         summary = completed.stdout.strip().splitlines()[-1:] or ["(no output)"]
-        print(f"    {summary[0]}", flush=True)
+        print(f"==> {mode}: {' '.join(command[2:])}\n    {summary[0]}", flush=True)
         if not results_path.exists():
             print(completed.stdout[-4000:], completed.stderr[-4000:], sep="\n")
             raise SystemExit(f"{mode}: pytest did not record results")
@@ -132,8 +132,11 @@ def main():
     # Stale patterns only mean something on a full run.
     full_run = not args.pytest_args
     failed = False
-    for mode in modes:
-        found = survivors(mode, run_pytest(mode, args.pytest_args))
+    # The modes are separate pytest processes, so they run side by side.
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        runs = [pool.submit(run_pytest, mode, args.pytest_args) for mode in modes]
+    for mode, run in zip(modes, runs):
+        found = survivors(mode, run.result())
         if args.write_allowlist:
             for nodeid in sorted(found):
                 print(f"{mode} {nodeid}")
