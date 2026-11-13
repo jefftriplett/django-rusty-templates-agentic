@@ -247,6 +247,10 @@ pub struct Context {
 pub(crate) struct LanguageCaches {
     pub(crate) float_number_format: LanguageCache<FloatNumberFormats>,
     pub(crate) truncation_text: LanguageCache<TruncationText>,
+    /// `yesno`'s translated default, "yes,no,maybe".
+    pub(crate) yesno_default: LanguageCache<String>,
+    /// Whether `urlize` can link natively, checked once per render.
+    pub(crate) urlize_rules: crate::render::urlize::NativeLinks,
     pub(crate) time_strings: LanguageCache<TimeStrings>,
     pub(crate) file_size_strings: LanguageCache<FileSizeStrings>,
     pub(crate) humanize_strings: LanguageCache<HumanizeStrings>,
@@ -1746,7 +1750,15 @@ fn resolve_python<'t>(value: Bound<'_, PyAny>, context: &Context) -> PyResult<Co
 
     let value = match value.is_instance_of::<PyString>() {
         true => value,
-        false => value.str()?.into_any(),
+        false => {
+            let text = value.str()?;
+            // `str()` nearly always gives an exact `str`, which has no
+            // `__html__` to look for.
+            if text.is_exact_instance_of::<PyString>() {
+                return Ok(ContentString::HtmlUnsafe(text.extract::<String>()?.into()));
+            }
+            text.into_any()
+        }
     };
     Ok(
         match value
@@ -1939,7 +1951,13 @@ impl<'t, 'py> Content<'t, 'py> {
                 let value = if content.is_instance_of::<PyString>() {
                     content
                 } else {
-                    content.str()?.into_any()
+                    let text = content.str()?.into_any();
+                    // `str()` nearly always gives an exact `str`, which has
+                    // no `__html__` to look for.
+                    if text.is_exact_instance_of::<PyString>() {
+                        return append_python_string(&text, true, output);
+                    }
+                    text
                 };
                 match value
                     .getattr(intern!(py, "__html__"))

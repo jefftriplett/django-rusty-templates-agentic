@@ -25,6 +25,16 @@ const GTLDS: [&str; 7] = ["com", "edu", "gov", "int", "mil", "net", "org"];
 /// `RFC3986_SUBDELIMS + RFC3986_GENDELIMS + "~"`, kept by `smart_urlquote`.
 const URL_SAFE: &[u8] = b"!$&'()*+,;=:/?#[]@~";
 
+/// Whether `urlize` can build links natively, once a render has checked.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum NativeLinks {
+    #[default]
+    Unchecked,
+    Rules(UrlizeRules),
+    /// Django's `urlizer` is customized, or this series isn't ported.
+    Django,
+}
+
 /// The parts of `Urlizer` that changed between Django series.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UrlizeRules {

@@ -82,7 +82,13 @@ impl Render for StockNode {
                     .as_ref()
                     .map(|expression| value(expression, py, template, context))
                     .transpose()?;
-                let output = service.getattr("assigned_value")?.call1((kind, input))?;
+                // The active language is read natively, as the language
+                // caches read it; the rest is Django's to compute.
+                let output = if *kind == "language" {
+                    super::language_cache::get_language(py)?
+                } else {
+                    service.getattr("assigned_value")?.call1((kind, input))?
+                };
                 context.insert(target.clone(), output)?;
                 Cow::Borrowed("")
             }

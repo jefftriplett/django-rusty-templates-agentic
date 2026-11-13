@@ -7,7 +7,9 @@ use num_traits::ToPrimitive;
 use pyo3::exceptions::{PyAttributeError, PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyRange, PySlice, PyString, PyTuple};
+use pyo3::types::{
+    PyDict, PyFloat, PyInt, PyList, PyRange, PySequence, PySlice, PyString, PyTuple,
+};
 
 use super::escape::is_exact_safe_string;
 use super::text::format_spec_text;
@@ -437,11 +439,21 @@ impl ResolveFilter for MakeListFilter {
         // `list(str(value))`: the characters are plain strings, even when the
         // value was safe.
         let (text, _) = string_filter_text(variable, py)?;
-        let mut buffer = [0; 4];
-        let characters = PyList::empty(py);
-        for character in text.chars() {
-            characters.append(character.encode_utf8(&mut buffer) as &str)?;
-        }
+        // For long text Python builds the list faster in one call; for a
+        // short one, making the `str` first costs more than it saves.
+        let characters = if text.len() >= 256 {
+            PyString::new(py, &text)
+                .cast::<PySequence>()
+                .map_err(PyErr::from)?
+                .to_list()?
+        } else {
+            let mut buffer = [0; 4];
+            let characters = PyList::empty(py);
+            for character in text.chars() {
+                characters.append(character.encode_utf8(&mut buffer) as &str)?;
+            }
+            characters
+        };
         Ok(Some(Content::Py(characters.into_any())))
     }
 }
