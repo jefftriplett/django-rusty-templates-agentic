@@ -171,6 +171,8 @@ def inclusion_values(values):
         for layer in values.dicts:
             flat.update(inclusion_values(layer))
         return flat
+    if values is None:
+        return {}
     flatten = getattr(values, "flatten", None)
     if flatten is not None:
         return flatten()

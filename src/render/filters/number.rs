@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
+use num_bigint::BigInt;
 use num_traits::Zero;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -26,6 +27,17 @@ static GET_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
+/// Python's `int(value)`, with its own error for a value it can't convert.
+fn python_int_of(value: &Content<'_, '_>, py: Python<'_>) -> PyResult<BigInt> {
+    match value {
+        Content::Int(number) => Ok(number.clone()),
+        Content::Bool(flag) => Ok(BigInt::from(u8::from(*flag))),
+        value => PyType::new::<PyInt>(py)
+            .call1((value.to_py(py),))?
+            .extract(),
+    }
+}
+
 impl ResolveFilter for AddFilter {
     fn resolve<'t, 'py>(
         &self,
@@ -42,6 +54,15 @@ impl ResolveFilter for AddFilter {
         let Some(variable) = variable else {
             return Ok(None);
         };
+        // `int()` of an infinity raises `OverflowError`, which Django's
+        // `add` doesn't catch.
+        if variable.is_infinite() || (variable.to_bigint().is_some() && right.is_infinite()) {
+            return Err(pyo3::exceptions::PyOverflowError::new_err(
+                "cannot convert float infinity to integer",
+            )
+            .annotate(py, self.argument.at, "here", template)
+            .into());
+        }
         // Django gives up on `int()` after the first failure.
         let integers = variable
             .to_bigint()
@@ -90,30 +111,19 @@ impl ResolveFilter for DivisibleByFilter {
 
         let right = argument.expect("missing argument in context should already have raised");
 
-        let Some(right_val) = right.to_bigint() else {
+        // Django's `int(value) % int(arg) == 0`, in that order, so the
+        // value's error comes before the argument's and before a zero.
+        let left_val = python_int_of(&variable, py)
+            .map_err(|error| error.annotate(py, self.at, "here", template))?;
+        let right_val = python_int_of(&right, py)
+            .map_err(|error| error.annotate(py, self.argument.at, "here", template))?;
+        if right_val.is_zero() {
             return Err(
-                pyo3::exceptions::PyTypeError::new_err("Integer argument expected")
+                pyo3::exceptions::PyZeroDivisionError::new_err("integer modulo by zero")
                     .annotate(py, self.argument.at, "here", template)
                     .into(),
             );
-        };
-
-        if right_val.is_zero() {
-            return Err(pyo3::exceptions::PyZeroDivisionError::new_err(
-                "Invalid divisibility check: cannot divide by zero",
-            )
-            .annotate(py, self.argument.at, "here", template)
-            .into());
         }
-
-        let Some(left_val) = variable.to_bigint() else {
-            let value_str = variable.render(context)?;
-            let msg = format!("invalid literal for int() with base 10: '{value_str}'");
-
-            return Err(pyo3::exceptions::PyValueError::new_err(msg)
-                .annotate(py, self.at, "here", template)
-                .into());
-        };
 
         Ok(Some(Content::Bool((left_val % right_val).is_zero())))
     }

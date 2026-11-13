@@ -8,7 +8,7 @@ use pyo3::types::{PyBool, PyFloat, PyInt, PyString, PyType};
 use crate::error::{AnnotatePyErr, PyRenderError, RenderError};
 use crate::filters::{DefaultFilter, DefaultIfNoneFilter, FilterType, python_int};
 use crate::parse::Filter;
-use crate::render::types::{AsBorrowedContent, Content, ContentString, Context};
+use crate::render::types::{AsBorrowedContent, Content, ContentString, Context, FilterChain};
 use crate::render::{Resolve, ResolveFailures, ResolveResult};
 use dtl_lexer::types::TemplateString;
 
@@ -30,6 +30,17 @@ pub use number::{FileSizeStrings, FloatNumberFormats, NumberOptions};
 pub use truncate::TruncationText;
 
 static MARK_FILTER_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static PROMISE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+/// A lazy string from the context, such as `gettext_lazy("yes,no")`.
+fn is_lazy_string(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = value.py();
+    value.is_instance(
+        PROMISE
+            .import(py, "django.utils.functional", "Promise")?
+            .as_any(),
+    )
+}
 pub(crate) static SAFEDATA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static CONDITIONAL_ESCAPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SAFESTRING: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -42,12 +53,18 @@ impl Resolve for Filter {
         context: &mut Context,
         failures: ResolveFailures,
     ) -> ResolveResult<'t, 'py> {
+        context.filter_chain = FilterChain::Run;
         let resolved = match &self.left {
             crate::parse::TagElement::Variable(variable) => {
                 variable.resolve(py, template, context, failures)
             }
             left => left.resolve(py, template, context, failures),
         };
+        // The chain's variable was missing and `string_if_invalid` is set:
+        // Django returns that text without running any filter.
+        if context.filter_chain == FilterChain::Skip {
+            return resolved;
+        }
         let mut left = match resolved {
             Err(PyRenderError::RenderError(RenderError::VariableDoesNotExist { .. }))
                 if matches!(self.left, crate::parse::TagElement::Variable(_)) =>
@@ -61,6 +78,9 @@ impl Resolve for Filter {
             && !context.string_if_invalid.is_empty()
             && let crate::parse::TagElement::Variable(variable) = &self.left
         {
+            // Django returns `string_if_invalid` at once, so no filter in
+            // the chain runs.
+            context.filter_chain = FilterChain::Skip;
             return Ok(Some(Content::Py(
                 context.invalid_value(py, Some(template.content(variable.at)))?,
             )));
