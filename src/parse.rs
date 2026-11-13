@@ -28,12 +28,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use either::Either;
-use num_bigint::BigInt;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 
-use dtl_lexer::common::{get_all_at, text_content_at, translated_text_content_at};
+use dtl_lexer::common::{
+    Number, get_all_at, python_number, text_content_at, translated_text_content_at,
+};
 use dtl_lexer::core::{Lexer, TokenType};
 use dtl_lexer::tag::common::{TagElementToken, TagElementTokenType};
 use dtl_lexer::tag::include::{IncludeTemplateToken, IncludeTemplateTokenType};
@@ -81,12 +82,15 @@ impl Parse<Argument> for ArgumentToken {
             },
             Self::Numeric(at) => {
                 let content = parser.template.content(at);
-                let argument_type = match content.parse::<BigInt>() {
-                    Ok(n) => ArgumentType::Int(n),
-                    Err(_) => match content.parse::<f64>() {
-                        Ok(f) => ArgumentType::Float(f),
-                        Err(_) => return Err(ParseError::InvalidNumber { at: at.into() }),
-                    },
+                let argument_type = match python_number(content) {
+                    Some(Number::Int(n)) => ArgumentType::Int(n),
+                    Some(Number::Float(f)) => ArgumentType::Float(f),
+                    // Not a number after all, so Django looks it up as a
+                    // variable, as with `2.` or `1__0`.
+                    None if content.starts_with(['-', '+']) => {
+                        return Err(ParseError::InvalidNumber { at: at.into() });
+                    }
+                    None => parser.parse_variable_reference(at).into(),
                 };
                 Argument { at, argument_type }
             }
@@ -95,12 +99,10 @@ impl Parse<Argument> for ArgumentToken {
 }
 
 fn parse_numeric(content: &str, at: At) -> Result<TagElement, ParseError> {
-    match content.parse::<BigInt>() {
-        Ok(n) => Ok(TagElement::Int(n)),
-        Err(_) => match content.parse::<f64>() {
-            Ok(f) => Ok(TagElement::Float(f)),
-            Err(_) => Err(ParseError::InvalidNumber { at: at.into() }),
-        },
+    match python_number(content) {
+        Some(Number::Int(n)) => Ok(TagElement::Int(n)),
+        Some(Number::Float(f)) => Ok(TagElement::Float(f)),
+        None => Err(ParseError::InvalidNumber { at: at.into() }),
     }
 }
 
@@ -692,6 +694,20 @@ impl<'t, 'py> Parser<'t, 'py> {
         tokens
     }
 
+    /// `{% else %}`, `{% endif %}` and `{% empty %}` take no arguments:
+    /// Django compares the whole tag with the name.
+    fn reject_arguments(&self, parts: &TagParts) -> Result<(), PyParseError> {
+        if self.template.content(parts.at).trim().is_empty() {
+            return Ok(());
+        }
+        Err(
+            crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
+                "Malformed template tag",
+            )
+            .into(),
+        )
+    }
+
     #[expect(clippy::too_many_lines, reason = "one match arm per builtin tag")]
     fn parse_tag(
         &mut self,
@@ -795,31 +811,30 @@ impl<'t, 'py> Parser<'t, 'py> {
                 parts: Some(tag.parts),
             }),
             "else" => {
-                if !self.template.content(tag.parts.at).trim().is_empty() {
-                    return Err(
-                        crate::template::django_rusty_templates::TemplateSyntaxError::new_err(
-                            "Malformed template tag",
-                        )
-                        .into(),
-                    );
-                }
+                self.reject_arguments(&tag.parts)?;
                 Either::Right(EndTag {
                     end: EndTagType::Else,
                     at,
                     parts: None,
                 })
             }
-            "endif" => Either::Right(EndTag {
-                end: EndTagType::EndIf,
-                at,
-                parts: None,
-            }),
+            "endif" => {
+                self.reject_arguments(&tag.parts)?;
+                Either::Right(EndTag {
+                    end: EndTagType::EndIf,
+                    at,
+                    parts: None,
+                })
+            }
             "for" => Either::Left(self.parse_for(at, tag.parts)?),
-            "empty" => Either::Right(EndTag {
-                end: EndTagType::Empty,
-                at,
-                parts: None,
-            }),
+            "empty" => {
+                self.reject_arguments(&tag.parts)?;
+                Either::Right(EndTag {
+                    end: EndTagType::Empty,
+                    at,
+                    parts: None,
+                })
+            }
             "endfor" => Either::Right(EndTag {
                 end: EndTagType::EndFor,
                 at,
@@ -950,6 +965,7 @@ mod tests {
     use super::*;
     use crate::filters::FilterType;
     use dtl_lexer::tag::TagLexerError;
+    use num_bigint::BigInt;
     use pyo3::types::{PyDict, PyDictMethods};
 
     /// Text and variable nodes are most of a template, so the node type
@@ -1356,10 +1372,11 @@ mod tests {
         Python::initialize();
 
         Python::attach(|py| {
-            let template = "{{ foo|bar:9.9.9 }}";
+            // `9.9.9` would be a variable lookup, as it is in Django.
+            let template = "{{ foo|bar:-. }}";
             let mut parser = Parser::new(py, template.into(), Engine::empty().into(), None);
             let error = parser.parse().unwrap_err().unwrap_parse_error();
-            assert_eq!(error, ParseError::InvalidNumber { at: (11, 5).into() });
+            assert_eq!(error, ParseError::InvalidNumber { at: (11, 2).into() });
         });
     }
 

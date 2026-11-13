@@ -137,6 +137,10 @@ impl<'t> TagElementKwargLexer<'t> {
 
     fn lex_kwarg(&mut self) -> Option<At> {
         let index = self.rest.find('=')?;
+        // A keyword needs a name: `=1` isn't one.
+        if index == 0 {
+            return None;
+        }
         match self.rest.find(|c: char| !c.is_xid_continue()) {
             Some(n) if n < index => return None,
             _ => {}

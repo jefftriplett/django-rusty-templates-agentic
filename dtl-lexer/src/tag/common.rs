@@ -1,6 +1,6 @@
 use crate::common::{
-    LexerError, NextChar, lex_numeric, lex_numeric_modern, lex_text, lex_translated, lex_variable,
-    text_content_at, translated_text_content_at,
+    LexerError, NextChar, lex_literal_filters, lex_numeric, lex_numeric_modern, lex_text,
+    lex_translated, lex_variable, text_content_at, translated_text_content_at,
 };
 use crate::tag::TagParts;
 use crate::types::{At, TemplateString};
@@ -156,6 +156,20 @@ impl Iterator for TagElementLexer<'_> {
             '0'..='9' | '-' => Ok(self.lex_numeric()),
             _ => Ok(self.lex_variable_or_filter()),
         };
+        // A literal can take filters, as in `'a'|upper`.
+        let token = token.map(|mut token| {
+            if matches!(
+                token.token_type,
+                TagElementTokenType::Text | TagElementTokenType::Numeric
+            ) && let Some((at, byte, rest)) = lex_literal_filters(token.at, self.byte, self.rest)
+            {
+                token.at = at;
+                token.token_type = TagElementTokenType::Variable;
+                self.byte = byte;
+                self.rest = rest;
+            }
+            token
+        });
         Some(self.lex_remainder(token))
     }
 }

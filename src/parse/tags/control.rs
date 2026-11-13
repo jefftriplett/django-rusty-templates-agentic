@@ -33,6 +33,7 @@ use dtl_lexer::tag::autoescape::lex_autoescape_argument;
 use dtl_lexer::tag::common::TagElementLexer;
 use dtl_lexer::tag::common::TagElementTokenType;
 use dtl_lexer::tag::forloop::ForLexer;
+use dtl_lexer::tag::forloop::ForLexerError;
 use dtl_lexer::tag::forloop::ForLexerInError;
 use dtl_lexer::tag::forloop::ForTokenType;
 use dtl_lexer::tag::kwarg::TagElementKwargLexer;
@@ -81,6 +82,12 @@ fn parse_for_loop(
 
     let expression_token = lexer.lex_expression()?;
     let reversed = lexer.lex_reversed()?;
+    // Django reads a final `reversed` as the keyword, which leaves
+    // `for x in reversed` without anything to loop over.
+    if !reversed && expression_token.content(parser.template) == "reversed" {
+        let at = expression_token.at.into();
+        return Err(ForLexerError::MissingExpression { at }.into());
+    }
     let variable_names = variable_names
         .iter()
         .map(|token| token.content(parser.template).to_string())
@@ -188,7 +195,10 @@ impl Parser<'_, '_> {
         } else {
             let mut remaining = tokens.as_slice();
             while let [value, as_token, name, rest @ ..] = remaining {
-                if self.template.content(as_token.at) != "as" || name.kwarg.is_some() {
+                if self.template.content(as_token.at) != "as"
+                    || name.kwarg.is_some()
+                    || value.kwarg.is_some()
+                {
                     break;
                 }
                 assignments.push((
