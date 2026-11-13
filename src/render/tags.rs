@@ -416,8 +416,25 @@ impl IfCondition {
     }
 }
 
-/// Python's `left is right`. A missing variable is `None`, and values Rusty
-/// computed are only the same object as `True`, `False` or another of them.
+/// A native int as the object Python would hold. Python keeps one object
+/// for each small int, so `x is 5` can be true; an int outside that range is
+/// a new object.
+fn int_object<'py>(py: Python<'py>, number: &BigInt) -> Bound<'py, PyAny> {
+    match i64::try_from(number) {
+        Ok(number) => number
+            .into_pyobject(py)
+            .expect("An i64 can always be converted to a Python int.")
+            .into_any(),
+        Err(_) => number
+            .into_pyobject(py)
+            .expect("A BigInt can always be converted to a Python int.")
+            .into_any(),
+    }
+}
+
+/// Python's `left is right`. A missing variable is `None`. Values Rusty
+/// computed are the same object as `True` or `False`, or as an int Python
+/// shares; its strings and floats are new objects, as Django's are.
 fn is_same(
     py: Python<'_>,
     left: Option<&Content<'_, '_>>,
@@ -431,6 +448,13 @@ fn is_same(
         (Some(Content::Bool(value)), Some(Content::Py(object)))
         | (Some(Content::Py(object)), Some(Content::Bool(value))) => {
             object.is(PyBool::new(py, *value).as_any())
+        }
+        (Some(Content::Int(left)), Some(Content::Int(right))) => {
+            left == right && int_object(py, left).is(int_object(py, right))
+        }
+        (Some(Content::Int(number)), Some(Content::Py(object)))
+        | (Some(Content::Py(object)), Some(Content::Int(number))) => {
+            object.is(int_object(py, number))
         }
         _ => false,
     }
@@ -2341,7 +2365,7 @@ impl Render for FirstOf {
                 template,
                 context,
                 ResolveFailures::IgnoreVariableDoesNotExist,
-            )? && content.to_bool().unwrap_or(false)
+            )? && content.to_bool()?
             {
                 if let Some(asvar) = &self.asvar {
                     // Django stores `render_value_in_context(value)`. With

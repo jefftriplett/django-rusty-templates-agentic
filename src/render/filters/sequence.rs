@@ -223,14 +223,25 @@ impl ResolveFilter for LengthFilter {
     fn resolve<'t, 'py>(
         &self,
         variable: Option<Content<'t, 'py>>,
-        _py: Python<'py>,
+        py: Python<'py>,
         _template: TemplateString<'t>,
         _context: &mut Context,
     ) -> ResolveResult<'t, 'py> {
         let len = match variable {
             None => 0,
             Some(Content::String(s)) => s.as_raw().chars().count(),
-            Some(Content::Py(obj)) => obj.len().unwrap_or(0),
+            // Django catches only these two; any other error from
+            // `__len__` escapes.
+            Some(Content::Py(obj)) => match obj.len() {
+                Ok(len) => len,
+                Err(error)
+                    if error.is_instance_of::<PyTypeError>(py)
+                        || error.is_instance_of::<PyValueError>(py) =>
+                {
+                    0
+                }
+                Err(error) => return Err(error.into()),
+            },
             Some(Content::Int(_) | Content::Float(_) | Content::Bool(_)) => 0,
         };
 
