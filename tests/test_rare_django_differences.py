@@ -1,12 +1,14 @@
-"""Rare differences from Django (#424): a variable named `forloop` inside a
-loop, digits of other scripts, and a translated literal given to a custom
-filter. Each template renders the same through Django."""
+"""Rare differences from Django (#424, #438): a variable named `forloop`
+inside a loop, digits of other scripts, a translated literal given to a
+custom filter, and which characters a name can hold. Each template renders
+the same through Django, or raises the same type of exception."""
 
 import sys
 from types import ModuleType
 
 import pytest
 from django.template import Context, Engine as DjangoEngine, Library
+from django.template import TemplateSyntaxError
 from django.utils.functional import Promise
 
 from django_rusty_templates import Engine
@@ -129,3 +131,72 @@ def test_arabic_digits_are_a_number():
 def test_custom_filter_gets_a_lazy_translation():
     _, actual = render_both('{{ one|describe:_("text") }}')
     assert actual == "1:text:lazy"
+
+
+# Django's patterns use `\w`: letters, numbers of any kind and `_`.
+WORD_CHARACTERS = ["²", "½", "Ⅷ", "٣", "é", "ß", "中", "ʰ", "ª"]
+# Not `\w`: combining marks (a decomposed accent), other connectors,
+# enclosed letters, symbols and spaces.
+OTHER_CHARACTERS = ["\u0301", "\u093e", "‿", "＿", "Ⓐ", "🄰", "€", "·", "\u00a0"]
+
+NAME_SHAPES = [
+    "{{ a%sb }}",
+    "{{ %s }}",
+    "{{ items.%s }}",
+    "{{ empty|default:a%s }}",
+    "{% if a%s %}yes{% else %}no{% endif %}",
+    "{% with a%s=1 %}{{ a%s }}{% endwith %}",
+    "{% for a%s in items %}{{ a%s }}{% endfor %}",
+    "{% firstof a%s 'fallback' %}",
+    "{% with q=a%sb|default:'k' %}{{ q }}{% endwith %}",
+    "{{ one|lower%s }}",
+]
+
+
+def outcome(render):
+    try:
+        return render()
+    except Exception as error:  # noqa: BLE001
+        # Rusty writes its own messages, so compare the type only.
+        return type(error)
+
+
+def outcome_of_both(source):
+    def render(engine_class):
+        return engine_class().from_string(source).render(Context(dict(CONTEXT)))
+
+    return outcome(lambda: render(DjangoEngine)), outcome(lambda: render(Engine))
+
+
+@pytest.mark.parametrize("shape", NAME_SHAPES)
+@pytest.mark.parametrize("character", WORD_CHARACTERS + OTHER_CHARACTERS)
+def test_name_characters_match_django(character, shape):
+    expected, actual = outcome_of_both(shape.replace("%s", character))
+    assert actual == expected
+
+
+@pytest.mark.parametrize("character", WORD_CHARACTERS)
+def test_word_characters_are_allowed_in_a_name(character):
+    source = "{% with a%s=1 %}{{ a%s }}{% endwith %}".replace("%s", character)
+    assert Engine().from_string(source).render(Context({})) == "1"
+
+
+@pytest.mark.parametrize("character", OTHER_CHARACTERS)
+def test_other_characters_end_a_name(character):
+    with pytest.raises(TemplateSyntaxError):
+        Engine().from_string("{{ a" + character + "b }}")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # Django raises `StopIteration` for a filtered translated literal.
+        "{% cycle _('a')|upper 'b' %}",
+        "{% for i in items %}{% cycle _('a')|upper 'b' %}{% endfor %}",
+        "{% for i in items %}{% cycle _('a') 'b' %}{% endfor %}",
+        "{% for i in items %}{% cycle one|add:1 'b' %}{% endfor %}",
+    ],
+)
+def test_cycle_with_translated_values_matches_django(source):
+    expected, actual = outcome_of_both(source)
+    assert actual == expected

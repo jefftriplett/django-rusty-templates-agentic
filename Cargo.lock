@@ -321,6 +321,7 @@ dependencies = [
  "miette",
  "num-bigint",
  "thiserror",
+ "unicode-normalization",
  "unicode-xid",
 ]
 
