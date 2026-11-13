@@ -264,6 +264,30 @@ def compile_card(parser, token):
 compile_card.rusty_isolated_compiler = True
 ```
 
+A project can opt in tags from packages it doesn't control with the
+`isolated_tags` engine option. It maps a library's load name (or a `builtins`
+module path) to the tags to opt in, for that engine only:
+
+```python
+TEMPLATES = [
+    {
+        "BACKEND": "django_rusty_templates.RustyTemplates",
+        "OPTIONS": {
+            "isolated_tags": {
+                "crispy_forms_tags": ["crispy"],
+                "crispy_forms_field": ["crispy_field"],
+                "crispy_forms_utils": ["specialspaceless"],
+                "widget_tweaks": ["render_field"],
+            },
+        },
+    },
+]
+```
+
+The engine raises `ImproperlyConfigured` for a library or tag that doesn't
+exist, so a typo or a renamed tag doesn't quietly fall back to Django's parser.
+It also refuses tags whose compiler sets `rusty_requires_full_parser`.
+
 Opt in only when the compiler uses the parser within its consumed span. The
 adapter supports nested `parse()`, `compile_filter()`, `next_token()`,
 `prepend_token()`, `delete_first_token()`, loaded tags and filters, custom parser

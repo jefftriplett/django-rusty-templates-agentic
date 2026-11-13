@@ -345,15 +345,24 @@ impl<'py> Parser<'_, 'py> {
                     let full_parser = candidate
                         .getattr("rusty_requires_full_parser")
                         .is_ok_and(|value| value.is_truthy().unwrap_or(true));
-                    !generated
-                        && (full_parser
-                            || !candidate
-                                .getattr("rusty_isolated_compiler")
-                                .is_ok_and(|value| value.is_truthy().unwrap_or(false)))
+                    !generated && (full_parser || !self.opted_in(candidate))
                 })
             });
         self.mixed_compilers = Some(mixed);
         mixed
+    }
+
+    /// Whether a compiler opted into isolated compilation, with its own
+    /// `rusty_isolated_compiler` attribute or the engine's `isolated_tags`.
+    fn opted_in(&self, compiler: &Bound<'py, PyAny>) -> bool {
+        compiler
+            .getattr("rusty_isolated_compiler")
+            .is_ok_and(|value| value.is_truthy().unwrap_or(false))
+            || self
+                .engine
+                .isolated_compilers
+                .iter()
+                .any(|opted_in| opted_in.is(compiler))
     }
 
     fn register_opaque(
@@ -362,9 +371,7 @@ impl<'py> Parser<'_, 'py> {
         compiler: &Bound<'py, PyAny>,
     ) -> Result<(), PyParseError> {
         if self.inspect_only
-            || !compiler
-                .getattr("rusty_isolated_compiler")
-                .is_ok_and(|value| value.is_truthy().unwrap_or(false))
+            || !self.opted_in(compiler)
             || compiler
                 .getattr("rusty_requires_full_parser")
                 .is_ok_and(|value| value.is_truthy().unwrap_or(true))

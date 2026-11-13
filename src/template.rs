@@ -573,6 +573,62 @@ pub mod django_rusty_templates {
         Ok(libs)
     }
 
+    /// The compilers named by the `isolated_tags` engine option, a mapping
+    /// from a library's load name (or a `builtins` module path) to the names
+    /// of its tags. Every name must exist, so a typo or a renamed tag can't
+    /// silently fall back to Django's parser.
+    fn isolated_compilers<'a>(
+        isolated_tags: &Bound<'_, PyAny>,
+        libraries: &HashMap<String, Py<PyAny>>,
+        builtins: impl Iterator<Item = (&'a String, &'a Py<PyAny>)> + Clone,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let py = isolated_tags.py();
+        let mut compilers = Vec::new();
+        for item in isolated_tags
+            .call_method0(intern!(py, "items"))?
+            .try_iter()?
+        {
+            let (library_name, tag_names): (String, Bound<'_, PyAny>) = item?.extract()?;
+            let library = libraries.get(&library_name).or_else(|| {
+                builtins
+                    .clone()
+                    .find_map(|(path, library)| (*path == library_name).then_some(library))
+            });
+            let Some(library) = library else {
+                return Err(ImproperlyConfigured::new_err(format!(
+                    "isolated_tags names the template library '{library_name}', which isn't \
+                     one of this engine's libraries or builtins."
+                )));
+            };
+            if tag_names.is_instance_of::<PyString>() {
+                return Err(ImproperlyConfigured::new_err(format!(
+                    "isolated_tags['{library_name}'] must be a list of tag names, not a string."
+                )));
+            }
+            let tags = library.bind(py).getattr(intern!(py, "tags"))?;
+            for tag_name in tag_names.try_iter()? {
+                let tag_name: String = tag_name?.extract()?;
+                let Some(compiler) = tags.get_item(&tag_name).ok() else {
+                    return Err(ImproperlyConfigured::new_err(format!(
+                        "isolated_tags names the tag '{tag_name}', which the template library \
+                         '{library_name}' doesn't register."
+                    )));
+                };
+                if compiler
+                    .getattr("rusty_requires_full_parser")
+                    .is_ok_and(|value| value.is_truthy().unwrap_or(true))
+                {
+                    return Err(ImproperlyConfigured::new_err(format!(
+                        "The '{tag_name}' tag in '{library_name}' sets \
+                         rusty_requires_full_parser, so isolated_tags can't opt it in."
+                    )));
+                }
+                compilers.push(compiler.unbind());
+            }
+        }
+        Ok(compilers)
+    }
+
     /// Helper function to unpack a loader tuple configuration.
     /// See <https://docs.djangoproject.com/en/stable/ref/templates/api/#django.template.Engine>
     fn unpack<'py>(loader: &Bound<'py, PyAny>) -> PyResult<(String, Bound<'py, PyAny>)> {
@@ -712,6 +768,9 @@ pub mod django_rusty_templates {
         pub allow_multiline_tags: bool,
         loaded_context_processors: Vec<Py<PyAny>>,
         pub libraries: HashMap<String, Py<PyAny>>,
+        /// Compilers the `isolated_tags` option opts in, as if each set
+        /// `rusty_isolated_compiler`.
+        pub isolated_compilers: Vec<Py<PyAny>>,
     }
 
     impl Trace for Engine {
@@ -720,6 +779,7 @@ pub mod django_rusty_templates {
             self.template_builtins.trace(visit)?;
             self.loaded_context_processors.trace(visit)?;
             self.libraries.trace(visit)?;
+            self.isolated_compilers.trace(visit)?;
             // GC can run during a Python callback while this lock is held.
             // Omit the busy cache for this collection instead of deadlocking.
             if let Ok(loaders) = self.template_loaders.try_lock() {
@@ -834,6 +894,7 @@ pub mod django_rusty_templates {
                 django_series: (5, 2),
                 allow_multiline_tags: true,
                 loaded_context_processors: Vec::new(),
+                isolated_compilers: Vec::new(),
                 libraries: HashMap::new(),
             }
         }
@@ -988,7 +1049,7 @@ pub mod django_rusty_templates {
         }
 
         #[new]
-        #[pyo3(signature = (dirs=None, app_dirs=false, context_processors=None, debug=false, loaders=None, string_if_invalid=String::new(), file_charset="utf-8".to_string(), libraries=None, builtins=None, autoescape=true, allow_multiline_tags=None))]
+        #[pyo3(signature = (dirs=None, app_dirs=false, context_processors=None, debug=false, loaders=None, string_if_invalid=String::new(), file_charset="utf-8".to_string(), libraries=None, builtins=None, autoescape=true, allow_multiline_tags=None, isolated_tags=None))]
         #[expect(
             clippy::too_many_lines,
             reason = "normalises every argument of Django's Engine.__init__"
@@ -1007,6 +1068,7 @@ pub mod django_rusty_templates {
             #[allow(unused_variables)] builtins: Option<Bound<'_, PyAny>>,
             autoescape: bool,
             allow_multiline_tags: Option<Bound<'_, PyAny>>,
+            isolated_tags: Option<Bound<'_, PyAny>>,
         ) -> PyResult<Self> {
             let configuration = PyDict::new(py);
             configuration.set_item(
@@ -1111,6 +1173,14 @@ pub mod django_rusty_templates {
                         .map(Bound::unbind)
                 })
                 .collect::<PyResult<Vec<_>>>()?;
+            let isolated_compilers = match isolated_tags {
+                None => Vec::new(),
+                Some(isolated_tags) => isolated_compilers(
+                    &isolated_tags,
+                    &libraries,
+                    builtins.iter().zip(&template_builtins),
+                )?,
+            };
             let version = py.import("django")?.getattr("VERSION")?;
             let django_series = (
                 version.get_item(0)?.extract()?,
@@ -1149,6 +1219,7 @@ pub mod django_rusty_templates {
                 autoescape,
                 loaded_context_processors,
                 libraries,
+                isolated_compilers,
             };
             Ok(Self {
                 engine: Gc::new(engine),
@@ -3303,6 +3374,7 @@ user = User(["Lily"])
                 None,
                 false,
                 None,
+                None,
             )
             .unwrap();
             let template_string = PyString::new(py, "Hello {{ user }}!");
@@ -3347,6 +3419,7 @@ user = User(["Lily"])
                 ),
                 None,
                 false,
+                None,
                 None,
             )
             .unwrap();
@@ -3402,6 +3475,7 @@ user = User(["Lily"])
                 None,
                 false,
                 None,
+                None,
             )
             .unwrap();
 
@@ -3455,6 +3529,7 @@ user = User(["Lily"])
                 None,
                 None,
                 false,
+                None,
                 None,
             )
             .unwrap_err();

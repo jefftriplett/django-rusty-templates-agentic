@@ -38,3 +38,4 @@ raise tests/test_isolated_compilers.py::test_syntax_diagnostic_does_not_invoke_o
 raise tests/test_syntax_diagnostics.py::test_attaching_native_diagnostic_does_not_validate_again  # calls Engine._syntax_diagnostic directly
 raise tests/test_broken_engine_check.py::*  # tests scripts/check_broken_engine.py
 raise tests/test_mutants_script.py::*  # tests scripts/mutants.py
+raise tests/test_isolated_tags_option.py::test_names_that_dont_exist_are_rejected*  # only constructs an Engine; the error comes from option validation, not rendering
