@@ -31,7 +31,7 @@ use crate::render::common::gettext;
 use crate::render::types::{
     AsBorrowedContent, Content, ContentString, Context, IntoOwnedContent, append_escaped,
 };
-use crate::render::urlize::{UrlizeRules, handle_word};
+use crate::render::urlize::{NativeLinks, UrlizeRules, handle_word};
 use crate::render::{Resolve, ResolveFailures, ResolveResult};
 use dtl_lexer::types::TemplateString;
 use unicode_normalization::UnicodeNormalization;
@@ -950,6 +950,8 @@ fn urlize_text(
     limit: Option<i64>,
     autoescape: bool,
     series: (u8, u8),
+    // Whether links can be built natively, kept for the render.
+    rules: &mut NativeLinks,
     py: Python<'_>,
 ) -> PyResult<String> {
     // `word_split_re`: runs of whitespace, `<`, `>`, `"` and `'` separate words.
@@ -958,7 +960,6 @@ fn urlize_text(
     let mut output = String::with_capacity(text.len());
     let mut links: HashMap<&str, String> = HashMap::new();
     let mut urlizer = None;
-    let mut rules: Option<Option<UrlizeRules>> = None;
     let mut rest = text;
     while !rest.is_empty() {
         let separator = rest.starts_with(is_separator);
@@ -979,9 +980,12 @@ fn urlize_text(
             output.push_str(link);
             continue;
         }
-        let rules = match rules {
-            Some(rules) => rules,
-            None => *rules.insert(urlize_rules(py, series)?),
+        if matches!(rules, NativeLinks::Unchecked) {
+            *rules = urlize_rules(py, series)?.map_or(NativeLinks::Django, NativeLinks::Rules);
+        }
+        let rules = match *rules {
+            NativeLinks::Rules(rules) => Some(rules),
+            NativeLinks::Unchecked | NativeLinks::Django => None,
         };
         let mut unescape = |text: &str| -> PyResult<String> {
             HTML_UNESCAPE
@@ -1038,6 +1042,7 @@ impl ResolveFilter for UrlizeFilter {
                 None,
                 context.autoescape,
                 context.django_series(py)?,
+                &mut context.caches().urlize_rules,
                 py,
             )?;
             return Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
@@ -1067,6 +1072,7 @@ impl ResolveFilter for UrlizetruncFilter {
                 Some(limit),
                 context.autoescape,
                 context.django_series(py)?,
+                &mut context.caches().urlize_rules,
                 py,
             )?;
             return Ok(Some(Content::String(ContentString::HtmlSafe(Cow::Owned(
@@ -1493,6 +1499,20 @@ impl ResolveFilter for WordwrapFilter {
     }
 }
 
+/// `gettext("yes,no,maybe")`, translated once per render and language.
+fn yesno_default(py: Python<'_>, context: &mut Context) -> PyResult<String> {
+    let translate = || gettext(py, "yes,no,maybe");
+    match context
+        .caches()
+        .yesno_default
+        .get_or_try_init(py, |_| translate())?
+    {
+        Some(text) => Ok(text.clone()),
+        // No active language: nothing to key the cache on.
+        None => translate(),
+    }
+}
+
 impl ResolveFilter for YesnoFilter {
     fn resolve<'t, 'py>(
         &self,
@@ -1509,7 +1529,7 @@ impl ResolveFilter for YesnoFilter {
                 match arg_content {
                     // Django uses its default for an argument of `None`.
                     Content::Py(value) if value.is_none() => {
-                        Cow::Owned(gettext(py, "yes,no,maybe")?)
+                        Cow::Owned(yesno_default(py, context)?)
                     }
                     // `arg.split(",")` works on a lazy string too.
                     Content::Py(value) if is_lazy_string(&value)? => {
@@ -1524,7 +1544,7 @@ impl ResolveFilter for YesnoFilter {
                     }
                 }
             }
-            None => Cow::Owned(gettext(py, "yes,no,maybe")?),
+            None => Cow::Owned(yesno_default(py, context)?),
         };
 
         let bits: Vec<&str> = arg_string.split(',').collect();
