@@ -2,7 +2,7 @@ import sys
 import pytest
 from inline_snapshot import snapshot
 
-from django.template import VariableDoesNotExist, TemplateSyntaxError
+from django.template import VariableDoesNotExist
 
 
 @pytest.mark.parametrize(
@@ -124,7 +124,7 @@ def test_divisibleby_zero_division_variable(assert_render_error):
     context = {"divisor": 0}
 
     rusty_message = snapshot("""\
-  × Invalid divisibility check: cannot divide by zero
+  × integer modulo by zero
    ╭────
  1 │ {{ 10|divisibleby:divisor }}
    ·                   ───┬───
@@ -151,17 +151,14 @@ def test_divisibleby_zero_division_literal(template_engine):
 
     template = "{{ 10|divisibleby:0 }}"
 
+    # Both engines compile it and fail at render, so a branch that never
+    # runs doesn't break the template.
+    t = template_engine.from_string(template)
+    with pytest.raises(ZeroDivisionError) as exc_info:
+        t.render({})
     if template_engine.name.startswith("rusty"):
-        with pytest.raises(TemplateSyntaxError) as exc_info:
-            template_engine.from_string(template)
-        assert "Invalid divisibility check: cannot divide by zero" in str(
-            exc_info.value
-        )
+        assert "integer modulo by zero" in str(exc_info.value)
     else:
-        # Django succeeds at parse time, fails at render time
-        t = template_engine.from_string(template)
-        with pytest.raises(ZeroDivisionError) as exc_info:
-            t.render({})
         assert str(exc_info.value) == django_error
 
 
@@ -218,7 +215,8 @@ def test_divisibleby_error_invalid_arg_type(assert_render_error):
             "int() argument must be a string, a bytes-like object or a real number, not 'list'"
         ),
         rusty_message=snapshot("""\
-  × Integer argument expected
+  × int() argument must be a string, a bytes-like object or a real number, not
+  │ 'list'
    ╭────
  1 │ {{ value|divisibleby:bad_arg }}
    ·                      ───┬───
@@ -238,17 +236,14 @@ def test_divisibleby_right_zero_negative_literal(template_engine):
 
     template = "{{ 10|divisibleby:-0 }}"
 
+    # Both engines compile it and fail at render, so a branch that never
+    # runs doesn't break the template.
+    t = template_engine.from_string(template)
+    with pytest.raises(ZeroDivisionError) as exc_info:
+        t.render({})
     if template_engine.name.startswith("rusty"):
-        with pytest.raises(TemplateSyntaxError) as exc_info:
-            template_engine.from_string(template)
-        assert "Invalid divisibility check: cannot divide by zero" in str(
-            exc_info.value
-        )
+        assert "integer modulo by zero" in str(exc_info.value)
     else:
-        # Django succeeds at parse time, fails at render time
-        t = template_engine.from_string(template)
-        with pytest.raises(ZeroDivisionError) as exc_info:
-            t.render({})
         assert str(exc_info.value) == django_error
 
 

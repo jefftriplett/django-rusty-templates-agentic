@@ -56,7 +56,7 @@ def test_argument_not_integer(assert_render_error):
         "invalid literal for int() with base 10: 'not an integer'"
     )
     rusty_message = snapshot("""\
-  × Couldn't convert argument (not an integer) to integer
+  × invalid literal for int() with base 10: 'not an integer'
    ╭────
  1 │ {{ foo|center:bar }}
    ·               ─┬─
@@ -133,7 +133,7 @@ def test_center_by_bool(assert_render, foo, expected):
 def test_center_argument_is_negative_float_as_string(assert_render_error):
     django_message = snapshot("invalid literal for int() with base 10: '-5.5'")
     rusty_message = snapshot("""\
-  × Couldn't convert argument (-5.5) to integer
+  × invalid literal for int() with base 10: '-5.5'
    ╭────
  1 │ {{ foo|center:bar }}
    ·               ─┬─
@@ -363,11 +363,11 @@ def test_center_argument_float_negative_inf(assert_render_error):
 def test_center_argument_float_inf_python(assert_render_error):
     django_message = snapshot("cannot convert float infinity to integer")
     rusty_message = snapshot("""\
-  × Couldn't convert float (inf) to integer
+  × cannot convert float infinity to integer
    ╭────
  1 │ {{ foo|center:width }}
    ·               ──┬──
-   ·                 ╰── here
+   ·                 ╰── argument
    ╰────
 """)
     assert_render_error(
@@ -382,11 +382,11 @@ def test_center_argument_float_inf_python(assert_render_error):
 def test_center_argument_float_negative_inf_python(assert_render_error):
     django_message = snapshot("cannot convert float infinity to integer")
     rusty_message = snapshot("""\
-  × Couldn't convert float (-inf) to integer
+  × cannot convert float infinity to integer
    ╭────
  1 │ {{ foo|center:width }}
    ·               ──┬──
-   ·                 ╰── here
+   ·                 ╰── argument
    ╰────
 """)
     assert_render_error(

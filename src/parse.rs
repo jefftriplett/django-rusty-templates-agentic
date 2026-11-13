@@ -1779,23 +1779,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_url_tag_mixed_args_kwargs() {
-        Python::initialize();
-
-        Python::attach(|py| {
-            let template = "{% url some_view_name 'foo' arg name=arg2 %}";
-            let mut parser = Parser::new(py, template.into(), Engine::empty().into(), None);
-            let error = parser.parse().unwrap_err().unwrap_parse_error();
-            assert_eq!(
-                error,
-                ParseError::MixedArgsKwargs {
-                    at: (0, template.len()).into()
-                }
-            );
-        });
-    }
-
-    #[test]
     fn test_parse_url_tag_invalid_number() {
         Python::initialize();
 

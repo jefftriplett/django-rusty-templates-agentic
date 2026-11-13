@@ -74,7 +74,7 @@ use crate::parse::builtin_filter::FilterArgument;
 use crate::types::Argument;
 use crate::types::ArgumentType;
 use dtl_lexer::types::At;
-use num_traits::{ToPrimitive, Zero};
+use num_traits::ToPrimitive;
 use pyo3::intern;
 use pyo3::prelude::*;
 
@@ -208,6 +208,55 @@ pub struct Filter {
     pub filter: FilterType,
 }
 
+/// Django's `FilterExpression.args_check`: a filter function takes the
+/// value, plus the argument when it has a parameter for one. Django counts
+/// the positional parameters of the function a decorator wraps.
+fn check_filter_arguments(
+    filter: &Bound<'_, PyAny>,
+    name: &str,
+    has_argument: bool,
+    at: At,
+) -> Result<(), ParseError> {
+    let py = filter.py();
+    let mut function = filter.clone();
+    while let Ok(Some(wrapped)) = function.getattr_opt(intern!(py, "__wrapped__")) {
+        function = wrapped;
+    }
+    let bound_self = function
+        .getattr_opt(intern!(py, "__self__"))
+        .ok()
+        .flatten()
+        .is_some_and(|owner| !owner.is_none());
+    // Not a plain function (a class, a builtin): leave it to the call.
+    let Some(parameters) = function
+        .getattr_opt(intern!(py, "__code__"))
+        .ok()
+        .flatten()
+        .and_then(|code| code.getattr(intern!(py, "co_argcount")).ok())
+        .and_then(|count| count.extract::<usize>().ok())
+    else {
+        return Ok(());
+    };
+    let parameters = parameters.saturating_sub(usize::from(bound_self));
+    let defaults = function
+        .getattr_opt(intern!(py, "__defaults__"))
+        .ok()
+        .flatten()
+        .and_then(|defaults| defaults.len().ok())
+        .unwrap_or(0);
+    let required = parameters.saturating_sub(defaults);
+    let provided = 1 + usize::from(has_argument);
+    if provided < required || provided > parameters {
+        return Err(ParseError::FilterArguments {
+            name: name.to_string(),
+            required,
+            provided,
+            at: at.into(),
+        });
+    }
+    Ok(())
+}
+
 impl Filter {
     #[expect(clippy::too_many_lines, reason = "one match arm per builtin filter")]
     pub fn new(
@@ -218,6 +267,7 @@ impl Filter {
         right: Option<Argument>,
     ) -> Result<Self, ParseError> {
         if let Some(filter) = parser.external_filters.get(parser.template.content(at)) {
+            check_filter_arguments(filter, parser.template.content(at), right.is_some(), at)?;
             return Ok(Self {
                 at,
                 all_at,
@@ -477,16 +527,7 @@ impl Filter {
                 None => return Err(ParseError::MissingArgument { at: at.into() }),
             },
             "divisibleby" => match right {
-                Some(right) => {
-                    if let ArgumentType::Int(ref n) = right.argument_type
-                        && n.is_zero()
-                    {
-                        return Err(ParseError::DivisibleByZero {
-                            at: right.at.into(),
-                        });
-                    }
-                    FilterType::DivisibleBy(DivisibleByFilter::new(at, right))
-                }
+                Some(right) => FilterType::DivisibleBy(DivisibleByFilter::new(at, right)),
                 None => return Err(ParseError::MissingArgument { at: at.into() }),
             },
             "date" => FilterType::Date(DateFilter::new(right, at)),
@@ -539,13 +580,16 @@ impl Filter {
                 None => return Err(ParseError::MissingArgument { at: at.into() }),
             },
             "yesno" => FilterType::Yesno(YesnoFilter::new(at, right)),
-            external => {
-                let external = match parser.external_filters.get(external) {
-                    Some(external) => external.clone().unbind(),
+            name => {
+                let external = match parser.external_filters.get(name) {
+                    Some(external) => {
+                        check_filter_arguments(external, name, right.is_some(), at)?;
+                        external.clone().unbind()
+                    }
                     None => {
                         return Err(ParseError::InvalidFilter {
                             at: at.into(),
-                            filter: external.to_string(),
+                            filter: name.to_string(),
                         });
                     }
                 };
