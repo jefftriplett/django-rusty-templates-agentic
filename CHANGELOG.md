@@ -42,6 +42,24 @@ Internal cleanups with no change in behavior: one comparison path for every `{% 
 
 Add an `isolated_tags` engine option so a project can mark third-party tags, such as crispy-forms' `crispy` or widget-tweaks' `render_field`, as isolated compilers from `TEMPLATES` instead of patching the packages; names that don't exist raise `ImproperlyConfigured`. ([#408](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/408))
 
+Fix a hang and two panics: a `{% for %}` over an iterator that keeps raising now raises its first error instead of running until memory runs out, `{% now %}` accepts non-ASCII characters around its format, and `{%}` is plain text. ([#420](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/420))
+
+`{% if x is 5 %}` is true for an int equal to 5, as in Django, `length` and `{% firstof %}` no longer swallow errors Django raises, and a missing attribute no longer calls `str()` on the object. ([#421](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/421))
+
+`{% with %}` and `{% block %}` no longer copy the render context, and `{% include … only %}` keeps the render's caches, so filters inside them are two to four times faster. ([#423](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/423))
+
+Match Django on parser edge cases: `{% cycle 'a'|upper 'b' %}`, `{{ x|default:1_000 }}` and `{{ s|upper |lower }}` now render, and `{{ s|upper| }}`, `{% endif x %}` and `{% for x in reversed %}` now raise `TemplateSyntaxError`. ([#425](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/425))
+
+Filter arguments from the context convert as in Django (`wordwrap` and `center` take floats and `Decimal`s, `yesno` takes a lazy string), custom filters are checked for their argument count when compiling, and a missing variable with `string_if_invalid` set skips every filter. `{{ x|divisibleby:0 }}` and a `{% url %}` mixing positional and keyword arguments now fail when rendered, not when compiled. ([#426](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/426))
+
+The context a `takes_context` simple tag receives gains `push`, `pop`, `update` as a context manager, `setdefault`, `set_upward`, `render_context`, `new` and copying. ([#427](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/427))
+
+`yesno` without an argument, printing `None` or an object, `urlize`, `{% get_current_language %}` and `make_list` on long text are 1.8 to 6 times faster. ([#428](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/428))
+
+`Engine.select_template` accepts any iterable and lists each missing name once in its error, as Django's does. ([#429](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/429))
+
+The test suite runs in about 37 seconds instead of 83, the broken-engine check runs its two modes together, and the weekly mutation workflow builds its baseline again. ([#422](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/422))
+
 ## 2026.11.3
 
 Compile Django admin's inclusion tags, `get_admin_log` and `get_flatpages` natively, so all of Django's contrib templates, including the admin change form, change list and index, compile natively. ([#318](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/318))
