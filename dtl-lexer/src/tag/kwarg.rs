@@ -1,10 +1,9 @@
 use miette::{Diagnostic, SourceSpan};
 use thiserror::Error;
-use unicode_xid::UnicodeXID;
 
 use crate::common::{
-    LexerError, NextChar, get_all_at, lex_numeric, lex_numeric_modern, lex_text, lex_translated,
-    lex_variable, text_content_at, translated_text_content_at,
+    LexerError, NextChar, get_all_at, is_word_char, lex_numeric, lex_numeric_modern, lex_text,
+    lex_translated, lex_variable, text_content_at, translated_text_content_at,
 };
 use crate::tag::TagParts;
 use crate::tag::common::TagElementTokenType;
@@ -141,7 +140,7 @@ impl<'t> TagElementKwargLexer<'t> {
         if index == 0 {
             return None;
         }
-        match self.rest.find(|c: char| !c.is_xid_continue()) {
+        match self.rest.find(|c: char| !is_word_char(c)) {
             Some(n) if n < index => return None,
             _ => {}
         }

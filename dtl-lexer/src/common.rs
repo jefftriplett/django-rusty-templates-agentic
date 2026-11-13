@@ -3,7 +3,6 @@ use std::borrow::Cow;
 use miette::{Diagnostic, SourceSpan};
 use num_bigint::BigInt;
 use thiserror::Error;
-use unicode_xid::UnicodeXID;
 
 use crate::types::At;
 use crate::{END_TRANSLATE_LEN, QUOTE_LEN, START_TRANSLATE_LEN};
@@ -58,6 +57,29 @@ pub enum LexerError {
 pub enum Number {
     Int(BigInt),
     Float(f64),
+}
+
+/// Whether Python's `\w` matches `character`.
+///
+/// That is what Django's patterns allow in variable, filter and keyword
+/// names: a letter, a number of any kind (`²` and `Ⅷ` as well as digits) or
+/// `_`. Combining marks and other connectors such as `‿` don't match, so a
+/// name can't hold a decomposed accent.
+#[must_use]
+pub fn is_word_char(character: char) -> bool {
+    if character.is_ascii() {
+        return character.is_ascii_alphanumeric() || character == '_';
+    }
+    if character.is_numeric() {
+        return true;
+    }
+    // `is_alphabetic` adds marks and enclosed letters to the letters.
+    character.is_alphabetic()
+        && !unicode_normalization::char::is_combining_mark(character)
+        && !matches!(
+            u32::from(character),
+            0x24B6..=0x24E9 | 0x1F130..=0x1F149 | 0x1F150..=0x1F169 | 0x1F170..=0x1F189
+        )
 }
 
 /// The zero of each run of ten decimal digits (category Nd) outside ASCII,
@@ -171,13 +193,7 @@ pub fn lex_variable(byte: usize, rest: &str) -> (At, usize, &str) {
             _ if in_text.is_some() => {}
             '(' if !in_translation && rest[..end].ends_with(":_") => in_translation = true,
             ')' if in_translation => in_translation = false,
-            c if !c.is_xid_continue()
-                && c != '.'
-                && c != '|'
-                && c != ':'
-                && c != '-'
-                && c != '+' =>
-            {
+            c if !is_word_char(c) && c != '.' && c != '|' && c != ':' && c != '-' && c != '+' => {
                 break;
             }
             _ => {}
@@ -285,7 +301,7 @@ pub fn lex_numeric_modern(byte: usize, rest: &str) -> (At, usize, &str) {
 }
 
 pub fn trim_variable_modern(variable: &str) -> &str {
-    match variable.find(|c: char| !c.is_xid_continue() && !matches!(c, '.' | '-' | '+')) {
+    match variable.find(|c: char| !is_word_char(c) && !matches!(c, '.' | '-' | '+')) {
         Some(end) => &variable[..end],
         None => variable,
     }
@@ -320,7 +336,7 @@ pub fn lex_numeric(byte: usize, rest: &str) -> (At, usize, &str) {
 }
 
 pub fn trim_variable(variable: &str) -> &str {
-    match variable.find(|c: char| !c.is_xid_continue() && c != '.' && c != '-') {
+    match variable.find(|c: char| !is_word_char(c) && c != '.' && c != '-') {
         Some(end) => &variable[..end],
         None => variable,
     }

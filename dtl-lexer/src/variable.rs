@@ -5,7 +5,7 @@ use unicode_xid::UnicodeXID;
 
 use crate::common::{
     LexerError, NextChar, Number, check_variable_attrs, check_variable_attrs_modern, decimal_digit,
-    lex_numeric, lex_numeric_modern, lex_text, lex_translated, lex_variable_argument,
+    is_word_char, lex_numeric, lex_numeric_modern, lex_text, lex_translated, lex_variable_argument,
     python_number, trim_variable, trim_variable_modern,
 };
 use crate::types::{At, TemplateString};
@@ -295,7 +295,7 @@ impl<'t> FilterLexer<'t> {
         self.rest = &self.rest[start..];
 
         let end = filter
-            .find(|c: char| !c.is_xid_continue())
+            .find(|c: char| !is_word_char(c))
             .unwrap_or(filter.len());
         let filter = &filter[..end];
 
