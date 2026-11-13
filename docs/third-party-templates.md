@@ -54,11 +54,18 @@ same HTML as Django for a form with text, checkbox and radio fields, with no
 fallbacks. A clean compile alone doesn't show a tag renders correctly, so the
 other tags need the same kind of check before anyone opts them in.
 
-Until a package opts in itself, a project can opt a tag in from an
-`AppConfig.ready()`:
+Until a package opts in itself, a project can opt a tag in with the
+`isolated_tags` engine option:
 
 ```python
-from widget_tweaks.templatetags import widget_tweaks
-
-widget_tweaks.register.tags["render_field"].rusty_isolated_compiler = True
+"OPTIONS": {
+    "isolated_tags": {
+        "crispy_forms_tags": ["crispy"],
+        "crispy_forms_field": ["crispy_field"],
+        "crispy_forms_utils": ["specialspaceless"],
+        "widget_tweaks": ["render_field"],
+    },
+}
 ```
+
+Library and tag names that don't exist raise `ImproperlyConfigured`.
