@@ -587,22 +587,78 @@ fn simple_tag_length(text: &str) -> Option<usize> {
     }
 }
 
-/// Django's `strip_tags` for text whose tags are all simple, or `None` to
-/// leave the text to Django. Entities are left to Django too, because its
-/// parser rewrites some of them.
+/// Whether Python's HTML parser passes every `&` in `text` through as
+/// written. It does for a complete reference (`&amp;`, `&#38;`, `&#x26;`)
+/// and for an `&` before anything but a letter or `#`. It adds a `;` to a
+/// reference without one (`AT&T ` becomes `AT&T; `), and what it does with
+/// an `&` that ends the text depends on the Python version, so those are
+/// left to it. `text` holds no tags; `last` says it ends the whole input.
+pub(super) fn ampersands_pass_through(text: &str, last: bool) -> bool {
+    let mut rest = text.as_bytes();
+    while let Some(start) = rest.iter().position(|byte| *byte == b'&') {
+        rest = &rest[start + 1..];
+        let run = match rest.first() {
+            None => return !last,
+            Some(b'#') => {
+                let digits = &rest[1..];
+                let length = match digits.first() {
+                    Some(b'x' | b'X') => {
+                        let hex = digits[1..]
+                            .iter()
+                            .take_while(|byte| byte.is_ascii_hexdigit())
+                            .count();
+                        if hex == 0 {
+                            return false;
+                        }
+                        hex + 1
+                    }
+                    _ => {
+                        let decimal = digits
+                            .iter()
+                            .take_while(|byte| byte.is_ascii_digit())
+                            .count();
+                        if decimal == 0 {
+                            return false;
+                        }
+                        decimal
+                    }
+                };
+                1 + length
+            }
+            Some(byte) if byte.is_ascii_alphabetic() => rest
+                .iter()
+                .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
+                .count(),
+            // A literal ampersand, as in `a & b`.
+            Some(_) => continue,
+        };
+        if rest.get(run) != Some(&b';') {
+            return false;
+        }
+        rest = &rest[run + 1..];
+    }
+    true
+}
+
+/// Django's `strip_tags` for text whose tags are all simple and whose
+/// ampersands the parser leaves alone, or `None` to leave the text to
+/// Django.
 fn strip_simple_tags(text: &str) -> Option<String> {
     if !text.contains('<') {
         return Some(text.to_owned());
     }
-    if text.contains('&') {
-        return None;
-    }
     let mut output = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('<') {
+        if !ampersands_pass_through(&rest[..start], false) {
+            return None;
+        }
         output.push_str(&rest[..start]);
         let length = simple_tag_length(&rest[start..])?;
         rest = &rest[start + length..];
+    }
+    if !ampersands_pass_through(rest, true) {
+        return None;
     }
     output.push_str(rest);
     Some(output)
@@ -1251,6 +1307,72 @@ fn title_ascii(text: &str) -> String {
     String::from_utf8_lossy(&title).into_owned()
 }
 
+/// `title_ascii` for text in the scripts whose case rules Rust and Python
+/// share: Latin, Greek, Cyrillic and Armenian, mixed with any uncased text.
+///
+/// `None` leaves the text to Python. That is for a letter whose titlecase
+/// isn't its uppercase (`ß` is `Ss`, `ǆ` is `ǅ`), a capital sigma, which
+/// lowercases by position, and cased letters past Armenian, where the two
+/// Unicode versions may differ.
+fn title_unicode(text: &str) -> Option<String> {
+    let mut title: Vec<char> = Vec::with_capacity(text.len());
+    let mut previous_cased = false;
+    for character in text.chars() {
+        if character.is_ascii() {
+            title.push(if previous_cased {
+                character.to_ascii_lowercase()
+            } else {
+                character.to_ascii_uppercase()
+            });
+            previous_cased = character.is_ascii_alphabetic();
+            continue;
+        }
+        let code = u32::from(character);
+        let special = matches!(
+            code,
+            0xDF | 0x1C4..=0x1CC | 0x1F1..=0x1F3 | 0x3A3 | 0x587 | 0x1F00..=0x1FFF
+        );
+        let cased = character.is_lowercase() || character.is_uppercase();
+        if special || (cased && code >= 0x590) {
+            return None;
+        }
+        if !cased {
+            title.push(character);
+        } else if previous_cased {
+            title.extend(character.to_lowercase());
+        } else {
+            title.extend(character.to_uppercase());
+        }
+        previous_cased = cased;
+    }
+    // `re.sub("([a-z])'([A-Z])", lower, ...)`, then `re.sub(r"\d([A-Z])",
+    // lower, ...)`, where `\d` is a digit of any script.
+    let mut index = 0;
+    while index + 2 < title.len() {
+        if title[index].is_ascii_lowercase()
+            && title[index + 1] == '\''
+            && title[index + 2].is_ascii_uppercase()
+        {
+            title[index + 2].make_ascii_lowercase();
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    let mut index = 0;
+    while index + 1 < title.len() {
+        if dtl_lexer::common::decimal_digit(title[index]).is_some()
+            && title[index + 1].is_ascii_uppercase()
+        {
+            title[index + 1].make_ascii_lowercase();
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    Some(title.into_iter().collect())
+}
+
 impl ResolveFilter for TitleFilter {
     fn resolve<'t, 'py>(
         &self,
@@ -1266,9 +1388,9 @@ impl ResolveFilter for TitleFilter {
         let text = content_string.as_raw();
         let title = if text.is_ascii() {
             title_ascii(text)
+        } else if let Some(title) = title_unicode(text) {
+            title
         } else {
-            // Rust has no titlecase mapping (`ß` is `Ss`, `ǆ` is `ǅ`) and
-            // lowercases a final sigma differently, so Python does these.
             TITLE_FILTER
                 .import(py, "django.template.defaultfilters", "title")?
                 .call1((text.as_ref(),))?
