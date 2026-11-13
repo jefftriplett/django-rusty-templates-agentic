@@ -17,7 +17,7 @@ use pyo3::exceptions::{PyAttributeError, PyKeyError, PyTypeError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
-use pyo3::types::{PyBool, PyDict, PyInt, PyList, PyString, PyType};
+use pyo3::types::{PyBool, PyDict, PyInt, PyList, PyString, PyTuple, PyType};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use super::common::interned_name;
@@ -215,6 +215,11 @@ pub struct Context {
     pub(crate) cycle_indices: HashMap<CycleId, usize>,
     changed_states: Vec<HashMap<CycleId, Py<PyAny>>>,
     assigned: HashSet<String>,
+    /// The scope depth at each `takes_context` call in progress: a tag
+    /// can't pop below it.
+    callback_floors: Vec<usize>,
+    /// Django's `RenderContext` for this render, made when a tag asks.
+    render_context: Option<Py<PyAny>>,
     /// Names first bound by a scoped write, with how many values that write
     /// found: a copy of the caller's value, or none.
     scope_bases: FxHashMap<String, usize>,
@@ -251,6 +256,7 @@ impl Trace for Context {
     fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.context.trace(visit)?;
         self.source.trace(visit)?;
+        self.render_context.trace(visit)?;
         self.loops.trace(visit)?;
         self.request.trace(visit)?;
         self.formatting_context.trace(visit)?;
@@ -343,6 +349,8 @@ impl Context {
             cycle_indices: HashMap::new(),
             changed_states: vec![HashMap::new()],
             assigned: HashSet::new(),
+            callback_floors: Vec::new(),
+            render_context: None,
             scope_bases: FxHashMap::default(),
             cycle_variables: HashSet::new(),
             caches: None,
@@ -449,6 +457,8 @@ impl Context {
             include_cache: self.include_cache.clone(),
             cycle_indices: self.cycle_indices.clone(),
             assigned: self.assigned.clone(),
+            callback_floors: self.callback_floors.clone(),
+            render_context: self.render_context.as_ref().map(|v| v.clone_ref(py)),
             scope_bases: self.scope_bases.clone(),
             cycle_variables: self.cycle_variables.clone(),
             changed_states: self
@@ -967,6 +977,36 @@ impl Context {
         Ok(())
     }
 
+    /// A `takes_context` tag is about to get this context.
+    pub(crate) fn enter_callback(&mut self) {
+        self.callback_floors.push(self.names.len());
+    }
+
+    /// The tag returned. A scope it pushed and never popped stays on the
+    /// stack, as the layer does in Django: the next scope to close, the
+    /// loop or `{% with %}` around the tag, pops it in place of its own.
+    pub(crate) fn leave_callback(&mut self) {
+        self.callback_floors.pop();
+    }
+
+    /// Whether a `takes_context` tag has a scope of its own to pop.
+    fn callback_scope_open(&self) -> bool {
+        self.callback_floors
+            .last()
+            .is_some_and(|floor| self.names.len() > *floor)
+    }
+
+    /// Django's `Context.set_upward`: rebind the name where it is bound,
+    /// or bind it in the current scope.
+    fn set_upward(&mut self, key: String, value: Bound<'_, PyAny>) -> PyResult<()> {
+        if self.get(value.py(), &key).is_some() {
+            self._insert(&key, value, true);
+            Ok(())
+        } else {
+            self.insert(key, value)
+        }
+    }
+
     pub fn pop_variables(&mut self) {
         if let Some(names) = self.names.pop() {
             for name in names {
@@ -975,17 +1015,18 @@ impl Context {
         }
     }
 
-    /// How many variable scopes are open, for `pop_variables_to`.
-    pub fn scope_depth(&self) -> usize {
-        self.names.len()
-    }
-
-    /// Close every scope opened since `scope_depth` returned `depth`. A tag
-    /// that fails part-way may have opened its scope or not.
-    pub fn pop_variables_to(&mut self, depth: usize) {
-        while self.names.len() > depth {
+    /// Close the newest scope, if one was opened since `scope_depth`
+    /// returned `depth`. A tag that fails part-way may not have opened its
+    /// scope.
+    pub fn pop_scope_above(&mut self, depth: usize) {
+        if self.names.len() > depth {
             self.pop_variables();
         }
+    }
+
+    /// How many variable scopes are open, for `pop_scope_above`.
+    pub fn scope_depth(&self) -> usize {
+        self.names.len()
     }
 
     pub fn push_for_loop(&mut self, py: Python<'_>, len: usize) {
@@ -1354,12 +1395,13 @@ impl PyContext {
         }
     }
 
-    fn __contains__(&self, py: Python<'_>, key: String) -> bool {
+    fn __contains__(&self, py: Python<'_>, key: String) -> PyResult<bool> {
         let guard = self
             .context
             .lock_py_attached(py)
             .expect("Mutex should not be poisoned");
-        guard.get(py, &key).is_some()
+        // As `__getitem__` resolves it, so `forloop` is found inside a loop.
+        Ok(guard.resolve_root(py, &key)?.is_some())
     }
 
     fn __getitem__<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
@@ -1403,9 +1445,14 @@ impl PyContext {
         result
     }
 
-    /// Like Django's `Context.update()`. Django pushes a layer that stays
-    /// until a later pop; here the values join the current scope.
-    fn update<'py>(&self, py: Python<'py>, other_dict: Bound<'py, PyAny>) -> PyResult<()> {
+    /// Django's `Context.update()`: a new scope holding the mapping's values.
+    /// The result is a context manager; without one, the scope lasts as
+    /// long as the scope the tag was called in.
+    fn update<'py>(
+        &self,
+        py: Python<'py>,
+        other_dict: Bound<'py, PyAny>,
+    ) -> PyResult<PyContextScope> {
         if !other_dict.hasattr("__getitem__")? {
             return Err(PyTypeError::new_err(
                 "other_dict must be a mapping (dictionary-like) object.",
@@ -1416,19 +1463,221 @@ impl PyContext {
         } else {
             other_dict
         };
+        let scope = self.open_scope(py);
         for item in other_dict.call_method0("items")?.try_iter()? {
             let (key, value): (String, Bound<'py, PyAny>) = item?.extract()?;
             self.__setitem__(py, key, value)?;
         }
+        Ok(scope)
+    }
+
+    /// Django's `Context.push()`: a new scope, holding any mappings and
+    /// keyword values given. The result is a context manager.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn push<'py>(
+        &self,
+        py: Python<'py>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<PyContextScope> {
+        let scope = self.open_scope(py);
+        let mut mappings: Vec<_> = args.iter().collect();
+        if let Some(kwargs) = kwargs {
+            mappings.push(kwargs.clone().into_any());
+        }
+        for mapping in mappings {
+            let mapping = if mapping.hasattr("dicts")? {
+                mapping.getattr("dicts")?.get_item(-1)?
+            } else {
+                mapping
+            };
+            for item in mapping.call_method0("items")?.try_iter()? {
+                let (key, value): (String, Bound<'py, PyAny>) = item?.extract()?;
+                self.__setitem__(py, key, value)?;
+            }
+        }
+        Ok(scope)
+    }
+
+    /// Django's `Context.pop()`. A tag can only pop what it pushed.
+    fn pop(&self, py: Python<'_>) -> PyResult<()> {
+        let mut guard = self
+            .context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned");
+        if !guard.callback_scope_open() {
+            drop(guard);
+            let error = py
+                .import("django.template.context")?
+                .getattr("ContextPopException")?;
+            return Err(PyErr::from_value(error.call0()?));
+        }
+        guard.pop_variables();
+        drop(guard);
         Ok(())
+    }
+
+    /// Like Django's `Context.setdefault()`.
+    fn setdefault<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        default: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        match self.__getitem__(py, key.clone()) {
+            Ok(value) => Ok(value),
+            Err(error) if error.is_instance_of::<PyKeyError>(py) => {
+                let default = default.unwrap_or_else(|| py.None().into_bound(py));
+                self.__setitem__(py, key, default.clone())?;
+                Ok(default)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Like Django's `Context.set_upward()`.
+    fn set_upward<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        value: Bound<'py, PyAny>,
+    ) -> PyResult<()> {
+        let mut guard = self
+            .context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned");
+        // As in `__setitem__`, a replaced value is dropped after the lock.
+        let replaced = guard.get(py, &key);
+        let result = guard.set_upward(key, value);
+        drop(guard);
+        drop(replaced);
+        result
+    }
+
+    /// Django's `Context.render_context`: state a tag keeps for the render.
+    #[getter]
+    fn render_context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let mut guard = self
+            .context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned");
+        if let Some(render_context) = &guard.render_context {
+            return Ok(render_context.bind(py).clone());
+        }
+        let render_context = py
+            .import("django.template.context")?
+            .getattr("RenderContext")?
+            .call0()?;
+        guard.render_context = Some(render_context.clone().unbind());
+        drop(guard);
+        Ok(render_context)
+    }
+
+    /// Django's `Context.new()`: a context with only `values`, and this
+    /// one's request and settings.
+    #[pyo3(name = "new", signature = (values=None))]
+    fn new_context(&self, py: Python<'_>, values: Option<Bound<'_, PyAny>>) -> PyResult<Self> {
+        let mut bindings: HashMap<String, Py<PyAny>> = HashMap::from([
+            (
+                "True".to_string(),
+                PyBool::new(py, true).to_owned().into_any().unbind(),
+            ),
+            (
+                "False".to_string(),
+                PyBool::new(py, false).to_owned().into_any().unbind(),
+            ),
+            ("None".to_string(), py.None()),
+        ]);
+        if let Some(values) = values.filter(|values| !values.is_none()) {
+            let values = if values.hasattr("flatten")? {
+                values.call_method0("flatten")?
+            } else {
+                values
+            };
+            for item in values.call_method0("items")?.try_iter()? {
+                let (key, value): (String, Py<PyAny>) = item?.extract()?;
+                bindings.insert(key, value);
+            }
+        }
+        let guard = self
+            .context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned");
+        let request = guard.request.as_ref().map(|request| request.clone_ref(py));
+        let mut context = Context::new(bindings, request, guard.autoescape);
+        context.use_l10n = guard.use_l10n;
+        context.use_tz = guard.use_tz;
+        context.format_values = guard.format_values;
+        context.render_stack = guard.render_stack;
+        context.number_format = Arc::clone(&guard.number_format);
+        drop(guard);
+        Ok(Self::new(context))
+    }
+
+    /// Django's copy is shallow: it shares the layers, so a value set
+    /// through the copy shows in the original.
+    fn __copy__(&self) -> Self {
+        self.clone()
     }
 
     /// Like Django's `Context.flatten()`.
     fn flatten<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let guard = self
+            .context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned");
+        let values = guard.as_dict(py)?;
+        if let Some(forloop) = guard.resolve_root(py, "forloop")?
+            && !values.contains("forloop")?
+        {
+            values.set_item("forloop", forloop)?;
+        }
+        drop(guard);
+        Ok(values)
+    }
+}
+
+impl PyContext {
+    /// Open a scope on the render's context and remember where it began.
+    fn open_scope(&self, py: Python<'_>) -> PyContextScope {
+        let mut guard = self
+            .context
+            .lock_py_attached(py)
+            .expect("Mutex should not be poisoned");
+        let depth = guard.scope_depth();
+        guard.push_scope(&[]);
+        drop(guard);
+        PyContextScope {
+            context: self.context.clone(),
+            depth,
+        }
+    }
+}
+
+/// What `push()` and `update()` return: leaving its `with` block closes the
+/// scope, as Django's `ContextDict` does.
+#[pyclass]
+pub struct PyContextScope {
+    context: Gc<Mutex<Context>>,
+    depth: usize,
+}
+
+#[pymethods]
+impl PyContextScope {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.context.trace(&visit)
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (*_args))]
+    fn __exit__(&self, py: Python<'_>, _args: &Bound<'_, PyTuple>) {
         self.context
             .lock_py_attached(py)
             .expect("Mutex should not be poisoned")
-            .as_dict(py)
+            .pop_scope_above(self.depth);
     }
 }
 
