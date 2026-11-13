@@ -68,6 +68,10 @@ A `takes_context` simple tag can read `context.template`, `context.template_name
 
 Tracing template nodes for Python's garbage collector now names every field, so a new field can't be left untraced by accident; the translation cache on `{% translate %}` and `{% blocktranslate %}` is traced too. ([#435](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/435))
 
+Variable, filter and keyword names allow exactly the characters Python's `\w` matches, as Django's patterns do: `{{ a²b }}` compiles, and a name holding a combining mark is a syntax error. ([#439](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/439))
+
+For a `takes_context` simple tag, `context.dicts` is Django's list of layers and assigning to a key of one writes to that layer, so `context.dicts[0]["name"] = value` sets a global; the context can also be iterated and has `bind_template()`. ([#440](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/440))
+
 ## 2026.11.3
 
 Compile Django admin's inclusion tags, `get_admin_log` and `get_flatpages` natively, so all of Django's contrib templates, including the admin change form, change list and index, compile natively. ([#318](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/318))
