@@ -12,7 +12,7 @@ use dtl_lexer::types::TemplateString;
 
 use super::types::{AsBorrowedContent, Content, ContentString, Context, render_int};
 use super::{Render, RenderResult, Resolve, ResolveFailures, ResolveResult};
-use crate::error::{AnnotatePyErr, RenderError};
+use crate::error::{AnnotatePyErr, LookupObject, RenderError};
 use crate::parse::{TagElement, TokenTree};
 use crate::types::Argument;
 use crate::types::ArgumentType;
@@ -381,7 +381,7 @@ impl Resolve for Variable {
                     return match failures {
                         ResolveFailures::Raise => Err(RenderError::VariableDoesNotExist {
                             key: part.to_string(),
-                            object: variable.str()?.to_string(),
+                            object: LookupObject::new(variable.clone()),
                             key_at: key_at.into(),
                             object_at: Some(object_at.into()),
                         }

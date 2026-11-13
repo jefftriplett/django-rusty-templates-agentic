@@ -77,13 +77,53 @@ pub enum RenderError {
     #[error("Failed lookup for key [{key}] in {object}")]
     VariableDoesNotExist {
         key: String,
-        object: String,
+        object: LookupObject,
         #[label("key")]
         key_at: SourceSpan,
         #[label("{object}")]
         object_at: Option<SourceSpan>,
     },
 }
+
+/// The object a lookup failed on. Django formats it only when the error is
+/// shown, and most of these errors never are: `str()` can be slow, and it
+/// runs the object's own code.
+pub struct LookupObject(Py<PyAny>);
+
+impl LookupObject {
+    pub fn new(object: Bound<'_, PyAny>) -> Self {
+        Self(object.unbind())
+    }
+}
+
+impl std::fmt::Display for LookupObject {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Python::attach(|py| {
+            let object = self.0.bind(py);
+            match object.str() {
+                Ok(text) => write!(formatter, "{}", text.to_string_lossy()),
+                Err(_) => match object.get_type().name() {
+                    Ok(name) => write!(formatter, "<{} object>", name.to_string_lossy()),
+                    Err(_) => formatter.write_str("<object>"),
+                },
+            }
+        })
+    }
+}
+
+impl std::fmt::Debug for LookupObject {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "LookupObject({self})")
+    }
+}
+
+impl PartialEq for LookupObject {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.is(&other.0)
+    }
+}
+
+impl Eq for LookupObject {}
 
 #[pyclass]
 struct KeyErrorMessage {
