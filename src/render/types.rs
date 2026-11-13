@@ -249,6 +249,9 @@ pub struct Context {
     pub(crate) cycle_indices: HashMap<CycleId, usize>,
     changed_states: Vec<HashMap<CycleId, Py<PyAny>>>,
     assigned: HashSet<String>,
+    /// Names whose first binding is a copy of the caller's value, made when
+    /// a scope first shadowed it.
+    source_copies: HashSet<String>,
     cycle_variables: HashSet<String>,
     // Created on first use: most renders never need them, and a smaller
     // `Context` is cheaper to move into and out of Python callbacks.
@@ -378,6 +381,7 @@ impl Context {
             cycle_indices: HashMap::new(),
             changed_states: vec![HashMap::new()],
             assigned: HashSet::new(),
+            source_copies: HashSet::new(),
             cycle_variables: HashSet::new(),
             caches: None,
             render_stack: RenderStack::default(),
@@ -488,6 +492,7 @@ impl Context {
             include_cache: self.include_cache.clone(),
             cycle_indices: self.cycle_indices.clone(),
             assigned: self.assigned.clone(),
+            source_copies: self.source_copies.clone(),
             cycle_variables: self.cycle_variables.clone(),
             changed_states: self
                 .changed_states
@@ -504,6 +509,15 @@ impl Context {
         }
     }
 
+    /// Hand the render's caches (date formats, translated strings) to a
+    /// context that renders in this one's place, with the same language and
+    /// time zone, so what it looks up is still there afterwards. The other
+    /// context hands them back the same way.
+    pub(crate) fn move_caches_to(&mut self, other: &mut Self) {
+        other.date_cache = std::mem::take(&mut self.date_cache);
+        other.caches = self.caches.take();
+    }
+
     /// A child scope the parent waits on, as `{% with %}` and `{% block %}`
     /// render their bodies, ended by [`Self::merge_render_state`]. State the
     /// merge hands back moves into the child instead of being copied: copying
@@ -514,7 +528,11 @@ impl Context {
         let include_cache = std::mem::take(&mut self.include_cache);
         let cycle_indices = std::mem::take(&mut self.cycle_indices);
         let changed_states = std::mem::take(&mut self.changed_states);
+        let date_cache = std::mem::take(&mut self.date_cache);
+        let caches = self.caches.take();
         let mut scoped = self.clone_scope(py);
+        scoped.date_cache = date_cache;
+        scoped.caches = caches;
         scoped.inheritance_blocks = inheritance_blocks;
         scoped.include_cache = include_cache;
         scoped.cycle_indices = cycle_indices;
@@ -907,7 +925,11 @@ impl Context {
             if replace {
                 values.pop();
             }
+            let replaced_all = values.is_empty();
             values.push(value);
+            if replaced_all {
+                self.source_copies.remove(key);
+            }
             return;
         }
         let inherited = self
@@ -921,6 +943,9 @@ impl Context {
                 // First write to a name from the caller's dict.
                 let source = self.source.as_ref()?.bind(py);
                 let value = source.get_item(key).ok().flatten()?;
+                if !replace {
+                    self.source_copies.insert(key.to_string());
+                }
                 Some(vec![value.unbind()])
             })
             .unwrap_or_default();
@@ -1041,16 +1066,46 @@ impl Context {
         if self.django_context_base.get_mut().is_some() {
             self.django_context_changes.insert(name.to_string());
         }
-        let values = self
-            .bindings_mut()
+        let bindings = self.bindings_mut();
+        let values = bindings
             .get_mut(name)
             .expect("Variable should have been pushed before");
         values.pop();
+        // Only the copy of the caller's value is left, so read the caller's
+        // dict again: it may have changed since.
+        if values.len() == 1 && self.source_copies.remove(name) {
+            self.bindings_mut().remove(name);
+        }
     }
 
     pub(crate) fn push_scope(&mut self, names: &[&str]) {
         self.names
             .push(names.iter().map(|name| (*name).to_string()).collect());
+    }
+
+    /// Open a scope that binds `values`, as Django's
+    /// `context.push(**values)` does. `pop_variables` closes it, and takes
+    /// with it whatever the body assigns in the meantime. The scope is open
+    /// even when this fails.
+    pub(crate) fn push_bindings<'a, 'py>(
+        &mut self,
+        py: Python<'py>,
+        values: impl IntoIterator<Item = (&'a str, Bound<'py, PyAny>)>,
+    ) -> PyResult<()> {
+        self.names.push(HashSet::new());
+        for (name, value) in values {
+            if let Some(live) = &self.formatting_context {
+                live.bind(py).set_item(name, &value)?;
+            }
+            // A name given twice keeps its last value.
+            let first = self
+                .names
+                .last_mut()
+                .expect("the scope was just opened")
+                .insert(name.to_string());
+            self._insert(name, value, !first);
+        }
+        Ok(())
     }
 
     pub fn pop_variables(&mut self) {
@@ -1365,6 +1420,9 @@ impl Context {
         self.cycle_indices = scoped.cycle_indices;
         self.changed_states = scoped.changed_states;
         self.include_cache = scoped.include_cache;
+        // The scope took the caches as well; see `move_caches_to`.
+        self.date_cache = scoped.date_cache;
+        self.caches = scoped.caches;
         self.autoescape = scoped.autoescape;
         self.use_l10n = scoped.use_l10n;
         self.use_tz = scoped.use_tz;
