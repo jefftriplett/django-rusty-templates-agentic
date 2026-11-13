@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyString};
 
 use super::types::Context;
 use crate::parse::TokenTree;
@@ -200,7 +200,14 @@ impl Context {
             .as_ref()
             .expect("rendering a template")
             .clone();
-        let parent = parent.getattr("template").unwrap_or(parent);
+        // The usual parent is a name, a `str` or `SafeString`. Asking it for `template` or
+        // `_render` raises and discards an `AttributeError` each time.
+        let named = parent.is_instance_of::<PyString>();
+        let parent = if named {
+            parent
+        } else {
+            parent.getattr("template").unwrap_or(parent)
+        };
         if !parent.is_truthy()? {
             let mut message = format!(
                 "Invalid template name in 'extends' tag: {}.",
@@ -224,58 +231,60 @@ impl Context {
                 .extract()?;
             return Ok(std::borrow::Cow::Owned(output));
         }
-        let parent =
-            if parent.extract::<PyRef<'_, Template>>().is_ok() || parent.hasattr("_render")? {
-                parent
-            } else {
-                if self.inheritance_history.is_empty() {
-                    self.inheritance_history.push(Gc::new(
-                        current.origin().into_pyobject(py)?.into_any().unbind(),
-                    ));
-                }
-                let engine = &self.root_template.as_ref().unwrap_or(&current).engine;
-                let cached = parent
-                    .extract::<String>()
-                    .ok()
-                    .and_then(|name| engine.cached_native_template(py, &name));
-                if let Some(cached) = cached {
-                    let origin = cached.origin();
-                    // Compare full origins, not just template names: aliases
-                    // and same-name overrides must still honor Django skips.
-                    if !self
-                        .inheritance_history
-                        .iter()
-                        .any(|previous| origin.matches(previous.bind(py)))
-                    {
-                        self.inheritance_history
-                            .push(Gc::new(origin.into_pyobject(py)?.into_any().unbind()));
-                        self.add_blocks(&current);
-                        if !cached.extends_parent() {
-                            self.add_blocks(&Gc::new(cached.clone()));
-                        }
-                        return cached
-                            .render_chain(py, self)
-                            .map(|output| std::borrow::Cow::Owned(output.into_owned()));
+        let parent = if !named
+            && (parent.extract::<PyRef<'_, Template>>().is_ok() || parent.hasattr("_render")?)
+        {
+            parent
+        } else {
+            if self.inheritance_history.is_empty() {
+                self.inheritance_history.push(Gc::new(
+                    current.origin().into_pyobject(py)?.into_any().unbind(),
+                ));
+            }
+            let engine = &self.root_template.as_ref().unwrap_or(&current).engine;
+            let cached = parent
+                .extract::<String>()
+                .ok()
+                .and_then(|name| engine.cached_native_template(py, &name));
+            if let Some(cached) = cached {
+                let origin = cached.origin();
+                // Compare full origins, not just template names: aliases
+                // and same-name overrides must still honor Django skips.
+                if !self
+                    .inheritance_history
+                    .iter()
+                    .any(|previous| origin.matches(previous.bind(py)))
+                {
+                    self.inheritance_history
+                        .push(Gc::new(origin.into_pyobject(py)?.into_any().unbind()));
+                    self.add_blocks(&current);
+                    let cached = Gc::new(cached);
+                    if !cached.extends_parent() {
+                        self.add_blocks(&cached);
                     }
+                    return cached
+                        .render_chain(py, self)
+                        .map(|output| std::borrow::Cow::Owned(output.into_owned()));
                 }
-                let skip = PyList::empty(py);
-                for origin in &self.inheritance_history {
-                    skip.append(origin.bind(py))?;
-                }
-                let loaded = py
-                    .import("django_rusty_templates.interop")?
-                    .getattr("find_template")?
-                    .call1((
-                        PyEngine {
-                            engine: engine.clone(),
-                        },
-                        parent,
-                        skip,
-                    ))?;
-                self.inheritance_history
-                    .push(Gc::new(loaded.get_item(1)?.unbind()));
-                loaded.get_item(0)?
-            };
+            }
+            let skip = PyList::empty(py);
+            for origin in &self.inheritance_history {
+                skip.append(origin.bind(py))?;
+            }
+            let loaded = py
+                .import("django_rusty_templates.interop")?
+                .getattr("find_template")?
+                .call1((
+                    PyEngine {
+                        engine: engine.clone(),
+                    },
+                    parent,
+                    skip,
+                ))?;
+            self.inheritance_history
+                .push(Gc::new(loaded.get_item(1)?.unbind()));
+            loaded.get_item(0)?
+        };
         self.add_blocks(&current);
         if let Ok(native) = parent.extract::<PyRef<'_, Template>>() {
             let native = Gc::new(native.clone());
