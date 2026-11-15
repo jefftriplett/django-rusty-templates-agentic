@@ -2,7 +2,13 @@
 
 ## Unreleased
 
+## 2026.11.5
+
+Fix the wheel build on Linux s390x, where the `stacker` crate's assembly doesn't compile; that platform now limits template recursion by depth alone. ([#443](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/443))
+
 ## 2026.11.4
+
+Tagged but not published: the wheel build failed on Linux s390x. Everything below shipped in 2026.11.5.
 
 Raise `RecursionError`, as Django does, when a template includes itself or a recursive include runs out of stack, instead of crashing the process; `center` with a huge width and `forloop.length` as a filter argument before Django 6.0 no longer abort or panic either. ([#373](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/373))
 
