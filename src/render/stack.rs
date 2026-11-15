@@ -17,6 +17,18 @@ const FRAMES_PER_RENDER: i32 = 5;
 /// tags, filters and the Python code they call.
 const RESERVE: usize = 128 * 1024;
 
+/// The stack left on this thread, where `stacker` can tell.
+#[cfg(not(target_arch = "s390x"))]
+fn remaining_stack() -> Option<usize> {
+    stacker::remaining_stack()
+}
+
+/// `stacker` isn't built for s390x.
+#[cfg(target_arch = "s390x")]
+const fn remaining_stack() -> Option<usize> {
+    None
+}
+
 /// How deep a render is, kept on its `Context` rather than per thread so
 /// greenlets that switch in the middle of a render don't share a count.
 #[derive(Clone, Copy, Debug, Default)]
@@ -43,8 +55,8 @@ impl RenderStack {
             return Err(Self::error());
         }
         self.depth += 1;
-        // `None` on platforms `stacker` can't measure; the count still applies.
-        if let Some(remaining) = stacker::remaining_stack() {
+        // `None` where the stack can't be measured; the count still applies.
+        if let Some(remaining) = remaining_stack() {
             if self.depth == 1 {
                 self.top_remaining = remaining;
             } else {
