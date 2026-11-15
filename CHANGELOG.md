@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2026.11.4
+
 Raise `RecursionError`, as Django does, when a template includes itself or a recursive include runs out of stack, instead of crashing the process; `center` with a huge width and `forloop.length` as a filter argument before Django 6.0 no longer abort or panic either. ([#373](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/373))
 
 Make `{% if %}` follow Django: exceptions from a bare condition (such as a database error in `{% if queryset %}`) are raised instead of rendering the else branch, `and`/`or` only evaluate their right side when needed, and `!=` calls `__ne__`. A missing filter argument now raises even when the filter wouldn't use it. ([#374](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/374))
