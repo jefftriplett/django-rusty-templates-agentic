@@ -2,12 +2,10 @@ mod callbacks;
 pub mod common;
 pub mod dateformat;
 pub mod filters;
+pub mod humanize;
 pub mod inheritance;
 mod l10n;
-mod language_cache;
 pub(crate) mod live;
-pub(crate) use language_cache::CatalogCache;
-pub mod humanize;
 pub mod lorem;
 mod stack;
 mod stock;
@@ -22,19 +20,12 @@ use pyo3::prelude::*;
 
 use dtl_lexer::types::TemplateString;
 
-use crate::error::PyRenderError;
+use crate::error::{PyRenderError, join_type_error};
 use types::{Content, Context};
 
 pub type ResolveResult<'t, 'py> = Result<Option<Content<'t, 'py>>, PyRenderError>;
 pub type RenderResult<'t> = Result<Cow<'t, str>, PyRenderError>;
 pub type RenderIntoResult = Result<(), PyRenderError>;
-
-pub(crate) fn join_type_error(index: usize, value: &Bound<'_, PyAny>) -> PyResult<PyErr> {
-    let name = value.get_type().name()?.to_string();
-    Ok(pyo3::exceptions::PyTypeError::new_err(format!(
-        "sequence item {index}: expected str instance, {name} found"
-    )))
-}
 
 /// Retain non-string results until joining, just as Django's `NodeList` does.
 /// Valid string rendering does not allocate a result list.

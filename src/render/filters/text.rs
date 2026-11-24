@@ -14,7 +14,7 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
 use super::number::python_float_str;
 use super::python::ResolvedArgument;
-use super::truncate::is_python_whitespace;
+use super::shared::{RAW_TEXT_ELEMENTS, format_spec_text, is_python_whitespace};
 use super::{
     ResolveFilter, SAFEDATA, SAFESTRING, Text, integer_argument, is_lazy_string, string_argument,
     string_filter_result, string_filter_text,
@@ -525,20 +525,6 @@ impl ResolveFilter for IriencodeFilter {
     }
 }
 
-/// Elements whose content Python's HTML parser reads as raw text.
-pub(super) const RAW_TEXT_ELEMENTS: [&str; 10] = [
-    "iframe",
-    "noembed",
-    "noframes",
-    "noscript",
-    "plaintext",
-    "script",
-    "style",
-    "textarea",
-    "title",
-    "xmp",
-];
-
 /// The length of the simple tag at the start of `text`, which begins with
 /// `<`: a start or end tag with an ASCII name and plain attributes, with no
 /// `<` or `>` inside it. Returns `None` for anything else, such as comments,
@@ -861,21 +847,6 @@ impl FormatSpec {
             _ => return None,
         };
         Some(self.pad(self.sign(value.is_sign_negative()), &body, true))
-    }
-}
-
-/// The argument of `stringformat` as text, when it is a string.
-pub(super) fn format_spec_text<'a>(argument: &'a Content<'_, '_>) -> Option<&'a str> {
-    match argument {
-        Content::String(
-            ContentString::String(text)
-            | ContentString::HtmlSafe(text)
-            | ContentString::HtmlUnsafe(text),
-        ) => Some(text),
-        Content::Py(object) if object.is_exact_instance_of::<PyString>() => {
-            object.cast::<PyString>().ok()?.to_str().ok()
-        }
-        _ => None,
     }
 }
 

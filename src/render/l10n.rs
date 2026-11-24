@@ -15,8 +15,8 @@ use pyo3::prelude::*;
 use pyo3::sync::{MutexExt, PyOnceLock};
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple, PyType};
 
-use super::language_cache::get_language;
 use super::types::Context;
+use crate::language_cache::get_language;
 
 static GET_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SETTINGS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();

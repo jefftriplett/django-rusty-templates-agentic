@@ -85,7 +85,7 @@ impl Render for StockNode {
                 // The active language is read natively, as the language
                 // caches read it; the rest is Django's to compute.
                 let output = if *kind == "language" {
-                    super::language_cache::get_language(py)?
+                    crate::language_cache::get_language(py)?
                 } else {
                     service.getattr("assigned_value")?.call1((kind, input))?
                 };

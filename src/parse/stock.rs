@@ -7,7 +7,7 @@ use dtl_lexer::types::At;
 use pyo3::prelude::*;
 
 use super::{EndTagType, Parser, PyParseError, Tag, TagElement, TokenTree};
-use crate::render::CatalogCache;
+use crate::language_cache::CatalogCache;
 use crate::template::django_rusty_templates::TemplateSyntaxError;
 
 #[derive(Clone, Copy)]

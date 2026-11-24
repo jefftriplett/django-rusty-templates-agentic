@@ -28,11 +28,10 @@ use pyo3::types::{
 use crate::filters::python_int;
 use crate::filters::{HumanizeFilter, HumanizeKind};
 use crate::render::ResolveResult;
-use crate::render::dateformat::{Formatter, template_localtime};
+use crate::render::dateformat::{Formatter, format_localtime, template_localtime};
 use crate::render::filters::{
     DecimalNumber, NumberOptions, ResolveFilter, Rounded, SAFEDATA, Sign, decimal_text,
-    floatformat, format_localtime, integer_argument, is_exact_safe_string, number_format,
-    python_float_repr,
+    floatformat, integer_argument, is_exact_safe_string, number_format, python_float_repr,
 };
 use crate::render::timesince::{TimeSince, TimeStrings, UnitStrings, timesince};
 use crate::render::types::{Content, ContentString, Context};

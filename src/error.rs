@@ -6,6 +6,13 @@ use thiserror::Error;
 use crate::path::RelativePathError;
 use dtl_lexer::types::{At, TemplateString};
 
+pub fn join_type_error(index: usize, value: &Bound<'_, PyAny>) -> PyResult<PyErr> {
+    let name = value.get_type().name()?.to_string();
+    Ok(pyo3::exceptions::PyTypeError::new_err(format!(
+        "sequence item {index}: expected str instance, {name} found"
+    )))
+}
+
 #[derive(Error, Debug)]
 pub enum PyRenderError {
     #[error(transparent)]
@@ -22,7 +29,7 @@ impl PyRenderError {
             Self::RenderError(err) => Ok(err),
             Self::PyErr(err) => Err(err),
             Self::InvalidTagResult(value) => {
-                Python::attach(|py| Err(crate::render::join_type_error(0, value.bind(py))?))
+                Python::attach(|py| Err(join_type_error(0, value.bind(py))?))
             }
         }
     }

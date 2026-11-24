@@ -8,7 +8,7 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyString};
 
 use super::number::{python_float_repr, python_float_str};
 use super::python::ResolvedArgument;
-use super::sequence::exact_sequence;
+use super::shared::{exact_sequence, is_exact_safe_string};
 use super::{CONDITIONAL_ESCAPE, ResolveFilter, SAFESTRING};
 use crate::filters::{
     EscapeFilter, EscapejsFilter, ForceEscapeFilter, JsonScriptFilter, SafeFilter,
@@ -107,15 +107,6 @@ impl ResolveFilter for EscapejsFilter {
         };
         Ok(Some(content))
     }
-}
-
-/// Whether `object` is exactly a `SafeString`, so `conditional_escape`
-/// returns it as it is.
-pub fn is_exact_safe_string(object: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = object.py();
-    Ok(object
-        .get_type()
-        .is(SAFESTRING.import(py, "django.utils.safestring", "SafeString")?))
 }
 
 impl ResolveFilter for ForceEscapeFilter {

@@ -17,16 +17,17 @@ mod escape;
 mod number;
 mod python;
 mod sequence;
+mod shared;
 mod text;
 mod truncate;
 
-pub use date::{DATE_FILTER, format_localtime};
-pub(crate) use escape::is_exact_safe_string;
+pub use date::DATE_FILTER;
 pub(crate) use number::{
     DecimalNumber, Rounded, Sign, decimal_text, floatformat, number_format, python_float_repr,
     python_float_str,
 };
 pub use number::{FileSizeStrings, FloatNumberFormats, NumberOptions};
+pub(crate) use shared::is_exact_safe_string;
 pub use truncate::TruncationText;
 
 static MARK_FILTER_SAFE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();

@@ -11,11 +11,9 @@ use super::ResolveFilter;
 use crate::error::AnnotatePyErr;
 use crate::filters::{DateFilter, L10nFilter, TimesinceFilter, TzFilter};
 use crate::filters::{LanguageField, LanguageInfoFilter};
-use crate::render::dateformat::{
-    Formatted, Formatter, convert_timezone, localize_date_value, template_localtime,
-};
+use crate::language_cache::LanguageInfo;
+use crate::render::dateformat::{Formatter, convert_timezone, format_date, localize_date_value};
 use crate::render::l10n::localize_number;
-use crate::render::language_cache::LanguageInfo;
 use crate::render::timesince::{TimeSince, TimeStrings, timesince};
 use crate::render::types::{AsBorrowedContent, Content, ContentString, Context};
 use crate::render::{Resolve, ResolveFailures, ResolveResult};
@@ -48,78 +46,6 @@ impl ResolveFilter for DateFilter {
             .map_err(|error| error.annotate(py, self.at, "here", template))?;
         Ok(Some(formatted))
     }
-}
-
-/// Django's `date` and `time` filters with `expects_localtime=True` applied.
-/// Formats natively where [`DateCache`](super::dateformat::DateCache) can
-/// reproduce Django exactly and otherwise calls `django_filter`.
-pub(super) fn format_date<'t, 'py>(
-    value: Content<'t, 'py>,
-    format: Option<Content<'t, 'py>>,
-    formatter: Formatter,
-    django_filter: &Bound<'py, PyAny>,
-    context: &mut Context,
-) -> PyResult<Content<'t, 'py>> {
-    let py = django_filter.py();
-    let value = value.to_py(py);
-    if value.is_none() {
-        return Ok("".as_content());
-    }
-    let value = template_localtime(value, context.use_tz, &mut context.date_cache.borrow_mut())?;
-    format_localtime(value, format, formatter, django_filter, context)
-}
-
-/// [`format_date`] for a value already in the time zone to format it in.
-pub fn format_localtime<'t, 'py>(
-    value: Bound<'py, PyAny>,
-    format: Option<Content<'t, 'py>>,
-    formatter: Formatter,
-    django_filter: &Bound<'py, PyAny>,
-    context: &mut Context,
-) -> PyResult<Content<'t, 'py>> {
-    let py = django_filter.py();
-    if let Some(format_name) = format_name(format.as_ref(), formatter)?
-        && let Some(formatted) =
-            context
-                .date_cache
-                .borrow_mut()
-                .format(&value, &format_name, formatter)?
-    {
-        return Ok(match formatted {
-            Formatted::Native(formatted) => Content::String(match context.autoescape {
-                false => ContentString::String(Cow::Owned(formatted)),
-                true => ContentString::HtmlUnsafe(Cow::Owned(formatted)),
-            }),
-            Formatted::Django(formatted) => Content::Py(formatted),
-        });
-    }
-    let formatted = match format {
-        Some(format) => django_filter.call1((value, format.to_py(py)))?,
-        None => django_filter.call1((value,))?,
-    };
-    Ok(Content::Py(formatted))
-}
-
-/// The name passed to `get_format(format or "DATE_FORMAT")`. `None` for
-/// argument types that are left to Django.
-fn format_name<'a>(
-    format: Option<&'a Content<'_, '_>>,
-    formatter: Formatter,
-) -> PyResult<Option<Cow<'a, str>>> {
-    let name = match format {
-        None => Cow::Borrowed(""),
-        Some(Content::String(format)) => Cow::Borrowed(format.as_raw().as_ref()),
-        Some(Content::Py(format)) if format.is_none() => Cow::Borrowed(""),
-        Some(Content::Py(format)) => match format.cast_exact::<PyString>() {
-            Ok(format) => format.to_cow()?,
-            Err(_) => return Ok(None),
-        },
-        Some(Content::Float(_) | Content::Int(_) | Content::Bool(_)) => return Ok(None),
-    };
-    Ok(Some(match name.is_empty() {
-        true => Cow::Borrowed(formatter.default_format()),
-        false => name,
-    }))
 }
 
 impl LanguageInfoFilter {
