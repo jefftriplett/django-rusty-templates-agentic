@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2026.11.6
+
 Break the small module cycles that deslop-please reported, by moving shared filter helpers, date formatting and the translation catalog cache down a layer; behavior is unchanged. ([#446](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/446))
 
 ## 2026.11.5

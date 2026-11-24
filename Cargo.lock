@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "django-rusty-templates"
-version = "2026.11.5"
+version = "2026.11.6"
 dependencies = [
  "dtl-core",
  "dtl-lexer",
