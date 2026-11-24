@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Break the small module cycles that deslop-please reported, by moving shared filter helpers, date formatting and the translation catalog cache down a layer; behavior is unchanged. ([#446](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/446))
+
 ## 2026.11.5
 
 Fix the wheel build on Linux s390x, where the `stacker` crate's assembly doesn't compile; that platform now limits template recursion by depth alone. ([#443](https://github.com/jefftriplett/django-rusty-templates-agentic/pull/443))
