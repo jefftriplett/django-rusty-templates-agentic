@@ -196,8 +196,9 @@ impl CatalogCache {
     }
 }
 
-impl crate::gc::Trace for CatalogCache {
-    fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+impl CatalogCache {
+    /// Visits the cached catalogs and values for Python's garbage collector.
+    pub fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         // A collection can start while a render holds the lock; the entries
         // are then reachable from that render.
         if let Ok(entries) = self.entries.try_lock() {

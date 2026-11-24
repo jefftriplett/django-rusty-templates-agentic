@@ -10,8 +10,8 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyType};
 
-use super::escape::is_exact_safe_string;
 use super::python::ResolvedArgument;
+use super::shared::is_exact_safe_string;
 use super::{ResolveFilter, SAFEDATA, integer_argument};
 use crate::error::AnnotatePyErr;
 use crate::filters::{

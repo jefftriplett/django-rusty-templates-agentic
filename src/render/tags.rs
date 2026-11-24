@@ -19,7 +19,8 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyNone, PyString, PyTu
 
 use crate::parse::Now;
 use crate::render::dateformat::Formatter;
-use crate::render::filters::{DATE_FILTER, ResolveFilter, format_localtime};
+use crate::render::dateformat::format_localtime;
+use crate::render::filters::{DATE_FILTER, ResolveFilter};
 use crate::render::lorem::{COMMON_WORDS, paragraphs, words};
 use dtl_lexer::tag::lorem::LoremMethod;
 use dtl_lexer::types::{At, TemplateString};

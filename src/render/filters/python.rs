@@ -7,12 +7,11 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDateTime, PyString};
 
-use super::date::format_date;
 use super::{MARK_FILTER_SAFE, ResolveFilter, SAFEDATA};
 use crate::error::PyRenderError;
 use crate::filters::{DjangoFilter, ExternalFilter, PprintFilter};
 use crate::render::common::unescape_literal;
-use crate::render::dateformat::{Formatter, template_localtime};
+use crate::render::dateformat::{Formatter, format_date, template_localtime};
 use crate::render::types::{AsBorrowedContent, Content, ContentString, Context};
 use crate::render::{Resolve, ResolveFailures, ResolveResult};
 use crate::types::ArgumentType;

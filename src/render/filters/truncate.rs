@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 
-use super::text::RAW_TEXT_ELEMENTS;
+use super::shared::{RAW_TEXT_ELEMENTS, is_python_whitespace};
 use super::{ResolveFilter, Text, integer_argument, string_filter_result, string_filter_text};
 use crate::filters::{
     TruncateCharsFilter, TruncateCharsHtmlFilter, TruncateWordsFilter, TruncateWordsHtmlFilter,
@@ -678,12 +678,6 @@ impl ResolveFilter for TruncateCharsFilter {
         }
         self.django.call(variable, argument, py, context)
     }
-}
-
-/// Whitespace as Python's `str.split()` sees it: Unicode `White_Space` plus
-/// the information separators U+001C to U+001F.
-pub(super) fn is_python_whitespace(character: char) -> bool {
-    character.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&character)
 }
 
 /// `Truncator(text).words(length, truncate=" …")`: the first `length` words

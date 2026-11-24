@@ -11,8 +11,7 @@ use pyo3::types::{
     PyDict, PyFloat, PyInt, PyList, PyRange, PySequence, PySlice, PyString, PyTuple,
 };
 
-use super::escape::is_exact_safe_string;
-use super::text::format_spec_text;
+use super::shared::{exact_sequence, format_spec_text, is_exact_safe_string};
 use super::{
     CONDITIONAL_ESCAPE, MARK_FILTER_SAFE, ResolveFilter, SAFEDATA, SAFESTRING, string_filter_text,
 };
@@ -575,24 +574,6 @@ impl ResolveFilter for RandomFilter {
 /// Nesting beyond this goes to Django, which raises `RecursionError` for
 /// lists that contain themselves.
 const MAX_LIST_DEPTH: usize = 100;
-
-/// The items of an exact list or tuple. Subclasses and other iterables
-/// return `None`, leaving them to Django.
-pub(super) fn exact_sequence<'py>(value: &Bound<'py, PyAny>) -> Option<Vec<Bound<'py, PyAny>>> {
-    if value.is_exact_instance_of::<PyList>() {
-        value
-            .cast::<PyList>()
-            .ok()
-            .map(|list| list.iter().collect())
-    } else if value.is_exact_instance_of::<PyTuple>() {
-        value
-            .cast::<PyTuple>()
-            .ok()
-            .map(|tuple| tuple.iter().collect())
-    } else {
-        None
-    }
-}
 
 /// Django's `list_formatter`: each item becomes an indented `<li>`, and a
 /// list or tuple right after an item becomes its nested `<ul>`. Returns

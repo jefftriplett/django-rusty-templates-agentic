@@ -15,6 +15,7 @@
 //! does. Specifiers the value lacks, and offsets with seconds in `r`, go to
 //! `django.utils.dateformat` with the already resolved format.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt::Write;
@@ -31,9 +32,9 @@ use pyo3::{PyTraverseError, PyVisit};
 
 use crate::filters::TzConversion;
 use crate::gc::Trace;
-use crate::render::Content;
+use crate::language_cache::active_catalog;
 use crate::render::common::gettext;
-use crate::render::language_cache::active_catalog;
+use crate::render::types::{AsBorrowedContent, Content, ContentString, Context};
 
 static DATEFORMAT_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static DATEFORMAT_TIME_FORMAT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -171,7 +172,7 @@ const NAME_CATALOGS: usize = 8;
 /// are keyed by the catalog `gettext` uses, like [`CatalogCache`], so a newly
 /// activated language or reloaded translations miss instead of going stale.
 ///
-/// [`CatalogCache`]: super::language_cache::CatalogCache
+/// [`CatalogCache`]: crate::language_cache::CatalogCache
 static SHARED_NAMES: Mutex<Vec<CatalogNames>> = Mutex::new(Vec::new());
 
 impl Name {
@@ -1074,4 +1075,76 @@ fn iso_week(date: Date) -> (i32, u8) {
             u8::try_from(week).expect("an ISO week is between 1 and 53"),
         )
     }
+}
+
+/// Django's `date` and `time` filters with `expects_localtime=True` applied.
+/// Formats natively where [`DateCache`] can
+/// reproduce Django exactly and otherwise calls `django_filter`.
+pub fn format_date<'t, 'py>(
+    value: Content<'t, 'py>,
+    format: Option<Content<'t, 'py>>,
+    formatter: Formatter,
+    django_filter: &Bound<'py, PyAny>,
+    context: &mut Context,
+) -> PyResult<Content<'t, 'py>> {
+    let py = django_filter.py();
+    let value = value.to_py(py);
+    if value.is_none() {
+        return Ok("".as_content());
+    }
+    let value = template_localtime(value, context.use_tz, &mut context.date_cache.borrow_mut())?;
+    format_localtime(value, format, formatter, django_filter, context)
+}
+
+/// [`format_date`] for a value already in the time zone to format it in.
+pub fn format_localtime<'t, 'py>(
+    value: Bound<'py, PyAny>,
+    format: Option<Content<'t, 'py>>,
+    formatter: Formatter,
+    django_filter: &Bound<'py, PyAny>,
+    context: &mut Context,
+) -> PyResult<Content<'t, 'py>> {
+    let py = django_filter.py();
+    if let Some(format_name) = format_name(format.as_ref(), formatter)?
+        && let Some(formatted) =
+            context
+                .date_cache
+                .borrow_mut()
+                .format(&value, &format_name, formatter)?
+    {
+        return Ok(match formatted {
+            Formatted::Native(formatted) => Content::String(match context.autoescape {
+                false => ContentString::String(Cow::Owned(formatted)),
+                true => ContentString::HtmlUnsafe(Cow::Owned(formatted)),
+            }),
+            Formatted::Django(formatted) => Content::Py(formatted),
+        });
+    }
+    let formatted = match format {
+        Some(format) => django_filter.call1((value, format.to_py(py)))?,
+        None => django_filter.call1((value,))?,
+    };
+    Ok(Content::Py(formatted))
+}
+
+/// The name passed to `get_format(format or "DATE_FORMAT")`. `None` for
+/// argument types that are left to Django.
+fn format_name<'a>(
+    format: Option<&'a Content<'_, '_>>,
+    formatter: Formatter,
+) -> PyResult<Option<Cow<'a, str>>> {
+    let name = match format {
+        None => Cow::Borrowed(""),
+        Some(Content::String(format)) => Cow::Borrowed(format.as_raw().as_ref()),
+        Some(Content::Py(format)) if format.is_none() => Cow::Borrowed(""),
+        Some(Content::Py(format)) => match format.cast_exact::<PyString>() {
+            Ok(format) => format.to_cow()?,
+            Err(_) => return Ok(None),
+        },
+        Some(Content::Float(_) | Content::Int(_) | Content::Bool(_)) => return Ok(None),
+    };
+    Ok(Some(match name.is_empty() {
+        true => Cow::Borrowed(formatter.default_format()),
+        false => name,
+    }))
 }

@@ -340,6 +340,12 @@ trace_fields! {
     parse::FirstOf { vars; asvar }
 }
 
+impl Trace for crate::language_cache::CatalogCache {
+    fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        self.traverse(visit)
+    }
+}
+
 impl Trace for parse::PythonNode {
     fn trace(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         let Self(node) = self;

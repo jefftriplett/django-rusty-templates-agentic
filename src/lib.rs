@@ -19,6 +19,7 @@ macro_rules! todo {
 mod error;
 mod filters;
 mod gc;
+mod language_cache;
 mod loaders;
 mod parse;
 mod path;
